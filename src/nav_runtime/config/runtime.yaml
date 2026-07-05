@@ -1,0 +1,11 @@
+nav_runtime:
+  ros__parameters:
+    workspace_dir: ""
+    script_dir: ""
+    command_topic: "/nav/command_json"
+    legacy_command_topic: "/nav_command_json"
+    status_topic: "/nav/runtime_status"
+    result_topic: "/nav/command_result"
+    status_period_sec: 1.0
+    process_wait_sec: 3.0
+    stop_timeout_sec: 20.0

@@ -1,0 +1,849 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Navigation 测试面板</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --text: #17202a;
+        --muted: #687383;
+        --line: #d8dee8;
+        --accent: #126b5f;
+        --accent-strong: #0c4f46;
+        --danger: #b42318;
+        --warn: #b54708;
+        --ok: #067647;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          "Noto Sans CJK SC",
+          "Microsoft YaHei",
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        font-size: 14px;
+        letter-spacing: 0;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) repeat(5, minmax(120px, 180px));
+        gap: 12px;
+        align-items: center;
+        padding: 14px 18px;
+        background: #ffffff;
+        border-bottom: 1px solid var(--line);
+        position: sticky;
+        top: 0;
+        z-index: 2;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 650;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(320px, 420px) minmax(420px, 1fr);
+        gap: 16px;
+        padding: 16px;
+      }
+
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+      }
+
+      section + section {
+        margin-top: 16px;
+      }
+
+      h2 {
+        margin: 0 0 12px;
+        font-size: 15px;
+        font-weight: 650;
+      }
+
+      label {
+        display: block;
+        margin: 10px 0 5px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      input,
+      select,
+      button {
+        width: 100%;
+        min-height: 36px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        font: inherit;
+      }
+
+      input,
+      select {
+        padding: 0 10px;
+        background: #fff;
+        color: var(--text);
+      }
+
+      button {
+        padding: 0 12px;
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        cursor: pointer;
+        font-weight: 600;
+      }
+
+      button.secondary {
+        background: #ffffff;
+        color: var(--accent-strong);
+        border-color: #8bb8b2;
+      }
+
+      button.danger {
+        background: var(--danger);
+        border-color: var(--danger);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: wait;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .row-4 {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      .metric {
+        min-height: 54px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fbfcfd;
+      }
+
+      .metric span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .metric strong {
+        display: block;
+        margin-top: 5px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .path-list,
+      pre {
+        width: 100%;
+        min-height: 140px;
+        max-height: 280px;
+        overflow: auto;
+        margin: 0;
+        padding: 10px;
+        background: #111827;
+        color: #e5e7eb;
+        border-radius: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+
+      .cloud-wrap {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        min-height: 260px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        overflow: hidden;
+        background: #0f172a;
+      }
+
+      #pointCloudCanvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      .cloud-info {
+        position: absolute;
+        left: 10px;
+        top: 10px;
+        max-width: calc(100% - 20px);
+        padding: 6px 8px;
+        border-radius: 6px;
+        background: rgba(15, 23, 42, 0.82);
+        color: #e5e7eb;
+        font-size: 12px;
+        line-height: 1.4;
+        pointer-events: none;
+      }
+
+      .cloud-legend {
+        position: absolute;
+        right: 10px;
+        top: 10px;
+        display: grid;
+        gap: 5px;
+        padding: 7px 8px;
+        border-radius: 6px;
+        background: rgba(15, 23, 42, 0.82);
+        color: #e5e7eb;
+        font-size: 12px;
+        pointer-events: none;
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
+      }
+
+      .legend-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        display: inline-block;
+      }
+
+      .notice {
+        min-height: 36px;
+        margin-top: 12px;
+        color: var(--muted);
+      }
+
+      .ok {
+        color: var(--ok);
+      }
+
+      .warn {
+        color: var(--warn);
+      }
+
+      .bad {
+        color: var(--danger);
+      }
+
+      @media (max-width: 980px) {
+        header,
+        main,
+        .status-grid,
+        .row-4 {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Navigation 测试面板</h1>
+      <div class="metric"><span>ROS</span><strong id="rosState">未知</strong></div>
+      <div class="metric"><span>runtime</span><strong id="runtimeState">未知</strong></div>
+      <div class="metric"><span>模式</span><strong id="modeState">auto</strong></div>
+      <div class="metric"><span>路径点</span><strong id="pathCount">0</strong></div>
+      <div class="metric"><span>点云</span><strong id="cloudCount">0</strong></div>
+    </header>
+
+    <main>
+      <div>
+        <section>
+          <h2>建图</h2>
+          <label for="mapName">地图名</label>
+          <input id="mapName" value="test_scene1" />
+          <label for="commandMode">命令模式</label>
+          <select id="commandMode">
+            <option value="auto">auto</option>
+            <option value="topic">topic</option>
+            <option value="script">script</option>
+          </select>
+          <div class="actions">
+            <button id="startMapping">开始建图</button>
+            <button id="stopMapping" class="danger">停止</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>地图</h2>
+          <label for="mapSelect">场景目录</label>
+          <select id="mapSelect"></select>
+          <div class="actions">
+            <button id="refreshMaps" class="secondary">刷新</button>
+            <button id="startLocalization">加载地图</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>重定位</h2>
+          <div class="row-4">
+            <div><label for="initialX">x</label><input id="initialX" value="0" /></div>
+            <div><label for="initialY">y</label><input id="initialY" value="0" /></div>
+            <div><label for="initialZ">z</label><input id="initialZ" value="0" /></div>
+            <div><label for="initialYaw">yaw</label><input id="initialYaw" value="0" /></div>
+          </div>
+          <div class="actions">
+            <button id="sendInitialpose">发布 initialpose</button>
+            <button id="cancelNav" class="danger">停止导航</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>目标点</h2>
+          <div class="row-4">
+            <div><label for="goalX">x</label><input id="goalX" value="1" /></div>
+            <div><label for="goalY">y</label><input id="goalY" value="0" /></div>
+            <div><label for="goalZ">z</label><input id="goalZ" value="0" /></div>
+            <div><label for="goalYaw">yaw</label><input id="goalYaw" value="0" /></div>
+          </div>
+          <div class="actions">
+            <button id="sendGoal">发送目标</button>
+            <button id="refreshStatus" class="secondary">刷新状态</button>
+          </div>
+          <div id="notice" class="notice"></div>
+        </section>
+      </div>
+
+      <div>
+        <section>
+          <h2>状态</h2>
+          <div class="status-grid">
+            <div class="metric"><span>建图</span><strong id="mappingStatus">-</strong></div>
+            <div class="metric"><span>导航</span><strong id="navigationStatus">-</strong></div>
+            <div class="metric"><span>机器人</span><strong id="robotPose">-</strong></div>
+            <div class="metric"><span>命令</span><strong id="commandResult">-</strong></div>
+          </div>
+        </section>
+
+        <section>
+          <h2>点云</h2>
+          <div class="cloud-wrap">
+            <canvas id="pointCloudCanvas"></canvas>
+            <div id="cloudInfo" class="cloud-info">等待 PCD 文件</div>
+            <div id="cloudLegend" class="cloud-legend"></div>
+          </div>
+        </section>
+
+        <section>
+          <h2>路径</h2>
+          <pre id="pathPreview" class="path-list">[]</pre>
+        </section>
+
+        <section>
+          <h2>日志</h2>
+          <pre id="logs">等待日志</pre>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let latestState = null;
+      let latestPcdView = null;
+      let pcdViewScene = "";
+      let pcdViewLoadingScene = "";
+      let cloudDragging = false;
+      let cloudLastPointer = null;
+      const pcdLayerStyle = {
+        map: { color: "#f97316", label: "map.pcd" },
+        ground: { color: "#22c55e", label: "ground" },
+        base_footprint_fill: { color: "#ff2bd6", label: "base_footprint_fill" },
+      };
+      const cloudCamera = {
+        yaw: 0.72,
+        pitch: 0.68,
+        zoom: 1.0,
+      };
+
+      async function api(path, options = {}) {
+        const response = await fetch(path, {
+          headers: { "Content-Type": "application/json" },
+          ...options,
+        });
+        const data = await response.json();
+        if (!response.ok || data.ok === false || data.success === false) {
+          throw new Error(data.error || data.message || "请求失败");
+        }
+        return data;
+      }
+
+      function numberValue(id) {
+        const value = Number($(id).value);
+        if (!Number.isFinite(value)) throw new Error(`${id} 不是数字`);
+        return value;
+      }
+
+      function setNotice(message, type = "") {
+        $("notice").className = `notice ${type}`;
+        $("notice").textContent = message;
+      }
+
+      async function runButton(button, task) {
+        button.disabled = true;
+        try {
+          const result = await task();
+          setNotice(result.message || result.output || "操作已提交", "ok");
+          await refreshStatus();
+        } catch (error) {
+          setNotice(error.message, "bad");
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      async function refreshMaps() {
+        const data = await api("/api/maps");
+        const select = $("mapSelect");
+        const previous = select.value;
+        select.innerHTML = "";
+        for (const item of data.maps) {
+          const option = document.createElement("option");
+          option.value = item.name;
+          option.textContent = `${item.name}  重定位:${item.has_map ? "是" : "否"}  规划:${item.has_terrain_map ? "是" : "否"}  ground:${item.has_ground ? "是" : "否"}`;
+          select.appendChild(option);
+        }
+        const optionValues = [...select.options].map((option) => option.value);
+        if (previous && optionValues.includes(previous)) {
+          select.value = previous;
+        } else if (optionValues.includes($("mapName").value)) {
+          select.value = $("mapName").value;
+        }
+        await syncPcdViewToSelectedMap(true);
+      }
+
+      async function loadPcdView(sceneName) {
+        if (!sceneName || sceneName === pcdViewScene || sceneName === pcdViewLoadingScene) return;
+        pcdViewLoadingScene = sceneName;
+        try {
+          const data = await api(`/api/pcd-view?map_name=${encodeURIComponent(sceneName)}`);
+          latestPcdView = data.pcd_view;
+          pcdViewScene = sceneName;
+          if (latestState) renderState(latestState);
+        } finally {
+          pcdViewLoadingScene = "";
+        }
+      }
+
+      async function syncPcdViewToSelectedMap(force = false) {
+        const sceneName = $("mapSelect").value || $("mapName").value.trim();
+        if (!sceneName) return;
+        if (force) pcdViewScene = "";
+        await loadPcdView(sceneName);
+      }
+
+      async function refreshStatus() {
+        const data = await api("/api/status");
+        renderState(data);
+      }
+
+      function renderState(data) {
+        latestState = data;
+        syncPcdViewToSelectedMap().catch((error) => setNotice(error.message, "bad"));
+        const ros = data.ros || {};
+        const runtime = data.runtime || {};
+        const mapping = runtime.mapping_status || {};
+        const navigation = runtime.navigation_status || {};
+        const command = ros.command_result || {};
+        const path = ros.global_path || {};
+        const pose = ros.robot_pose || {};
+        const cloud = ros.point_cloud || {};
+        const pcdPointCount = latestPcdView
+          ? latestPcdView.layers.reduce((total, layer) => total + (layer.sample_count || 0), 0)
+          : 0;
+        const pcdTotalCount = latestPcdView
+          ? latestPcdView.layers.reduce((total, layer) => total + (layer.count || 0), 0)
+          : 0;
+
+        $("rosState").textContent = ros.ros_available ? "可用" : "未连接";
+        $("rosState").className = ros.ros_available ? "ok" : "bad";
+        $("runtimeState").textContent = ros.runtime_seen ? "在线" : "未发现";
+        $("runtimeState").className = ros.runtime_seen ? "ok" : "warn";
+        $("modeState").textContent = $("commandMode").value;
+        $("pathCount").textContent = String(path.count || 0);
+        $("cloudCount").textContent = pcdTotalCount
+          ? `${pcdPointCount}/${pcdTotalCount}`
+          : `${cloud.sample_count || 0}/${cloud.count || 0}`;
+        $("mappingStatus").textContent = mapping.stage || (mapping.running ? "running" : "idle");
+        $("navigationStatus").textContent = navigation.stage || (navigation.running ? "running" : "idle");
+        $("robotPose").textContent = pose.x === undefined ? "-" : `${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, ${pose.yaw.toFixed(2)}`;
+        $("commandResult").textContent = command.code || command.message || "-";
+        $("pathPreview").textContent = JSON.stringify(path.points || [], null, 2);
+        drawPointCloud(latestPcdView, cloud, pose, path.points || []);
+        const logGroups = runtime.logs || {};
+        const lines = [
+          "mapping:",
+          ...(logGroups.mapping || []),
+          "",
+          "navigation:",
+          ...(logGroups.navigation || []),
+          "",
+          "runtime:",
+          ...(logGroups.runtime || []),
+        ];
+        $("logs").textContent = lines.join("\n");
+      }
+
+      function drawPointCloud(pcdView, liveCloud, pose, pathPoints) {
+        const canvas = $("pointCloudCanvas");
+        const wrap = canvas.parentElement;
+        const rect = wrap.getBoundingClientRect();
+        const ratio = window.devicePixelRatio || 1;
+        const width = Math.max(320, Math.floor(rect.width));
+        const height = Math.max(220, Math.floor(rect.height));
+        if (canvas.width !== Math.floor(width * ratio) || canvas.height !== Math.floor(height * ratio)) {
+          canvas.width = Math.floor(width * ratio);
+          canvas.height = Math.floor(height * ratio);
+        }
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(0, 0, width, height);
+
+        const layers = pcdView && Array.isArray(pcdView.layers) ? pcdView.layers : [];
+        const drawableLayers = layers.filter((layer) => Array.isArray(layer.points) && layer.points.length);
+        if (!drawableLayers.length) {
+          drawGrid(ctx, width, height, 1);
+          $("cloudInfo").textContent = "等待 PCD 文件";
+          $("cloudLegend").innerHTML = "";
+          return;
+        }
+
+        const bounds = computeCloudBounds(drawableLayers);
+        const projector = createProjector(bounds, width, height);
+        drawGrid(ctx, width, height, projector.scale * cloudCamera.zoom);
+        drawAxes(ctx, projector, bounds);
+
+        const renderPoints = [];
+        for (const layer of drawableLayers) {
+          const style = pcdLayerStyle[layer.id] || { color: "#e5e7eb", label: layer.label || layer.id };
+          for (const point of layer.points) {
+            const projected = projector.project(point[0], point[1], point[2]);
+            if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) continue;
+            renderPoints.push({
+              x: projected.x,
+              y: projected.y,
+              depth: projected.depth,
+              color: style.color,
+              size: layer.id === "map" ? 2.2 : 2.8,
+            });
+          }
+        }
+
+        renderPoints.sort((a, b) => a.depth - b.depth);
+        for (const point of renderPoints) {
+          ctx.globalAlpha = 0.9;
+          ctx.fillStyle = point.color;
+          ctx.fillRect(point.x, point.y, point.size, point.size);
+        }
+        ctx.globalAlpha = 1;
+
+        if (Array.isArray(pathPoints) && pathPoints.length > 1) {
+          ctx.strokeStyle = "#facc15";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          pathPoints.forEach((point, index) => {
+            const projected = projector.project(point.x, point.y, point.z ?? bounds.centerZ);
+            if (index === 0) ctx.moveTo(projected.x, projected.y);
+            else ctx.lineTo(projected.x, projected.y);
+          });
+          ctx.stroke();
+        }
+
+        if (pose && Number.isFinite(pose.x) && Number.isFinite(pose.y)) {
+          const projected = projector.project(pose.x, pose.y, pose.z || bounds.centerZ);
+          ctx.fillStyle = "#34d399";
+          ctx.beginPath();
+          ctx.arc(projected.x, projected.y, 5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        renderCloudLegend(layers);
+        const totalSample = layers.reduce((total, layer) => total + (layer.sample_count || 0), 0);
+        const totalCount = layers.reduce((total, layer) => total + (layer.count || 0), 0);
+        $("cloudInfo").textContent =
+          `${pcdView.scene || "-"}  3D PCD  点:${totalSample}/${totalCount}`;
+      }
+
+      function computeCloudBounds(layers) {
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minY = Infinity;
+        let maxY = -Infinity;
+        let minZ = Infinity;
+        let maxZ = -Infinity;
+        for (const layer of layers) {
+          for (const point of layer.points) {
+            minX = Math.min(minX, point[0]);
+            maxX = Math.max(maxX, point[0]);
+            minY = Math.min(minY, point[1]);
+            maxY = Math.max(maxY, point[1]);
+            minZ = Math.min(minZ, point[2]);
+            maxZ = Math.max(maxZ, point[2]);
+          }
+        }
+        return {
+          minX,
+          maxX,
+          minY,
+          maxY,
+          minZ,
+          maxZ,
+          centerX: (minX + maxX) / 2,
+          centerY: (minY + maxY) / 2,
+          centerZ: (minZ + maxZ) / 2,
+          span: Math.max(maxX - minX, maxY - minY, (maxZ - minZ) * 2, 1),
+        };
+      }
+
+      function createProjector(bounds, width, height) {
+        const yawCos = Math.cos(cloudCamera.yaw);
+        const yawSin = Math.sin(cloudCamera.yaw);
+        const pitchCos = Math.cos(cloudCamera.pitch);
+        const pitchSin = Math.sin(cloudCamera.pitch);
+        const scale = (Math.min(width, height) * 0.82 * cloudCamera.zoom) / bounds.span;
+        const zScale = 1.8;
+        return {
+          scale,
+          project(x, y, z) {
+            const dx = bounds.centerX - x;
+            const dy = y - bounds.centerY;
+            const dz = (z - bounds.centerZ) * zScale;
+            const forward = dx * yawCos - dy * yawSin;
+            const left = dx * yawSin + dy * yawCos;
+            const up = dz;
+            const vertical = up * pitchCos - forward * pitchSin;
+            const depth = forward * pitchCos + up * pitchSin;
+            return {
+              x: width / 2 - left * scale,
+              y: height / 2 - vertical * scale,
+              depth,
+            };
+          },
+        };
+      }
+
+      function drawAxes(ctx, projector, bounds) {
+        const axisLength = Math.max(0.6, bounds.span * 0.16);
+        const origin = {
+          x: bounds.minX,
+          y: bounds.minY,
+          z: bounds.minZ,
+        };
+        const axes = [
+          { label: "X", color: "#ef4444", end: [origin.x + axisLength, origin.y, origin.z] },
+          { label: "Y", color: "#22c55e", end: [origin.x, origin.y + axisLength, origin.z] },
+          { label: "Z", color: "#38bdf8", end: [origin.x, origin.y, origin.z + axisLength] },
+        ];
+        const start = projector.project(origin.x, origin.y, origin.z);
+        ctx.save();
+        ctx.lineWidth = 2;
+        ctx.font = "12px system-ui, sans-serif";
+        for (const axis of axes) {
+          const end = projector.project(axis.end[0], axis.end[1], axis.end[2]);
+          ctx.strokeStyle = axis.color;
+          ctx.fillStyle = axis.color;
+          ctx.beginPath();
+          ctx.moveTo(start.x, start.y);
+          ctx.lineTo(end.x, end.y);
+          ctx.stroke();
+          ctx.fillText(axis.label, end.x + 4, end.y + 4);
+        }
+        ctx.restore();
+      }
+
+      function renderCloudLegend(layers) {
+        $("cloudLegend").innerHTML = layers
+          .map((layer) => {
+            const style = pcdLayerStyle[layer.id] || { color: "#e5e7eb", label: layer.label || layer.id };
+            const suffix = layer.missing ? "缺失" : `${layer.sample_count || 0}/${layer.count || 0}`;
+            return `<div class="legend-item"><span class="legend-dot" style="background:${style.color}"></span><span>${style.label} ${suffix}</span></div>`;
+          })
+          .join("");
+      }
+
+      function drawGrid(ctx, width, height, scale) {
+        ctx.strokeStyle = "rgba(148, 163, 184, 0.18)";
+        ctx.lineWidth = 1;
+        const gap = Math.max(20, Math.min(80, scale));
+        ctx.beginPath();
+        for (let x = width / 2; x < width; x += gap) {
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, height);
+        }
+        for (let x = width / 2; x > 0; x -= gap) {
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, height);
+        }
+        for (let y = height / 2; y < height; y += gap) {
+          ctx.moveTo(0, y);
+          ctx.lineTo(width, y);
+        }
+        for (let y = height / 2; y > 0; y -= gap) {
+          ctx.moveTo(0, y);
+          ctx.lineTo(width, y);
+        }
+        ctx.stroke();
+      }
+
+      $("startMapping").onclick = () =>
+        runButton($("startMapping"), async () => {
+          const result = await api("/api/mapping/start", {
+            method: "POST",
+            body: JSON.stringify({
+              map_name: $("mapName").value,
+              mode: $("commandMode").value,
+            }),
+          });
+          await refreshMaps();
+          await syncPcdViewToSelectedMap(true);
+          return result;
+        });
+
+      $("stopMapping").onclick = () =>
+        runButton($("stopMapping"), async () => {
+          const result = await api("/api/mapping/stop", { method: "POST", body: "{}" });
+          await refreshMaps();
+          await syncPcdViewToSelectedMap(true);
+          return result;
+        });
+
+      $("refreshMaps").onclick = () => runButton($("refreshMaps"), refreshMaps);
+
+      $("startLocalization").onclick = () =>
+        runButton($("startLocalization"), async () => {
+          const result = await api("/api/localization/start", {
+            method: "POST",
+            body: JSON.stringify({
+              map_name: $("mapSelect").value,
+              mode: $("commandMode").value,
+            }),
+          });
+          await syncPcdViewToSelectedMap(true);
+          return result;
+        });
+
+      $("sendInitialpose").onclick = () =>
+        runButton($("sendInitialpose"), () =>
+          api("/api/localization/initialpose", {
+            method: "POST",
+            body: JSON.stringify({
+              x: numberValue("initialX"),
+              y: numberValue("initialY"),
+              z: numberValue("initialZ"),
+              yaw: numberValue("initialYaw"),
+              frame_id: "map",
+            }),
+          }),
+        );
+
+      $("sendGoal").onclick = () =>
+        runButton($("sendGoal"), () =>
+          api("/api/navigation/goal", {
+            method: "POST",
+            body: JSON.stringify({
+              x: numberValue("goalX"),
+              y: numberValue("goalY"),
+              z: numberValue("goalZ"),
+              yaw: numberValue("goalYaw"),
+              frame_id: "map",
+            }),
+          }),
+        );
+
+      $("cancelNav").onclick = () =>
+        runButton($("cancelNav"), () => api("/api/navigation/cancel", { method: "POST", body: "{}" }));
+
+      $("refreshStatus").onclick = () => runButton($("refreshStatus"), refreshStatus);
+      $("commandMode").onchange = () => {
+        $("modeState").textContent = $("commandMode").value;
+      };
+      $("mapSelect").onchange = () => {
+        pcdViewScene = "";
+        loadPcdView($("mapSelect").value).catch((error) => setNotice(error.message, "bad"));
+      };
+      $("mapName").onchange = () => {
+        if ($("mapName").value.trim() === $("mapSelect").value) {
+          syncPcdViewToSelectedMap(true).catch((error) => setNotice(error.message, "bad"));
+        }
+      };
+
+      $("pointCloudCanvas").addEventListener("pointerdown", (event) => {
+        cloudDragging = true;
+        cloudLastPointer = { x: event.clientX, y: event.clientY };
+        $("pointCloudCanvas").setPointerCapture(event.pointerId);
+      });
+      $("pointCloudCanvas").addEventListener("pointermove", (event) => {
+        if (!cloudDragging || !cloudLastPointer) return;
+        const dx = event.clientX - cloudLastPointer.x;
+        const dy = event.clientY - cloudLastPointer.y;
+        cloudCamera.yaw += dx * 0.008;
+        cloudCamera.pitch = Math.max(0.15, Math.min(1.45, cloudCamera.pitch + dy * 0.006));
+        cloudLastPointer = { x: event.clientX, y: event.clientY };
+        if (latestState) renderState(latestState);
+      });
+      $("pointCloudCanvas").addEventListener("pointerup", () => {
+        cloudDragging = false;
+        cloudLastPointer = null;
+      });
+      $("pointCloudCanvas").addEventListener("wheel", (event) => {
+        event.preventDefault();
+        cloudCamera.zoom = Math.max(0.35, Math.min(4.0, cloudCamera.zoom * (event.deltaY > 0 ? 0.9 : 1.1)));
+        if (latestState) renderState(latestState);
+      });
+
+      const events = new EventSource("/api/events");
+      events.onmessage = (event) => renderState(JSON.parse(event.data));
+      events.onerror = () => setNotice("事件流断开，仍可手动刷新", "warn");
+
+      refreshMaps().catch((error) => setNotice(error.message, "bad"));
+      refreshStatus().catch((error) => setNotice(error.message, "bad"));
+    </script>
+  </body>
+</html>

@@ -1,0 +1,76 @@
+# global_planner 统一参数。
+# 文件内容从示例工程的静态地图规划参数收敛而来，所有机器相关路径通过 launch 参数传入。
+
+pcl_publisher:
+  ros__parameters:
+    global_frame: "map"
+    map_rotate_around_x: 0.0
+    map_rotate_around_y: 0.0
+    map_rotate_around_z: 0.0
+    map_translate_x: 0.0
+    map_translate_y: 0.0
+    map_translate_z: 0.0
+    ground_rotate_around_x: 0.0
+    ground_rotate_around_y: 0.0
+    ground_rotate_around_z: 0.0
+    ground_translate_x: 0.0
+    ground_translate_y: 0.0
+    ground_translate_z: 0.0
+    map_down_sample: 0.2
+    ground_down_sample: 0.1
+    planground_down_sample: 0.1
+
+perception_3d_global:
+  ros__parameters:
+    global_frame: "map"
+    robot_base_frame: "base_footprint"
+    max_obstacle_distance: 9999.0
+    inscribed_radius: 0.1
+    inflation_descending_rate: 2.0
+    inflation_radius: 1.5
+    sensors_collected_frequency: 5.0
+    plugins: ["map"]
+    map:
+      plugin: "perception_3d::StaticLayer"
+      use_adaptive_connection: true
+      adaptive_connection_number: 20
+      radius_of_ground_connection: 4.1
+      intensity_search_radius: 1.0
+      intensity_search_punish_weight: 0.5
+      static_imposing_radius: 0.2
+      map_topic: "mapcloud"
+      ground_topic: "mapground"
+      support:
+        mapping_mode: false
+        enable_edge_detection: true
+        generate_static_graph: false
+
+global_planner:
+  ros__parameters:
+    turning_weight: 0.1
+    enable_detail_log: false
+    a_star_expanding_radius: 0.05
+    use_pre_graph: false
+    roi_file_path: ""
+    roi_radius: 1.0
+    roi_z_tolerance: 0.2
+
+    planground_search_radius: 0.1
+    planground_fallback_ratio: 0.3
+    planground_downsample_leaf_size: 0.2
+
+    use_hybrid_planner: true
+    hybrid_planground_bias: 15.0
+    hybrid_downsample_leaf_size: 0.15
+    hybrid_max_ground_bridge_length: 0.12
+    hybrid_max_ground_cost: 250.0
+    hybrid_min_ground_cost: 150.0
+    hybrid_detour_ratio_threshold: 4.0
+    hybrid_distance_balance_threshold: 1.5
+    hybrid_ground_path_length_penalty: 5.0
+    hybrid_detour_balance_factor_lower_bound: 0.5
+    hybrid_detour_balance_factor_upper_bound: 3.0
+
+    hybrid_edge_penalty_radius: 0.1
+    hybrid_edge_penalty_weight: 200.0
+    hybrid_edge_penalty_falloff_rate: 2.0

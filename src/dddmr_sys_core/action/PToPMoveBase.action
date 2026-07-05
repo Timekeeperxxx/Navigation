@@ -1,0 +1,10 @@
+geometry_msgs/PoseStamped target_pose
+float32 target_value
+---
+#result definition RUNNING = 0, SUCCESS = 1, FAILURE = 2
+int32 status
+string result
+---
+geometry_msgs/TransformStamped base_position
+string last_decision
+string current_decision

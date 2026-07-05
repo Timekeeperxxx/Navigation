@@ -1,0 +1,10 @@
+#goal definition
+string behavior_name
+geometry_msgs/PoseStamped target_pose
+---
+#result definition
+bool succeed
+string info
+---
+#feedback definition
+bool undergoing

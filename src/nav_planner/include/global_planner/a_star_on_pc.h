@@ -1,0 +1,141 @@
+/*
+* BSD 3-Clause License
+
+* Copyright (c) 2024, DDDMobileRobot
+
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions are met:
+
+* 1. Redistributions of source code must retain the above copyright notice, this
+*    list of conditions and the following disclaimer.
+
+* 2. Redistributions in binary form must reproduce the above copyright notice,
+*    this list of conditions and the following disclaimer in the documentation
+*    and/or other materials provided with the distribution.
+
+* 3. Neither the name of the copyright holder nor the names of its
+*    contributors may be used to endorse or promote products derived from
+*    this software without specific prior written permission.
+
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+* AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+* IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+* DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+* FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+* DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+* SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+* CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+* OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+* OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifndef A_STAR_ON_PC_H
+#define A_STAR_ON_PC_H
+
+/*For graph*/
+#include <unordered_map>
+#include <set>
+#include <queue> 
+
+/*For pcl::PointXYZ*/
+#include <pcl/common/geometry.h>
+#include <math.h>
+
+/*
+for graph
+type edge_t is defined here
+type graph_t is defined here
+*/
+
+/*For perception*/
+#include <perception_3d/perception_3d_ros.h>
+#include <global_planner/nanoflann_pcl.hpp>
+
+typedef struct {
+  unsigned int self_index;
+  float g, h, f;
+  unsigned int parent_index; 
+  bool is_closed, is_opened;
+  //@ Track consecutive ground steps for hybrid planning
+  //@ This allows the planner to penalize long sequences on ground points
+  //@ and encourage returning to planground as soon as possible
+  unsigned int consecutive_ground_steps;
+} Node_t;
+
+typedef std::pair<double, unsigned int> f_p_;
+
+class AstarList{
+  public:
+    AstarList(pcl::PointCloud<pcl::PointXYZI>::Ptr& pc_original_z_up);
+
+    void Initial();
+    void updateNode(Node_t& a_node);
+    void closeNode(Node_t& a_node);
+    float getGVal(Node_t& a_node);
+    Node_t getNode_wi_MinimumF();
+    Node_t getNode(unsigned int node_index);
+    bool isClosed(unsigned int node_index);
+    bool isOpened(unsigned int node_index);
+    bool isFrontierEmpty();
+    /*Static graph is for path planning and list*/
+    pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up_;
+    nanoflann::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree_ground_;
+  private:
+    /*
+    We handle closed list and accessory by unordered::map to get time complexity of O(1)
+    Key: node id
+    content: Node
+    */
+    std::unordered_map<unsigned int, Node_t> as_list_;
+
+    /*
+    We push back a pair <f,node_index> by the priority, hence ,the time complexity of checking minimum f is O(1)
+    */
+    //std::priority_queue<f_p_> f_priority_queue_;
+    std::set<f_p_> f_priority_set_;
+};
+
+class A_Star_on_Graph{
+
+    public:
+      A_Star_on_Graph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up, 
+        std::shared_ptr<perception_3d::Perception3D_ROS> perception_ros,
+        double a_star_expanding_radius);
+      
+      ~A_Star_on_Graph();
+      
+      void updateGraph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up);
+
+      void getPath( unsigned int start, unsigned int goal, std::vector<unsigned int>& path);
+      
+      void setupTurningWeight(double m_weight){turning_weight_ = m_weight;}
+
+    private:
+      
+      //@ kd-tree for line-of-sight
+      nanoflann::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree_lethal_;
+
+      //@ kd-tree for ground connectivity check (line-of-sight on ground)
+      nanoflann::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree_ground_los_;
+
+      pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up_;
+
+      /*Provide dynamic graph for obstacle avoidance*/
+      std::shared_ptr<perception_3d::Perception3D_ROS> perception_ros_;
+      
+      /*Create the list*/
+      AstarList* ASLS_;
+
+      //@ turning weight of the node
+      double turning_weight_;
+      
+      //@ neighborhodd expanding radius
+      double a_star_expanding_radius_;
+
+      double getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding);
+      double getPitchFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding);
+
+      bool isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius);
+};
+
+#endif // A_STAR_ON_PC_H

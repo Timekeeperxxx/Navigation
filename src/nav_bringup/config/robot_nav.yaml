@@ -1,0 +1,45 @@
+# Navigation 统一配置。
+# 这里放跨包共享的路径、坐标系、topic 和设备参数；具体算法参数仍保留在对应节点参数文件中。
+
+robot:
+  map_frame: "map"
+  base_frame: "base_footprint"
+  base_link_frame: "base_link"
+
+livox:
+  lidar_ip: "192.168.123.179"
+  host_ip: ""
+  network_interface: ""
+  publish_freq: 10.0
+  multi_topic: 0
+  xfer_format: 0
+
+paths:
+  maps_root: "/home/frankluo/Projects/Navigation/maps"
+  logs_root: "/home/frankluo/Projects/Navigation/logs"
+  runtime_root: "/home/frankluo/Projects/Navigation/runtime"
+
+topics:
+  clicked_point: "/clicked_point"
+  goal_yaw: "goal_yaw"
+  nav_start: "/nav_start"
+  nav_stop: "/nav_stop"
+  initialpose: "/initialpose"
+  global_path: "/global_path"
+  nav_status: "/nav_status"
+  lio_cloud_world: "/lio/cloud_world"
+  lio_odom: "/lio/odom"
+  terrain_map: "/terrain_map"
+  base_footprint_fill_cloud: "/base_footprint_fill_cloud"
+
+dynamic_avoidance:
+  enabled: true
+  obstacle_topic: "/nav/local_obstacles"
+  status_topic: "/nav/obstacle_status"
+  replan_request_topic: "/nav/replan_request"
+  lookahead_distance: 2.0
+  stop_distance: 0.6
+  slow_distance: 1.2
+  path_corridor_radius: 0.45
+  replan_blocked_duration: 2.0
+  sensor_timeout: 0.5

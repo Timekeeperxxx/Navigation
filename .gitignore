@@ -1,0 +1,14 @@
+build/
+install/
+log/
+logs/
+runtime/
+maps/
+launch_params_*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+*.bag
+*.db3

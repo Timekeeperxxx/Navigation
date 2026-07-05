@@ -1,0 +1,16 @@
+center_radius_trigger:
+  ros__parameters:
+    # 前进目标点坐标 (x, y, z)
+    forward_goal.x: 3.49
+    forward_goal.y: 0.5
+    forward_goal.z: -0.77
+    # 回家目标点坐标
+    home_goal.x: -0.62
+    home_goal.y: 0.11
+    home_goal.z: -0.82
+    # 坐标系
+    frame_id: "map"
+    # 点击点话题
+    clicked_point_topic: "/clicked_point"
+    # 连续检测次数
+    history_size: 3

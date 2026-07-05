@@ -1,0 +1,41 @@
+# terrain_analysis 统一参数。
+# 建图保存时默认启用动态障碍清理和地面点去重，运行期可按场景调整。
+
+terrainAnalysis:
+  ros__parameters:
+    scanVoxelSize: 0.05
+    decayTime: 5.0
+    noDecayDis: 1.75
+    clearingDis: 8.0
+    useSorting: true
+    quantileZ: 0.35
+    considerDrop: false
+    limitGroundLift: false
+    maxGroundLift: 0.15
+    clearDyObs: true
+    minDyObsDis: 0.3
+    minDyObsAngle: 0.0
+    minDyObsRelZ: -0.3
+    absDyObsRelZThre: 0.2
+    minDyObsVFOV: -28.0
+    maxDyObsVFOV: 33.0
+    minDyObsPointNum: 1
+    noDataObstacle: false
+    noDataBlockSkipNum: 0
+    minBlockPointNum: 10
+    vehicleHeight: 0.3
+    voxelPointUpdateThre: 30
+    voxelTimeUpdateThre: 1.0
+    minRelZ: -1.95
+    maxRelZ: 0.2
+    disRatioZ: 0.1
+
+save_terrain_map:
+  ros__parameters:
+    file_prefix: "terrain_map_"
+    accumulate: true
+    intensity_threshold: 0.05
+    ground_z_range: 0.1
+    ground_xy_dedup: true
+    ground_xy_leaf_size: 0.05
+    ground_z_layer_size: 0.15

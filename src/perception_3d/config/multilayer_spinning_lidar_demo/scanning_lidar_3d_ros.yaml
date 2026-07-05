@@ -1,0 +1,41 @@
+perception_3d:
+  ros__parameters:
+    global_frame: "map"
+    robot_base_frame: "base_link"
+    max_obstacle_distance: 9999.0
+    inscribed_radius: 0.5
+    inflation_descending_rate: 2.0
+    inflation_radius: 1.5
+    sensors_collected_frequency: 10.0
+    dgraph_publish_frequency: 1.0
+    plugins: ["map", "lidar"]
+    map:
+      plugin: "perception_3d::StaticLayer"
+      use_adaptive_connection: false #If true: the neighbors of node is sparse, it will automatically increase search radius.
+      adaptive_connection_number: 20
+      radius_of_ground_connection: 1.5 #If use_adaptive_connection=false, the radius search of the node is applied.
+      hollow_hole_tolerance: 16 #If there are small holes in the ground, and you want to ignore them, increase this value 
+      intensity_search_radius: 1.0 #this value is suggested to be 1.0 meters, because if it is too large, the narrow passage will be miscalculated
+      intensity_search_punish_weight: 0.1 #the weight for a node. Set this value higher means we dont like path planning cross a orphan node.
+      static_imposing_radius: 1.0
+    lidar:
+      plugin: "perception_3d::MultiLayerSpinningLidar"
+      topic: "unilidar/cloud"
+      pub_gbl_marking_for_visualization: true
+      pub_gbl_marking_frequency: 10.0
+      vertical_FOV_top: 90.0
+      vertical_FOV_bottom: -0.0
+      scan_effective_positive_start: 0.0
+      scan_effective_positive_end: 180.0
+      scan_effective_negative_start: -0.0
+      scan_effective_negative_end: -180.0
+      euclidean_cluster_extraction_tolerance: 0.1
+      euclidean_cluster_extraction_min_cluster_size: 1
+      xy_resolution: 0.05
+      height_resolution: 0.1
+      marking_height: 2.0
+      perception_window_size: 5.0 #the window for marking/clearing in meter, we dont casting to maximum range of the sensor even it is gbl map
+      segmentation_ignore_ratio: 0.5 #if a segmentation match static pc with this ratio, we ignore it. ex: a wall
+      is_local_planner: false
+      expected_sensor_time: 0.1
+      stitcher_num: 8

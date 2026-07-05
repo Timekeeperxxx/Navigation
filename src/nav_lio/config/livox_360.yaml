@@ -1,0 +1,64 @@
+/**:
+  ros__parameters:
+    lio.map.save_map: true
+    lio.map.if_filter: true
+    lio.map.save_map_dir: "map"
+    lio.map.map_name: "map.pcd"
+    lio.map.ds_size: 0.25
+    lio.map.save_interval: -1
+    lio.loop.enable: false
+    lio.loop.map_name: "map_loop.pcd"
+    lio.loop.keyframe_min_distance: 0.5
+    lio.loop.keyframe_min_gap: 80
+    lio.loop.search_radius: 5.0
+    lio.loop.icp_max_distance: 2.0
+    lio.loop.icp_score_threshold: 1.0
+    lio.loop.map_ds_size: 0.1
+
+    lio.ros.lidar_topic: "/livox/lidar"
+    lio.ros.imu_topic: "/livox/imu"
+
+    lio.sensor.lidar_type: 1
+    lio.sensor.blind: 0.01
+    lio.sensor.maxrange: 60.0
+    lio.sensor.filter_rate: 3
+    lio.sensor.enable_downsample: true
+    lio.sensor.voxel_fliter_size: 0.5
+    lio.sensor.lidar_time_offset: 0.0
+    lio.sensor.use_query_time_undistort: false
+    lio.sensor.gravity_norm: 9.7946
+    lio.sensor.imu_type: 1
+    lio.sensor.imu_na: 0.03
+    lio.sensor.imu_ng: 0.03
+    lio.sensor.imu_nba: 0.0003
+    lio.sensor.imu_nbg: 0.0003
+
+    lio.extrinsic.lidar_imu: [-0.011, -0.02329, 0.04412, 
+                              1.0, 0.0, 0.0, 
+                              0.0, 1.0, 0.0, 
+                              0.0, 0.0, 1.0]
+    lio.extrinsic.lidar_imu_roll_deg: 0.0
+    lio.extrinsic.lidar_imu_pitch_deg: 0.0
+    lio.extrinsic.lidar_imu_yaw_deg: 0.0
+    lio.extrinsic.odom_robo: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    lio.hash_map.hash_capacity: 2000000
+    lio.hash_map.vox_resolution: 0.5
+
+    lio.kf.kf_type: 0
+    lio.kf.kf_max_iterations: 4
+    lio.kf.kf_align_gravity: true
+    lio.kf.estimate_gravity: true
+    lio.kf.kf_quit_eps: 0.001
+
+    lio.output.robot: true
+    lio.output.plan_env_world: false
+    lio.output.plan_env_body: false
+    lio.output.ml_map: false
+    lio.output.planner: false
+    lio.output.map: true
+    lio.output.dense: true
+    lio.output.pub_step: 1
+    lio.output.map_preview_ds_size: 0.2
+
+    lio.eva.timer: true

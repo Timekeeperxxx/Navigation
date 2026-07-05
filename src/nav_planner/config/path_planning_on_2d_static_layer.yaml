@@ -1,0 +1,61 @@
+pcl_publisher:
+  ros__parameters:
+    global_frame: "map"
+    map_rotate_around_x: 0.0
+    map_rotate_around_y: 0.0
+    map_rotate_around_z: 0.0
+    map_translate_x: 0.0
+    map_translate_y: 0.0
+    map_translate_z: 0.0
+    ground_rotate_around_x: 0.0
+    ground_rotate_around_y: 0.0
+    ground_rotate_around_z: 0.0
+    ground_translate_x: 0.0
+    ground_translate_y: 0.0
+    ground_translate_z: 0.0
+    map_down_sample: 0.1
+    ground_down_sample: 0.8
+
+perception_3d_global:
+  ros__parameters:
+    global_frame: "map"
+    robot_base_frame: "base_link"
+    max_obstacle_distance: 9999.0
+    inscribed_radius: 0.5
+    inflation_descending_rate: 2.0
+    inflation_radius: 1.5
+    sensors_collected_frequency: 5.0
+    plugins: ["map"]
+    map:
+      plugin: "perception_3d::StaticLayer"
+      use_adaptive_connection: false #If true: the neighbors of node is sparse, it will automatically increase search radius.
+      adaptive_connection_number: 20
+      radius_of_ground_connection: 0.2
+      #If use_adaptive_connection=false, the radius search of the node is applied.
+      #This value should be 
+      intensity_search_radius: 1.0 #this value is suggested to be 1.0 meters, because if it is too large, the narrow passage will be miscalculated
+      intensity_search_punish_weight: 0.1 #the weight for a node. Set this value higher means we dont like path planning cross a orphan node.
+      static_imposing_radius: 1.5
+      map_topic: "mapcloud"
+      ground_topic: "mapground"
+      support:
+        mapping_mode: false
+          #if mapping mode is true, edge detection is automatically disabled
+        enable_edge_detection: false
+        generate_static_graph: true
+          #the connection radius will be used
+          #enable this value when using super dense ground say ground voxel size<=10 cm
+
+
+      
+global_planner:
+  ros__parameters:
+    turning_weight: 0.1 #Punish the zig-zag path
+    a_star_expanding_radius: 0.2
+    use_pre_graph: true
+      #if we want global planner to use pre-static graph, remember to set generate_static_graph to true under perception_3d::StaticLayer
+
+    #@ v25 Edge penalty parameters - penalize ground points near cloud edges
+    hybrid_edge_penalty_radius: 0.5
+    hybrid_edge_penalty_weight: 200.0
+    hybrid_edge_penalty_falloff_rate: 2.0
