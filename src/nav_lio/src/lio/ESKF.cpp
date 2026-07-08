@@ -55,7 +55,7 @@ void ESKF::SetInitialConditions(Options options, const V3& init_bg,
   g_ = gravity;
   imu_scale_ = imu_scale;
 
-  P_ = 1e-4 * M18::Identity();
+  P_ = 1e-4 * COV::Identity();
   P_.template block<3, 3>(0, 0) = 0.1 * M_PI / 180.0 * M3::Identity();   // r
 
 }
@@ -100,11 +100,6 @@ void ESKF::Update() {
 
   bg_ += dx_.template block<3, 1>(9, 0);
   ba_ += dx_.template block<3, 1>(12, 0);
-
-  if (g_kf_estimate_gravity) {
-    g_ += dx_.template block<3, 1>(15, 0);
-    g_ = g_gravity_norm * (g_.normalized());
-  }
 
   fw_R_ = R_;
   fw_p_ = p_;
@@ -205,14 +200,13 @@ bool ESKF::Predict(const IMUData& imu) {
   f_x.template block<3, 3>(3, 6) = M3::Identity() * dt;
   f_x.template block<3, 3>(6, 0) = - R_m3 * SO3::hat(acc) * dt;
   f_x.template block<3, 3>(6, 12) = - R_dt;
-  f_x.template block<3, 3>(6, 15) = M3::Identity() * dt;
   
 
   F_W f_w = F_W::Zero();
   f_w.template block<3, 3>(0, 0) = - Jr_dt;
   f_w.template block<3, 3>(6, 3) = - R_dt;                 // v -> na
-  f_w.template block<3, 3>(9, 6) = M3::Identity() * dt;    // ba
-  f_w.template block<3, 3>(12, 9) = M3::Identity() * dt;   // bg
+  f_w.template block<3, 3>(9, 6) = M3::Identity() * dt;    // bg 随机游走
+  f_w.template block<3, 3>(12, 9) = M3::Identity() * dt;   // ba 随机游走
 
   P_ = f_x * P_ * f_x.transpose() + f_w * Q_ * f_w.transpose();
 
@@ -227,13 +221,12 @@ bool ESKF::Predict(const IMUData& imu) {
 }
 
 
-const int STATE_DIM = 18;
 bool ESKF::UpdateObserve(ESKF::ObsFunc obs) {
   SO3 R_0 = R_;
 
   M6 HTVH;     // H^T * V^(-1) * H
   V6 HTVr;     // H^T * V^(-1) * residuals
-  M18 Pk, Qk;
+  COV Pk, Qk;
 
   need_converge_ = false;
   for (int iter = 0; iter < options_.num_iterations_; ++iter) {
@@ -249,10 +242,10 @@ bool ESKF::UpdateObserve(ESKF::ObsFunc obs) {
      */
     Pk = P_;
     M3 J_theta = M3::Identity() - 0.5 * SO3::hat((R_0.inverse() * R_).log_vee());
-    for(int j = 0; j < STATE_DIM; j+=3){
+    for(int j = 0; j < kStateDim; j+=3){
       Pk.block<3,3>(0, j).noalias() = J_theta * P_.block<3,3>(0, j);
     }
-    for(int j = 0; j < STATE_DIM; j+=3){
+    for(int j = 0; j < kStateDim; j+=3){
       Pk.block<3,3>(j, 0) = Pk.block<3,3>(j, 0) * J_theta.transpose();
     }
 
@@ -269,12 +262,12 @@ bool ESKF::UpdateObserve(ESKF::ObsFunc obs) {
      * residuals = (z - h(x_k))
      */
 
-    M18 Pk_inv = Pk.inverse();
+    COV Pk_inv = Pk.inverse();
     Pk_inv.block<6,6>(0,0) += HTVH;
 
     Qk = Pk_inv.inverse();
 
-    V18 error_dx = V18::Zero();
+    STATE error_dx = STATE::Zero();
     error_dx.head(6) = HTVr;
 
     dx_ = Qk * error_dx;
@@ -288,18 +281,18 @@ bool ESKF::UpdateObserve(ESKF::ObsFunc obs) {
   }
 
   // update P
-  M18 temp_cov = M18::Identity();
+  COV temp_cov = COV::Identity();
   temp_cov.block<6,6>(0,0) = HTVH;
-  P_ = (M18::Identity() - Qk * temp_cov) * Pk;
+  P_ = (COV::Identity() - Qk * temp_cov) * Pk;
 
   Pk = P_;
 
   // project P
   M3 J_theta = M3::Identity() - 0.5 * SO3::hat(dx_.template block<3, 1>(0, 0));
-  for(int j = 0; j < STATE_DIM; j+=3){
+  for(int j = 0; j < kStateDim; j+=3){
     Pk.block<3,3>(0, j).noalias() = J_theta * P_.block<3,3>(0, j);
   }
-  for(int j = 0; j < STATE_DIM; j+=3){
+  for(int j = 0; j < kStateDim; j+=3){
     Pk.block<3,3>(j, 0) = Pk.block<3,3>(j, 0) * J_theta.transpose();
   }
 

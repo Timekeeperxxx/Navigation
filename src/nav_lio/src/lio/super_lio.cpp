@@ -278,7 +278,7 @@ bool SuperLIO::kf_init(){
   }
 
   /// 100 Hz for 1 second.
-  if(imu_cout < 50){
+  if(imu_cout < 100){
     return false;
   }
 
@@ -303,7 +303,7 @@ bool SuperLIO::kf_init(){
   options.quit_eps_ = g_kf_quit_eps;
 
   float imu_scale = g_gravity_norm / mean_acce.norm();
-  kf_->SetInitialConditions(options, mean_gyro, V3::Zero(), imu_scale, ref_gravity);
+  kf_->SetInitialConditions(options, V3::Zero(), V3::Zero(), imu_scale, ref_gravity);
   auto state = kf_->GetSysState();
   state.R = SO3(rot);
   state.p = g_odom_robo.t_;        // By default, the robot frame is used as the reference origin.

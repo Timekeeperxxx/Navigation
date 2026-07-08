@@ -23,6 +23,7 @@
 #include <map>
 #include <utility>
 #include <filesystem>
+#include <vector>
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/executors/single_threaded_executor.hpp"
@@ -50,6 +51,16 @@ public:
     this->declare_parameter<bool>("ground_xy_dedup", true);
     this->declare_parameter<float>("ground_xy_leaf_size", 0.01);
     this->declare_parameter<float>("ground_z_layer_size", 0.15);
+    this->declare_parameter<bool>("ground_local_layer_filter", true);
+    this->declare_parameter<float>("ground_local_layer_xy_bin_size", 0.5);
+    this->declare_parameter<float>("ground_local_layer_radius", 3.0);
+    this->declare_parameter<float>("ground_local_layer_z_tolerance", 0.2);
+    this->declare_parameter<float>("ground_local_layer_min_height", 0.6);
+    this->declare_parameter<float>("ground_local_layer_max_height", 1.8);
+    this->declare_parameter<int>("ground_local_layer_min_lower_points", 80);
+    this->declare_parameter<float>("ground_local_layer_min_support_ratio", 0.75);
+    this->declare_parameter<int>("ground_local_layer_filter_iterations", 2);
+    this->declare_parameter<bool>("ground_local_layer_filter_on_shutdown", false);
 
     // Get parameters
     this->get_parameter("save_directory", save_directory_);
@@ -62,6 +73,16 @@ public:
     this->get_parameter("ground_xy_dedup", ground_xy_dedup_);
     this->get_parameter("ground_xy_leaf_size", ground_xy_leaf_size_);
     this->get_parameter("ground_z_layer_size", ground_z_layer_size_);
+    this->get_parameter("ground_local_layer_filter", ground_local_layer_filter_);
+    this->get_parameter("ground_local_layer_xy_bin_size", ground_local_layer_xy_bin_size_);
+    this->get_parameter("ground_local_layer_radius", ground_local_layer_radius_);
+    this->get_parameter("ground_local_layer_z_tolerance", ground_local_layer_z_tolerance_);
+    this->get_parameter("ground_local_layer_min_height", ground_local_layer_min_height_);
+    this->get_parameter("ground_local_layer_max_height", ground_local_layer_max_height_);
+    this->get_parameter("ground_local_layer_min_lower_points", ground_local_layer_min_lower_points_);
+    this->get_parameter("ground_local_layer_min_support_ratio", ground_local_layer_min_support_ratio_);
+    this->get_parameter("ground_local_layer_filter_iterations", ground_local_layer_filter_iterations_);
+    this->get_parameter("ground_local_layer_filter_on_shutdown", ground_local_layer_filter_on_shutdown_);
 
     if (ground_xy_leaf_size_ <= 0.0f) {
       RCLCPP_WARN(
@@ -74,6 +95,54 @@ public:
         this->get_logger(),
         "ground_z_layer_size 必须为正数，重置为 0.15m。");
       ground_z_layer_size_ = 0.15f;
+    }
+    if (ground_local_layer_xy_bin_size_ <= 0.0f) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "ground_local_layer_xy_bin_size 必须为正数，重置为 0.5m。");
+      ground_local_layer_xy_bin_size_ = 0.5f;
+    }
+    if (ground_local_layer_radius_ <= 0.0f) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "ground_local_layer_radius 必须为正数，重置为 3.0m。");
+      ground_local_layer_radius_ = 3.0f;
+    }
+    if (ground_local_layer_z_tolerance_ <= 0.0f) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "ground_local_layer_z_tolerance 必须为正数，重置为 0.2m。");
+      ground_local_layer_z_tolerance_ = 0.2f;
+    }
+    if (ground_local_layer_min_height_ < 0.0f) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "ground_local_layer_min_height 不能为负数，重置为 0.6m。");
+      ground_local_layer_min_height_ = 0.6f;
+    }
+    if (ground_local_layer_max_height_ <= ground_local_layer_min_height_) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "ground_local_layer_max_height 必须大于 min_height，重置为 1.8m。");
+      ground_local_layer_max_height_ = 1.8f;
+    }
+    if (ground_local_layer_min_lower_points_ < 1) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "ground_local_layer_min_lower_points 必须大于 0，重置为 80。");
+      ground_local_layer_min_lower_points_ = 80;
+    }
+    if (ground_local_layer_min_support_ratio_ < 0.0f) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "ground_local_layer_min_support_ratio 不能为负数，重置为 0.75。");
+      ground_local_layer_min_support_ratio_ = 0.75f;
+    }
+    if (ground_local_layer_filter_iterations_ < 1) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "ground_local_layer_filter_iterations 必须大于 0，重置为 2。");
+      ground_local_layer_filter_iterations_ = 2;
     }
 
     // If map_dir is specified, use it as the save directory
@@ -141,6 +210,11 @@ public:
     accumulated_base_footprint_fill_grid_index_.clear();
   }
 
+  bool filterGroundOnShutdown() const
+  {
+    return ground_local_layer_filter_on_shutdown_;
+  }
+
   bool ensureSaveDirectory()
   {
     if (save_directory_.empty()) {
@@ -176,14 +250,23 @@ public:
     }
   }
 
-  // 保存地图到文件（不滤波，快速保存）
-  void saveMapToFile()
+  // 保存地图到文件。Ctrl-C 自动保存时可以跳过耗时的地面层过滤，避免被 launch 强杀。
+  void saveMapToFile(bool filter_ground = true)
   {
     std::lock_guard<std::mutex> lock(cloud_mutex_);
 
     if (!ensureSaveDirectory()) {
       return;
     }
+
+    const auto save_start = std::chrono::steady_clock::now();
+    RCLCPP_INFO(
+      this->get_logger(),
+      "开始保存 terrain：map=%zu, ground=%zu, base_footprint_fill=%zu, filter_ground=%s",
+      accumulated_map_cloud_ ? accumulated_map_cloud_->size() : 0,
+      accumulated_ground_cloud_ ? accumulated_ground_cloud_->size() : 0,
+      accumulated_base_footprint_fill_cloud_ ? accumulated_base_footprint_fill_cloud_->size() : 0,
+      filter_ground ? "true" : "false");
 
     // Generate filename with timestamp
     auto now = std::chrono::system_clock::now();
@@ -215,10 +298,16 @@ public:
       }
 
       if (!accumulated_ground_cloud_->empty()) {
+        pcl::PointCloud<pcl::PointXYZI> ground_to_save;
+        if (filter_ground) {
+          filterGroundCloudForSave(*accumulated_ground_cloud_, ground_to_save);
+        } else {
+          ground_to_save = *accumulated_ground_cloud_;
+        }
         std::string ground_filename = base_filename + "_ground.pcd";
-        if (savePcdBinary(ground_filename, *accumulated_ground_cloud_)) {
+        if (savePcdBinary(ground_filename, ground_to_save)) {
           RCLCPP_INFO(this->get_logger(), "Saved ground cloud to %s (points: %zu)",
-                       ground_filename.c_str(), accumulated_ground_cloud_->size());
+                       ground_filename.c_str(), ground_to_save.size());
         } else {
           RCLCPP_ERROR(this->get_logger(), "Failed to save ground cloud to %s", ground_filename.c_str());
           has_error = true;
@@ -267,10 +356,16 @@ public:
       }
 
       if (!ground_cloud.empty()) {
+        pcl::PointCloud<pcl::PointXYZI> ground_to_save;
+        if (filter_ground) {
+          filterGroundCloudForSave(ground_cloud, ground_to_save);
+        } else {
+          ground_to_save = ground_cloud;
+        }
         std::string ground_filename = base_filename + "_ground.pcd";
-        if (savePcdBinary(ground_filename, ground_cloud)) {
+        if (savePcdBinary(ground_filename, ground_to_save)) {
           RCLCPP_INFO(this->get_logger(), "Saved ground cloud to %s (points: %zu)",
-                       ground_filename.c_str(), ground_cloud.size());
+                       ground_filename.c_str(), ground_to_save.size());
         } else {
           RCLCPP_ERROR(this->get_logger(), "Failed to save ground cloud to %s", ground_filename.c_str());
           has_error = true;
@@ -281,6 +376,10 @@ public:
         RCLCPP_INFO(this->get_logger(), "Save complete: %s_{map,ground}.pcd", base_filename.c_str());
       }
     }
+
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - save_start).count();
+    RCLCPP_INFO(this->get_logger(), "terrain 保存流程结束，耗时 %ld ms。", elapsed_ms);
   }
 
   // 根据强度阈值和空间Z值范围分割点云
@@ -340,6 +439,98 @@ public:
       } else {
         ground_cloud.push_back(point);
       }
+    }
+  }
+
+  void filterGroundCloudForSave(
+    const pcl::PointCloud<pcl::PointXYZI> & src,
+    pcl::PointCloud<pcl::PointXYZI> & dst) const
+  {
+    dst.clear();
+    if (!ground_local_layer_filter_ || src.empty()) {
+      dst = src;
+      return;
+    }
+
+    pcl::PointCloud<pcl::PointXYZI> current = src;
+    std::size_t total_removed_count = 0;
+    for (int iteration = 0; iteration < ground_local_layer_filter_iterations_; iteration++) {
+      std::map<std::pair<int64_t, int64_t>, std::vector<std::size_t>> xy_bins;
+      for (std::size_t i = 0; i < current.points.size(); i++) {
+        const auto & point = current.points[i];
+        const int64_t bx = static_cast<int64_t>(std::floor(point.x / ground_local_layer_xy_bin_size_));
+        const int64_t by = static_cast<int64_t>(std::floor(point.y / ground_local_layer_xy_bin_size_));
+        xy_bins[std::make_pair(bx, by)].push_back(i);
+      }
+
+      const int bin_radius = static_cast<int>(
+        std::ceil(ground_local_layer_radius_ / ground_local_layer_xy_bin_size_));
+      const float radius2 = ground_local_layer_radius_ * ground_local_layer_radius_;
+      std::size_t removed_count = 0;
+      pcl::PointCloud<pcl::PointXYZI> next;
+      next.reserve(current.points.size());
+
+      for (const auto & point : current.points) {
+        const int64_t bx = static_cast<int64_t>(std::floor(point.x / ground_local_layer_xy_bin_size_));
+        const int64_t by = static_cast<int64_t>(std::floor(point.y / ground_local_layer_xy_bin_size_));
+        int same_layer_count = 0;
+        int lower_layer_count = 0;
+
+        for (int dx = -bin_radius; dx <= bin_radius; dx++) {
+          for (int dy = -bin_radius; dy <= bin_radius; dy++) {
+            auto it = xy_bins.find(std::make_pair(bx + dx, by + dy));
+            if (it == xy_bins.end()) {
+              continue;
+            }
+
+            for (const auto index : it->second) {
+              const auto & neighbor = current.points[index];
+              const float diff_x = neighbor.x - point.x;
+              const float diff_y = neighbor.y - point.y;
+              if (diff_x * diff_x + diff_y * diff_y > radius2) {
+                continue;
+              }
+
+              const float dz = point.z - neighbor.z;
+              if (std::fabs(dz) <= ground_local_layer_z_tolerance_) {
+                same_layer_count++;
+              }
+              if (
+                dz >= ground_local_layer_min_height_ &&
+                dz <= ground_local_layer_max_height_) {
+                lower_layer_count++;
+              }
+            }
+          }
+        }
+
+        const bool has_strong_lower_layer =
+          lower_layer_count >= ground_local_layer_min_lower_points_;
+        const bool weak_current_layer =
+          static_cast<float>(same_layer_count) <
+          static_cast<float>(lower_layer_count) * ground_local_layer_min_support_ratio_;
+
+        if (has_strong_lower_layer && weak_current_layer) {
+          removed_count++;
+          continue;
+        }
+
+        next.push_back(point);
+      }
+
+      total_removed_count += removed_count;
+      current.swap(next);
+      if (removed_count == 0) {
+        break;
+      }
+    }
+
+    dst = current;
+    if (total_removed_count > 0) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ground 局部层过滤移除了 %zu/%zu 个疑似悬浮地面点。",
+        total_removed_count, src.points.size());
     }
   }
 
@@ -472,11 +663,13 @@ private:
       }
 
       if (!accumulated_ground_cloud_->empty()) {
+        pcl::PointCloud<pcl::PointXYZI> ground_to_save;
+        filterGroundCloudForSave(*accumulated_ground_cloud_, ground_to_save);
         std::string ground_filename = base_filename + "_ground.pcd";
-        if (savePcdBinary(ground_filename, *accumulated_ground_cloud_)) {
+        if (savePcdBinary(ground_filename, ground_to_save)) {
           saved_files += ground_filename + " ";
           RCLCPP_INFO(this->get_logger(), "Saved ground cloud to %s (points: %zu)",
-                       ground_filename.c_str(), accumulated_ground_cloud_->size());
+                       ground_filename.c_str(), ground_to_save.size());
         } else {
           RCLCPP_ERROR(this->get_logger(), "Failed to save ground cloud to %s", ground_filename.c_str());
           has_error = true;
@@ -530,11 +723,13 @@ private:
       }
 
       if (!ground_cloud.empty()) {
+        pcl::PointCloud<pcl::PointXYZI> ground_to_save;
+        filterGroundCloudForSave(ground_cloud, ground_to_save);
         std::string ground_filename = base_filename + "_ground.pcd";
-        if (savePcdBinary(ground_filename, ground_cloud)) {
+        if (savePcdBinary(ground_filename, ground_to_save)) {
           saved_files += ground_filename + " ";
           RCLCPP_INFO(this->get_logger(), "Saved ground cloud to %s (points: %zu)",
-                       ground_filename.c_str(), ground_cloud.size());
+                       ground_filename.c_str(), ground_to_save.size());
         } else {
           RCLCPP_ERROR(this->get_logger(), "Failed to save ground cloud to %s", ground_filename.c_str());
           has_error = true;
@@ -563,6 +758,16 @@ private:
   bool ground_xy_dedup_;
   float ground_xy_leaf_size_;
   float ground_z_layer_size_;
+  bool ground_local_layer_filter_;
+  float ground_local_layer_xy_bin_size_;
+  float ground_local_layer_radius_;
+  float ground_local_layer_z_tolerance_;
+  float ground_local_layer_min_height_;
+  float ground_local_layer_max_height_;
+  int ground_local_layer_min_lower_points_;
+  float ground_local_layer_min_support_ratio_;
+  int ground_local_layer_filter_iterations_;
+  bool ground_local_layer_filter_on_shutdown_;
 
   std::mutex cloud_mutex_;
   sensor_msgs::msg::PointCloud2::SharedPtr latest_cloud_;
@@ -586,24 +791,18 @@ int main(int argc, char **argv)
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(node);
 
-  // 注册 shutdown 回调，在 ROS 上下文仍然有效时保存地图
-  // 当 SIGINT 触发时，rclcpp::shutdown() 被调用，此回调执行
-  rclcpp::on_shutdown(
-    [node]()
-    {
-      RCLCPP_INFO(rclcpp::get_logger("save_terrain_map"),
-                  "Received shutdown signal, saving map before exit...");
-      node->saveMapToFile();
-      node->markSavedInMain();
-      node->clearAccumulatedClouds();
-    });
-
   // 手动执行循环，每次迭代检查 rclcpp::ok()
   // 这样当 shutdown 触发时能立即退出，避免 spin 卡住的问题
   while (rclcpp::ok()) {
     executor.spin_some();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+
+  // 不在 rclcpp::on_shutdown() 回调里写盘；该回调可能和订阅回调抢锁。
+  // 在主线程退出 spin 循环后保存一次，Ctrl-C 场景默认跳过耗时地面层过滤。
+  node->saveMapToFile(node->filterGroundOnShutdown());
+  node->markSavedInMain();
+  node->clearAccumulatedClouds();
 
   // 移除节点并关闭 executor
   executor.remove_node(node);

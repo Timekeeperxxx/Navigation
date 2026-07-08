@@ -12,13 +12,15 @@ namespace LI2Sup{
 class ESKF {
 public:
   using Ptr   = std::shared_ptr<ESKF>;
-                                                  //         0 3 6 9 12 15
-  using STATE = Eigen::Matrix<BASIC::scalar, 18, 1>;     //Flatten: R p v bg ba g. 
-  using STATE_DOF = Eigen::Matrix<BASIC::scalar, 17, 1>; //Flatten: R p v bg ba g_2.
+  static constexpr int kStateDim = 15;
+  static constexpr int kNoiseDim = 12;
+                                                  //         0 3 6 9 12
+  using STATE = Eigen::Matrix<BASIC::scalar, kStateDim, 1>;     // 误差状态: R p v bg ba；重力 g_ 不进入滤波更新。
+  using STATE_DOF = STATE;
   using NOISE = Eigen::Matrix<BASIC::scalar, 12, 12>;
-  using COV   = Eigen::Matrix<BASIC::scalar, 18, 18>;
-  using F_X   = Eigen::Matrix<BASIC::scalar, 18, 18>;
-  using F_W   = Eigen::Matrix<BASIC::scalar, 18, 12>;
+  using COV   = Eigen::Matrix<BASIC::scalar, kStateDim, kStateDim>;
+  using F_X   = Eigen::Matrix<BASIC::scalar, kStateDim, kStateDim>;
+  using F_W   = Eigen::Matrix<BASIC::scalar, kStateDim, kNoiseDim>;
 
 
   struct Options {

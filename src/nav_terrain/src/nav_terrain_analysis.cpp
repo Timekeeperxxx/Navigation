@@ -14,7 +14,11 @@
 //
 // Original work based on sensor_scan_generation package by Hongbiao Zhu.
 
+#include <algorithm>
+#include <cmath>
 #include <math.h>
+#include <utility>
+#include <vector>
 
 #include "nav_msgs/msg/odometry.hpp"
 #include "pcl/filters/voxel_grid.h"
@@ -32,9 +36,9 @@
 
 namespace
 {
-constexpr float kBaseFootprintFillRadius = 0.15f;
-constexpr float kBaseFootprintGroundSearchRadius = 0.35f;
-constexpr float kBaseFootprintGroundIntensityMax = 0.05f;
+constexpr float kDefaultBaseFootprintFillRadius = 0.15f;
+constexpr float kDefaultBaseFootprintGroundSearchRadius = 0.8f;
+constexpr float kDefaultBaseFootprintGroundIntensityMax = 0.08f;
 }
 
 double scanVoxelSize = 0.05;
@@ -64,6 +68,19 @@ double voxelTimeUpdateThre = 2.0;
 double minRelZ = -0.2;
 double maxRelZ = 0.2;
 double disRatioZ = 0.2;
+double baseFootprintFillRadius = kDefaultBaseFootprintFillRadius;
+double baseFootprintGroundSearchRadius = kDefaultBaseFootprintGroundSearchRadius;
+double baseFootprintGroundIntensityMax = kDefaultBaseFootprintGroundIntensityMax;
+bool baseFootprintUseLastGroundFallback = true;
+double baseFootprintGroundFallbackMaxAge = 2.0;
+double baseFootprintGroundFallbackMaxDistance = 1.5;
+bool baseFootprintUseTfZFallback = false;
+double baseFootprintGroundZOffset = 0.0;
+double baseFootprintWarmupTime = 0.0;
+int baseFootprintMinGroundPointNum = 5;
+double baseFootprintStartMinTravelDistance = 0.0;
+double baseFootprintLocalFloorSearchRadius = 3.0;
+double baseFootprintLocalFloorHighReject = 0.25;
 
 // terrain voxel parameters
 float terrainVoxelSize = 1.0;
@@ -106,6 +123,14 @@ int noDataInited = 0;
 float vehicleRoll = 0, vehiclePitch = 0, vehicleYaw = 0;
 float vehicleX = 0, vehicleY = 0, vehicleZ = 0;
 float vehicleXRec = 0, vehicleYRec = 0;
+bool hasLastBaseFootprintGround = false;
+float lastBaseFootprintGroundX = 0.0f;
+float lastBaseFootprintGroundY = 0.0f;
+float lastBaseFootprintGroundZ = 0.0f;
+double lastBaseFootprintGroundTime = 0.0;
+bool hasBaseFootprintStart = false;
+float baseFootprintStartX = 0.0f;
+float baseFootprintStartY = 0.0f;
 
 float sinVehicleRoll = 0, cosVehicleRoll = 0;
 float sinVehiclePitch = 0, cosVehiclePitch = 0;
@@ -126,43 +151,172 @@ bool getPlanarVoxelIndex(float x, float y, int & indX, int & indY)
   return indX >= 0 && indX < planarVoxelWidth && indY >= 0 && indY < planarVoxelWidth;
 }
 
-bool estimateBaseFootprintGroundZ(float baseX, float baseY, float & groundZ)
+bool estimateBaseFootprintPlanarGroundZ(float baseX, float baseY, float & groundZ)
 {
-  float bestDistance2 = kBaseFootprintGroundSearchRadius * kBaseFootprintGroundSearchRadius;
-  bool foundGroundPoint = false;
-
-  for (const auto & point : terrainCloudElev->points) {
-    if (point.intensity < 0.0f || point.intensity > kBaseFootprintGroundIntensityMax) {
-      continue;
-    }
-
-    float dx = point.x - baseX;
-    float dy = point.y - baseY;
-    float distance2 = dx * dx + dy * dy;
-    if (distance2 <= bestDistance2) {
-      bestDistance2 = distance2;
-      groundZ = point.z;
-      foundGroundPoint = true;
-    }
+  int centerX = 0;
+  int centerY = 0;
+  if (!getPlanarVoxelIndex(baseX, baseY, centerX, centerY)) {
+    return false;
   }
 
-  if (foundGroundPoint) {
+  auto collectPlanarGround = [&](float searchRadius) {
+    std::vector<std::pair<float, float>> candidates;
+    int searchCellRadius = static_cast<int>(std::ceil(searchRadius / planarVoxelSize));
+    candidates.reserve((2 * searchCellRadius + 1) * (2 * searchCellRadius + 1));
+    float searchRadius2 = searchRadius * searchRadius;
+
+    for (int dX = -searchCellRadius; dX <= searchCellRadius; dX++) {
+      for (int dY = -searchCellRadius; dY <= searchCellRadius; dY++) {
+        int indX = centerX + dX;
+        int indY = centerY + dY;
+        if (indX < 0 || indX >= planarVoxelWidth || indY < 0 || indY >= planarVoxelWidth) {
+          continue;
+        }
+
+        int idx = planarVoxelWidth * indX + indY;
+        if (static_cast<int>(planarPointElev[idx].size()) < minBlockPointNum) {
+          continue;
+        }
+
+        float cellX = planarVoxelSize * (indX - planarVoxelHalfWidth) + vehicleX;
+        float cellY = planarVoxelSize * (indY - planarVoxelHalfWidth) + vehicleY;
+        float dx = cellX - baseX;
+        float dy = cellY - baseY;
+        float distance2 = dx * dx + dy * dy;
+        if (distance2 <= searchRadius2) {
+          candidates.emplace_back(distance2, planarVoxelElev[idx]);
+        }
+      }
+    }
+
+    return candidates;
+  };
+
+  float searchRadius = static_cast<float>(std::max(
+    baseFootprintFillRadius, baseFootprintGroundSearchRadius));
+  std::vector<std::pair<float, float>> candidates = collectPlanarGround(searchRadius);
+  std::vector<std::pair<float, float>> localFloorCandidates = collectPlanarGround(
+    static_cast<float>(std::max(baseFootprintLocalFloorSearchRadius, baseFootprintGroundSearchRadius)));
+
+  bool hasLocalFloorZ = false;
+  float localFloorZ = 0.0f;
+  if (!localFloorCandidates.empty()) {
+    std::vector<float> localGroundZ;
+    localGroundZ.reserve(localFloorCandidates.size());
+    for (const auto & candidate : localFloorCandidates) {
+      localGroundZ.push_back(candidate.second);
+    }
+    std::sort(localGroundZ.begin(), localGroundZ.end());
+    std::size_t floorIndex = static_cast<std::size_t>(
+      std::floor(0.20 * static_cast<double>(localGroundZ.size() - 1)));
+    localFloorZ = localGroundZ[floorIndex];
+    hasLocalFloorZ = true;
+  }
+
+  if (candidates.empty()) {
+    if (hasLocalFloorZ) {
+      groundZ = localFloorZ;
+      return true;
+    }
+    return false;
+  }
+
+  std::sort(candidates.begin(), candidates.end(), [](const auto & lhs, const auto & rhs) {
+    return lhs.first < rhs.first;
+  });
+
+  std::vector<float> nearestGroundZ;
+  std::size_t useCount = std::min<std::size_t>(candidates.size(), 9);
+  nearestGroundZ.reserve(useCount);
+  for (std::size_t i = 0; i < useCount; i++) {
+    nearestGroundZ.push_back(candidates[i].second);
+  }
+  std::sort(nearestGroundZ.begin(), nearestGroundZ.end());
+  groundZ = nearestGroundZ[nearestGroundZ.size() / 2];
+
+  if (
+    hasLocalFloorZ &&
+    groundZ > localFloorZ + static_cast<float>(baseFootprintLocalFloorHighReject)) {
+    groundZ = localFloorZ;
+  }
+
+  return true;
+}
+
+bool estimateBaseFootprintGroundZ(float baseX, float baseY, float & groundZ)
+{
+  if (estimateBaseFootprintPlanarGroundZ(baseX, baseY, groundZ)) {
     return true;
   }
 
-  int indX = 0;
-  int indY = 0;
-  if (!getPlanarVoxelIndex(baseX, baseY, indX, indY)) {
+  auto estimateWithRadius = [&](float searchRadius, float & z) {
+    float searchRadius2 = searchRadius * searchRadius;
+    std::vector<float> groundCandidates;
+    groundCandidates.reserve(64);
+
+    for (const auto & point : terrainCloudElev->points) {
+      if (
+        point.intensity < 0.0f ||
+        point.intensity > static_cast<float>(baseFootprintGroundIntensityMax)) {
+        continue;
+      }
+
+      float dx = point.x - baseX;
+      float dy = point.y - baseY;
+      float distance2 = dx * dx + dy * dy;
+      if (distance2 <= searchRadius2) {
+        // terrainCloudElev 中 intensity 表示相对估计地面的高度，footprint 应贴到地面面上。
+        groundCandidates.push_back(point.z - std::max(point.intensity, 0.0f));
+      }
+    }
+
+    if (static_cast<int>(groundCandidates.size()) < baseFootprintMinGroundPointNum) {
+      return false;
+    }
+
+    std::sort(groundCandidates.begin(), groundCandidates.end());
+    std::size_t groundIndex = static_cast<std::size_t>(
+      std::floor(0.25 * static_cast<double>(groundCandidates.size() - 1)));
+    z = groundCandidates[groundIndex];
+    return true;
+  };
+
+  float searchRadius = static_cast<float>(baseFootprintGroundSearchRadius);
+  if (estimateWithRadius(searchRadius, groundZ)) {
+    return true;
+  }
+
+  return false;
+}
+
+bool getLastBaseFootprintGroundZ(
+  float baseX, float baseY, double currentTime, float & groundZ)
+{
+  if (!baseFootprintUseLastGroundFallback || !hasLastBaseFootprintGround) {
     return false;
   }
 
-  int idx = planarVoxelWidth * indX + indY;
-  if (planarPointElev[idx].empty()) {
+  const double age = currentTime - lastBaseFootprintGroundTime;
+  const float dx = baseX - lastBaseFootprintGroundX;
+  const float dy = baseY - lastBaseFootprintGroundY;
+  const double distance = std::sqrt(dx * dx + dy * dy);
+  if (
+    age < 0.0 || age > baseFootprintGroundFallbackMaxAge ||
+    distance > baseFootprintGroundFallbackMaxDistance) {
     return false;
   }
 
-  groundZ = planarVoxelElev[idx];
+  groundZ = lastBaseFootprintGroundZ;
   return true;
+}
+
+void rememberBaseFootprintGroundZ(float baseX, float baseY, float groundZ, double currentTime)
+{
+  hasLastBaseFootprintGround = true;
+  lastBaseFootprintGroundX = baseX;
+  lastBaseFootprintGroundY = baseY;
+  lastBaseFootprintGroundZ = groundZ;
+  lastBaseFootprintGroundTime = currentTime;
 }
 
 // state estimation callback function
@@ -287,6 +441,25 @@ int main(int argc, char ** argv)
   nh->declare_parameter<double>("minRelZ", minRelZ);
   nh->declare_parameter<double>("maxRelZ", maxRelZ);
   nh->declare_parameter<double>("disRatioZ", disRatioZ);
+  nh->declare_parameter<double>("baseFootprintFillRadius", baseFootprintFillRadius);
+  nh->declare_parameter<double>("baseFootprintGroundSearchRadius", baseFootprintGroundSearchRadius);
+  nh->declare_parameter<double>("baseFootprintGroundIntensityMax", baseFootprintGroundIntensityMax);
+  nh->declare_parameter<bool>(
+    "baseFootprintUseLastGroundFallback", baseFootprintUseLastGroundFallback);
+  nh->declare_parameter<double>(
+    "baseFootprintGroundFallbackMaxAge", baseFootprintGroundFallbackMaxAge);
+  nh->declare_parameter<double>(
+    "baseFootprintGroundFallbackMaxDistance", baseFootprintGroundFallbackMaxDistance);
+  nh->declare_parameter<bool>("baseFootprintUseTfZFallback", baseFootprintUseTfZFallback);
+  nh->declare_parameter<double>("baseFootprintGroundZOffset", baseFootprintGroundZOffset);
+  nh->declare_parameter<double>("baseFootprintWarmupTime", baseFootprintWarmupTime);
+  nh->declare_parameter<int>("baseFootprintMinGroundPointNum", baseFootprintMinGroundPointNum);
+  nh->declare_parameter<double>(
+    "baseFootprintStartMinTravelDistance", baseFootprintStartMinTravelDistance);
+  nh->declare_parameter<double>(
+    "baseFootprintLocalFloorSearchRadius", baseFootprintLocalFloorSearchRadius);
+  nh->declare_parameter<double>(
+    "baseFootprintLocalFloorHighReject", baseFootprintLocalFloorHighReject);
 
   nh->get_parameter("scanVoxelSize", scanVoxelSize);
   nh->get_parameter("decayTime", decayTime);
@@ -314,6 +487,66 @@ int main(int argc, char ** argv)
   nh->get_parameter("minRelZ", minRelZ);
   nh->get_parameter("maxRelZ", maxRelZ);
   nh->get_parameter("disRatioZ", disRatioZ);
+  nh->get_parameter("baseFootprintFillRadius", baseFootprintFillRadius);
+  nh->get_parameter("baseFootprintGroundSearchRadius", baseFootprintGroundSearchRadius);
+  nh->get_parameter("baseFootprintGroundIntensityMax", baseFootprintGroundIntensityMax);
+  nh->get_parameter(
+    "baseFootprintUseLastGroundFallback", baseFootprintUseLastGroundFallback);
+  nh->get_parameter("baseFootprintGroundFallbackMaxAge", baseFootprintGroundFallbackMaxAge);
+  nh->get_parameter(
+    "baseFootprintGroundFallbackMaxDistance", baseFootprintGroundFallbackMaxDistance);
+  nh->get_parameter("baseFootprintUseTfZFallback", baseFootprintUseTfZFallback);
+  nh->get_parameter("baseFootprintGroundZOffset", baseFootprintGroundZOffset);
+  nh->get_parameter("baseFootprintWarmupTime", baseFootprintWarmupTime);
+  nh->get_parameter("baseFootprintMinGroundPointNum", baseFootprintMinGroundPointNum);
+  nh->get_parameter("baseFootprintStartMinTravelDistance", baseFootprintStartMinTravelDistance);
+  nh->get_parameter("baseFootprintLocalFloorSearchRadius", baseFootprintLocalFloorSearchRadius);
+  nh->get_parameter("baseFootprintLocalFloorHighReject", baseFootprintLocalFloorHighReject);
+
+  if (baseFootprintFillRadius <= 0.0) {
+    RCLCPP_WARN(nh->get_logger(), "baseFootprintFillRadius 必须为正数，重置为 0.15m。");
+    baseFootprintFillRadius = kDefaultBaseFootprintFillRadius;
+  }
+  if (baseFootprintGroundSearchRadius <= 0.0) {
+    RCLCPP_WARN(
+      nh->get_logger(), "baseFootprintGroundSearchRadius 必须为正数，重置为 0.8m。");
+    baseFootprintGroundSearchRadius = kDefaultBaseFootprintGroundSearchRadius;
+  }
+  if (baseFootprintGroundFallbackMaxAge < 0.0) {
+    RCLCPP_WARN(
+      nh->get_logger(), "baseFootprintGroundFallbackMaxAge 不能为负数，重置为 2.0s。");
+    baseFootprintGroundFallbackMaxAge = 2.0;
+  }
+  if (baseFootprintGroundFallbackMaxDistance < 0.0) {
+    RCLCPP_WARN(
+      nh->get_logger(), "baseFootprintGroundFallbackMaxDistance 不能为负数，重置为 1.5m。");
+    baseFootprintGroundFallbackMaxDistance = 1.5;
+  }
+  if (baseFootprintWarmupTime < 0.0) {
+    RCLCPP_WARN(nh->get_logger(), "baseFootprintWarmupTime 不能为负数，重置为 0.0s。");
+    baseFootprintWarmupTime = 0.0;
+  }
+  if (baseFootprintMinGroundPointNum < 1) {
+    RCLCPP_WARN(
+      nh->get_logger(), "baseFootprintMinGroundPointNum 必须大于 0，重置为 5。");
+    baseFootprintMinGroundPointNum = 5;
+  }
+  if (baseFootprintStartMinTravelDistance < 0.0) {
+    RCLCPP_WARN(
+      nh->get_logger(), "baseFootprintStartMinTravelDistance 不能为负数，重置为 0.0m。");
+    baseFootprintStartMinTravelDistance = 0.0;
+  }
+  if (baseFootprintLocalFloorSearchRadius < baseFootprintGroundSearchRadius) {
+    RCLCPP_WARN(
+      nh->get_logger(),
+      "baseFootprintLocalFloorSearchRadius 小于常规搜索半径，重置为 3.0m。");
+    baseFootprintLocalFloorSearchRadius = 3.0;
+  }
+  if (baseFootprintLocalFloorHighReject < 0.0) {
+    RCLCPP_WARN(
+      nh->get_logger(), "baseFootprintLocalFloorHighReject 不能为负数，重置为 0.25m。");
+    baseFootprintLocalFloorHighReject = 0.25;
+  }
 
   auto subOdometry =
     nh->create_subscription<nav_msgs::msg::Odometry>("/lio/odom", 5, odometryHandler);
@@ -795,16 +1028,40 @@ int main(int argc, char ** argv)
         float baseX = baseFootprintTransform.transform.translation.x;
         float baseY = baseFootprintTransform.transform.translation.y;
         float baseZ = baseFootprintTransform.transform.translation.z;
+        if (!hasBaseFootprintStart) {
+          hasBaseFootprintStart = true;
+          baseFootprintStartX = baseX;
+          baseFootprintStartY = baseY;
+        }
         float fillZ = baseZ;
+        double currentTerrainTime = laserCloudTime - systemInitTime;
+        float startDx = baseX - baseFootprintStartX;
+        float startDy = baseY - baseFootprintStartY;
+        double startTravelDistance = std::sqrt(startDx * startDx + startDy * startDy);
+        bool warmupDone = currentTerrainTime >= baseFootprintWarmupTime &&
+          startTravelDistance >= baseFootprintStartMinTravelDistance;
         bool hasGroundZ = estimateBaseFootprintGroundZ(baseX, baseY, fillZ);
+        bool useFallbackZ = false;
 
-        if (hasGroundZ) {
-          // 在 base_footprint 中心附近的 XY 平面 0.3m 范围内生成密集点云。
-          // z 使用 terrain 当前帧估计出的地面高度，避免把 base_footprint 的 TF 高度写入走过路径。
-          float step = 2.0f * kBaseFootprintFillRadius / 14.0f;
-          for (float dx = -kBaseFootprintFillRadius; dx <= kBaseFootprintFillRadius + 1e-6f;
-               dx += step) {
-            for (float dy = -kBaseFootprintFillRadius; dy <= kBaseFootprintFillRadius + 1e-6f;
+        if (hasGroundZ && warmupDone) {
+          // 默认不改变 terrain 地面高度；必要时可用参数做小范围贴地微调。
+          fillZ += static_cast<float>(baseFootprintGroundZOffset);
+          rememberBaseFootprintGroundZ(baseX, baseY, fillZ, currentTerrainTime);
+        } else if (warmupDone) {
+          useFallbackZ = getLastBaseFootprintGroundZ(baseX, baseY, currentTerrainTime, fillZ);
+          // 起点还没有 terrain 地面约束时不使用 TF z，避免把静态底盘高度写成错误地面。
+          if (!useFallbackZ && baseFootprintUseTfZFallback && hasLastBaseFootprintGround) {
+            fillZ = baseZ + static_cast<float>(baseFootprintGroundZOffset);
+            useFallbackZ = true;
+          }
+        }
+
+        if (warmupDone && (hasGroundZ || useFallbackZ)) {
+          // 优先使用 terrain 当前帧估计的地面高度；局部地面缺失时短时兜底，避免 footprint 闪断。
+          float fillRadius = static_cast<float>(baseFootprintFillRadius);
+          float step = 2.0f * fillRadius / 14.0f;
+          for (float dx = -fillRadius; dx <= fillRadius + 1e-6f; dx += step) {
+            for (float dy = -fillRadius; dy <= fillRadius + 1e-6f;
                  dy += step) {
               pcl::PointXYZI fillPoint;
               fillPoint.x = baseX + dx;
@@ -817,8 +1074,10 @@ int main(int argc, char ** argv)
             }
           }
         } else {
-          RCLCPP_WARN(
+          RCLCPP_WARN_THROTTLE(
             nh->get_logger(),
+            *nh->get_clock(),
+            2000,
             "Skip base_footprint fill: no ground height around base_footprint, base_z=%.3f",
             baseZ);
         }
