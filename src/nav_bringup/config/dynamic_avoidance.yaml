@@ -1,0 +1,74 @@
+# 动态避障与轻量路径跟随参数。
+# 默认适配“没有连接雷达”的本地验证：不强制要求 `/nav/local_obstacles` 持续输入。
+
+dynamic_avoidance_monitor:
+  ros__parameters:
+    enabled: true
+    global_frame: "map"
+    robot_frame: "base_footprint"
+    global_path_topic: "/global_path"
+    obstacle_topic: "/nav/local_obstacles"
+    status_topic: "/nav/obstacle_status"
+    replan_request_topic: "/nav/replan_request"
+    prune_plan_topic: "/prune_plan"
+    local_path_topic: "/nav/local_path"
+    cmd_vel_in_topic: "/cmd_vel"
+    cmd_vel_safe_topic: "/cmd_vel_safe"
+
+    lookahead_distance: 2.0
+    backward_prune_distance: 0.5
+    path_deviation_tolerance: 1.0
+    path_corridor_radius: 0.45
+    z_tolerance: 1.0
+    stop_distance: 0.6
+    slow_distance: 1.2
+    replan_blocked_duration: 2.0
+    sensor_timeout: 0.5
+    check_period_sec: 0.2
+    slow_speed_scale: 0.35
+
+    require_obstacle_stream: false
+    allow_path_start_without_tf: false
+    enable_cmd_vel_filter: true
+    publish_zero_on_stop: true
+    publish_prune_plan: true
+    replan_publish_period: 1.0
+
+nav_path_follower:
+  ros__parameters:
+    global_frame: "map"
+    robot_frame: "base_footprint"
+    path_topic: "/nav/local_path"
+    fallback_path_topic: "/global_path"
+    obstacle_status_topic: "/nav/obstacle_status"
+    nav_start_topic: "/nav_start"
+    nav_stop_topic: "/nav_stop"
+    cmd_vel_topic: "/cmd_vel"
+    nav_status_topic: "/nav_status"
+
+    require_nav_start: true
+    control_period_sec: 0.1
+    path_timeout_sec: 2.0
+    status_timeout_sec: 1.0
+    lookahead_distance: 0.8
+    goal_tolerance: 0.25
+    path_deviation_tolerance: 1.2
+    linear_slow_radius: 1.0
+    max_linear_speed: 0.25
+    max_angular_speed: 0.7
+    yaw_gain: 1.5
+    heading_only_angle: 0.9
+    caution_speed_scale: 0.35
+    publish_zero_when_idle: true
+
+local_obstacle_simulator:
+  ros__parameters:
+    frame_id: "map"
+    obstacle_topic: "/nav/local_obstacles"
+    clicked_obstacle_topic: "/nav/sim_obstacle_point"
+    clear_topic: "/nav/clear_sim_obstacles"
+    initial_obstacles_json: "[]"
+    publish_period_sec: 0.2
+    obstacle_lifetime_sec: 0.0
+    cluster_radius: 0.0
+    cluster_points: 8

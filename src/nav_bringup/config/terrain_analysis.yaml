@@ -29,6 +29,19 @@ terrainAnalysis:
     minRelZ: -1.95
     maxRelZ: 0.2
     disRatioZ: 0.1
+    baseFootprintFillRadius: 0.15
+    baseFootprintGroundSearchRadius: 0.8
+    baseFootprintGroundIntensityMax: 0.08
+    baseFootprintUseLastGroundFallback: true
+    baseFootprintGroundFallbackMaxAge: 2.0
+    baseFootprintGroundFallbackMaxDistance: 1.5
+    baseFootprintUseTfZFallback: false
+    baseFootprintGroundZOffset: 0.0
+    baseFootprintWarmupTime: 0.0
+    baseFootprintMinGroundPointNum: 5
+    baseFootprintStartMinTravelDistance: 0.0
+    baseFootprintLocalFloorSearchRadius: 3.0
+    baseFootprintLocalFloorHighReject: 0.25
 
 save_terrain_map:
   ros__parameters:
@@ -39,3 +52,13 @@ save_terrain_map:
     ground_xy_dedup: true
     ground_xy_leaf_size: 0.05
     ground_z_layer_size: 0.15
+    ground_local_layer_filter: true
+    ground_local_layer_xy_bin_size: 0.5
+    ground_local_layer_radius: 3.0
+    ground_local_layer_z_tolerance: 0.2
+    ground_local_layer_min_height: 0.6
+    ground_local_layer_max_height: 1.8
+    ground_local_layer_min_lower_points: 80
+    ground_local_layer_min_support_ratio: 0.75
+    ground_local_layer_filter_iterations: 2
+    ground_local_layer_filter_on_shutdown: false

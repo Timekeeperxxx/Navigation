@@ -9,10 +9,18 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     map_dir = LaunchConfiguration("map_dir")
     map_name = LaunchConfiguration("map_name")
+    use_sim_time = LaunchConfiguration("use_sim_time")
     launch_livox = LaunchConfiguration("launch_livox")
     launch_lio = LaunchConfiguration("launch_lio")
     launch_terrain = LaunchConfiguration("launch_terrain")
     rviz = LaunchConfiguration("rviz")
+    publish_base_footprint_tf = LaunchConfiguration("publish_base_footprint_tf")
+    base_footprint_x = LaunchConfiguration("base_footprint_x")
+    base_footprint_y = LaunchConfiguration("base_footprint_y")
+    base_footprint_z = LaunchConfiguration("base_footprint_z")
+    base_footprint_roll = LaunchConfiguration("base_footprint_roll")
+    base_footprint_pitch = LaunchConfiguration("base_footprint_pitch")
+    base_footprint_yaw = LaunchConfiguration("base_footprint_yaw")
     lidar_ip = LaunchConfiguration("lidar_ip")
     host_ip = LaunchConfiguration("host_ip")
     livox_config_path = LaunchConfiguration("livox_config_path")
@@ -54,6 +62,7 @@ def generate_launch_description():
         name="livox_lidar_publisher",
         output="screen",
         parameters=[{
+            "use_sim_time": use_sim_time,
             "xfer_format": 1,
             "multi_topic": 0,
             "data_src": 0,
@@ -72,9 +81,19 @@ def generate_launch_description():
         package="tf2_ros",
         executable="static_transform_publisher",
         name="static_tf_base_link_to_base_footprint",
-        arguments=["0", "0", "-0.90", "0", "-0.34", "0", "base_link", "base_footprint"],
+        arguments=[
+            base_footprint_x,
+            base_footprint_y,
+            base_footprint_z,
+            base_footprint_roll,
+            base_footprint_pitch,
+            base_footprint_yaw,
+            "base_link",
+            "base_footprint",
+        ],
         output="screen",
-        condition=IfCondition(launch_lio),
+        parameters=[{"use_sim_time": use_sim_time}],
+        condition=IfCondition(publish_base_footprint_tf),
     )
 
     lio_node = Node(
@@ -85,6 +104,7 @@ def generate_launch_description():
         parameters=[
             lio_config,
             {
+                "use_sim_time": use_sim_time,
                 "lio.map.save_map": True,
                 "lio.map.save_map_dir": map_dir,
                 "lio.map.map_name": map_name,
@@ -117,6 +137,9 @@ def generate_launch_description():
         output="screen",
         parameters=[
             terrain_config,
+            {
+                "use_sim_time": use_sim_time,
+            },
         ],
         condition=IfCondition(launch_terrain),
     )
@@ -129,6 +152,7 @@ def generate_launch_description():
         parameters=[
             terrain_config,
             {
+                "use_sim_time": use_sim_time,
                 "map_dir": map_dir,
             },
         ],
@@ -141,6 +165,7 @@ def generate_launch_description():
         name="mapping_rviz",
         output="screen",
         arguments=["-d", rviz_config],
+        parameters=[{"use_sim_time": use_sim_time}],
         condition=IfCondition(rviz),
     )
 
@@ -148,10 +173,18 @@ def generate_launch_description():
         SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
         DeclareLaunchArgument("map_dir", default_value="/tmp/navigation_map"),
         DeclareLaunchArgument("map_name", default_value="map.pcd"),
+        DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("launch_livox", default_value="true"),
         DeclareLaunchArgument("launch_lio", default_value="true"),
         DeclareLaunchArgument("launch_terrain", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="false"),
+        DeclareLaunchArgument("publish_base_footprint_tf", default_value="false"),
+        DeclareLaunchArgument("base_footprint_x", default_value="0"),
+        DeclareLaunchArgument("base_footprint_y", default_value="0"),
+        DeclareLaunchArgument("base_footprint_z", default_value="-0.90"),
+        DeclareLaunchArgument("base_footprint_roll", default_value="0"),
+        DeclareLaunchArgument("base_footprint_pitch", default_value="-0.34"),
+        DeclareLaunchArgument("base_footprint_yaw", default_value="0"),
         DeclareLaunchArgument("lidar_ip", default_value="192.168.123.179"),
         DeclareLaunchArgument("host_ip", default_value=""),
         DeclareLaunchArgument("lio_voxel_filter_size", default_value="0.5"),
@@ -163,8 +196,8 @@ def generate_launch_description():
         DeclareLaunchArgument("imu_nbg", default_value="0.0003"),
         DeclareLaunchArgument("estimate_gravity", default_value="true"),
         DeclareLaunchArgument("use_query_time_undistort", default_value="false"),
-        DeclareLaunchArgument("lidar_imu_roll_deg", default_value="0.0"),
-        DeclareLaunchArgument("lidar_imu_pitch_deg", default_value="0.0"),
+        DeclareLaunchArgument("lidar_imu_roll_deg", default_value="1.3"),
+        DeclareLaunchArgument("lidar_imu_pitch_deg", default_value="-1.3"),
         DeclareLaunchArgument("lidar_imu_yaw_deg", default_value="0.0"),
         DeclareLaunchArgument("loop_closure", default_value="false"),
         DeclareLaunchArgument("loop_search_radius", default_value="5.0"),

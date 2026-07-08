@@ -16,6 +16,14 @@ def generate_launch_description():
     enable_dwa_client = LaunchConfiguration("enable_dwa_client")
     enable_waypoint_navigator = LaunchConfiguration("enable_waypoint_navigator")
     enable_waypoint_monitor = LaunchConfiguration("enable_waypoint_monitor")
+    enable_dynamic_avoidance = LaunchConfiguration("enable_dynamic_avoidance")
+    enable_path_follower = LaunchConfiguration("enable_path_follower")
+    enable_obstacle_simulator = LaunchConfiguration("enable_obstacle_simulator")
+    enable_static_base_tf = LaunchConfiguration("enable_static_base_tf")
+    static_base_x = LaunchConfiguration("static_base_x")
+    static_base_y = LaunchConfiguration("static_base_y")
+    static_base_z = LaunchConfiguration("static_base_z")
+    static_base_yaw = LaunchConfiguration("static_base_yaw")
     waypoints_file = LaunchConfiguration("waypoints_file")
     enable_rviz = LaunchConfiguration("rviz")
 
@@ -23,6 +31,11 @@ def generate_launch_description():
         FindPackageShare("nav_bringup"),
         "config",
         "global_planner.yaml",
+    ])
+    dynamic_avoidance_config = PathJoinSubstitution([
+        FindPackageShare("nav_bringup"),
+        "config",
+        "dynamic_avoidance.yaml",
     ])
 
     pcl_publisher = Node(
@@ -121,6 +134,50 @@ def generate_launch_description():
         condition=IfCondition(enable_waypoint_monitor),
     )
 
+    dynamic_avoidance_monitor = Node(
+        package="nav_planner",
+        executable="dynamic_avoidance_monitor.py",
+        name="dynamic_avoidance_monitor",
+        output="screen",
+        parameters=[dynamic_avoidance_config],
+        condition=IfCondition(enable_dynamic_avoidance),
+    )
+
+    path_follower = Node(
+        package="nav_planner",
+        executable="nav_path_follower.py",
+        name="nav_path_follower",
+        output="screen",
+        parameters=[dynamic_avoidance_config],
+        condition=IfCondition(enable_path_follower),
+    )
+
+    obstacle_simulator = Node(
+        package="nav_planner",
+        executable="local_obstacle_simulator.py",
+        name="local_obstacle_simulator",
+        output="screen",
+        parameters=[dynamic_avoidance_config],
+        condition=IfCondition(enable_obstacle_simulator),
+    )
+
+    static_base_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="static_map_to_base_footprint",
+        arguments=[
+            static_base_x,
+            static_base_y,
+            static_base_z,
+            static_base_yaw,
+            "0.0",
+            "0.0",
+            "map",
+            "base_footprint",
+        ],
+        condition=IfCondition(enable_static_base_tf),
+    )
+
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
@@ -154,6 +211,14 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_dwa_client", default_value="false"),
         DeclareLaunchArgument("enable_waypoint_navigator", default_value="false"),
         DeclareLaunchArgument("enable_waypoint_monitor", default_value="false"),
+        DeclareLaunchArgument("enable_dynamic_avoidance", default_value="true"),
+        DeclareLaunchArgument("enable_path_follower", default_value="false"),
+        DeclareLaunchArgument("enable_obstacle_simulator", default_value="false"),
+        DeclareLaunchArgument("enable_static_base_tf", default_value="false"),
+        DeclareLaunchArgument("static_base_x", default_value="0.0"),
+        DeclareLaunchArgument("static_base_y", default_value="0.0"),
+        DeclareLaunchArgument("static_base_z", default_value="0.0"),
+        DeclareLaunchArgument("static_base_yaw", default_value="0.0"),
         DeclareLaunchArgument("rviz", default_value="false"),
         pcl_publisher,
         global_planner,
@@ -161,5 +226,9 @@ def generate_launch_description():
         dwa_client,
         waypoint_navigator,
         waypoint_monitor,
+        dynamic_avoidance_monitor,
+        path_follower,
+        obstacle_simulator,
+        static_base_tf,
         rviz_node,
     ])

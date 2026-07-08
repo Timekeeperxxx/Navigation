@@ -24,6 +24,14 @@ def generate_launch_description():
     enable_dwa_client = LaunchConfiguration("enable_dwa_client")
     enable_waypoint_navigator = LaunchConfiguration("enable_waypoint_navigator")
     enable_waypoint_monitor = LaunchConfiguration("enable_waypoint_monitor")
+    enable_dynamic_avoidance = LaunchConfiguration("enable_dynamic_avoidance")
+    enable_path_follower = LaunchConfiguration("enable_path_follower")
+    enable_obstacle_simulator = LaunchConfiguration("enable_obstacle_simulator")
+    enable_static_base_tf = LaunchConfiguration("enable_static_base_tf")
+    static_base_x = LaunchConfiguration("static_base_x")
+    static_base_y = LaunchConfiguration("static_base_y")
+    static_base_z = LaunchConfiguration("static_base_z")
+    static_base_yaw = LaunchConfiguration("static_base_yaw")
     lidar_ip = LaunchConfiguration("lidar_ip")
     host_ip = LaunchConfiguration("host_ip")
     livox_config_path = LaunchConfiguration("livox_config_path")
@@ -69,6 +77,14 @@ def generate_launch_description():
             "enable_dwa_client": enable_dwa_client,
             "enable_waypoint_navigator": enable_waypoint_navigator,
             "enable_waypoint_monitor": enable_waypoint_monitor,
+            "enable_dynamic_avoidance": enable_dynamic_avoidance,
+            "enable_path_follower": enable_path_follower,
+            "enable_obstacle_simulator": enable_obstacle_simulator,
+            "enable_static_base_tf": enable_static_base_tf,
+            "static_base_x": static_base_x,
+            "static_base_y": static_base_y,
+            "static_base_z": static_base_z,
+            "static_base_yaw": static_base_yaw,
             "rviz": "false",
         }.items(),
     )
@@ -112,6 +128,14 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_dwa_client", default_value="false"),
         DeclareLaunchArgument("enable_waypoint_navigator", default_value="false"),
         DeclareLaunchArgument("enable_waypoint_monitor", default_value="false"),
+        DeclareLaunchArgument("enable_dynamic_avoidance", default_value="true"),
+        DeclareLaunchArgument("enable_path_follower", default_value="false"),
+        DeclareLaunchArgument("enable_obstacle_simulator", default_value="false"),
+        DeclareLaunchArgument("enable_static_base_tf", default_value="false"),
+        DeclareLaunchArgument("static_base_x", default_value="0.0"),
+        DeclareLaunchArgument("static_base_y", default_value="0.0"),
+        DeclareLaunchArgument("static_base_z", default_value="0.0"),
+        DeclareLaunchArgument("static_base_yaw", default_value="0.0"),
         DeclareLaunchArgument("rviz", default_value="false"),
         DeclareLaunchArgument("navigation_rviz", default_value=rviz),
         DeclareLaunchArgument("lidar_ip", default_value="192.168.123.179"),
