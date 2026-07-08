@@ -163,6 +163,9 @@ install(PROGRAMS
   script/waypoint_navigator_from_json.py
   script/waypoint_progress_monitor.py
   script/clicked_dwa_planner_client.py
+  script/dynamic_avoidance_monitor.py
+  script/nav_path_follower.py
+  script/local_obstacle_simulator.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
