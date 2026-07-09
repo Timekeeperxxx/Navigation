@@ -20,6 +20,7 @@ def generate_launch_description():
     enable_path_follower = LaunchConfiguration("enable_path_follower")
     enable_obstacle_simulator = LaunchConfiguration("enable_obstacle_simulator")
     enable_static_base_tf = LaunchConfiguration("enable_static_base_tf")
+    global_planner_config = LaunchConfiguration("global_planner_config")
     static_base_x = LaunchConfiguration("static_base_x")
     static_base_y = LaunchConfiguration("static_base_y")
     static_base_z = LaunchConfiguration("static_base_z")
@@ -27,7 +28,7 @@ def generate_launch_description():
     waypoints_file = LaunchConfiguration("waypoints_file")
     enable_rviz = LaunchConfiguration("rviz")
 
-    global_planner_config = PathJoinSubstitution([
+    default_global_planner_config = PathJoinSubstitution([
         FindPackageShare("nav_bringup"),
         "config",
         "global_planner.yaml",
@@ -41,8 +42,10 @@ def generate_launch_description():
     pcl_publisher = Node(
         package="nav_bringup",
         executable="nav_pcd_map_publisher.py",
+        name="pcl_publisher",
         output="screen",
         parameters=[
+            global_planner_config,
             {
                 "map_dir": map_pcd,
                 "ground_dir": ground_pcd,
@@ -215,6 +218,10 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_path_follower", default_value="false"),
         DeclareLaunchArgument("enable_obstacle_simulator", default_value="false"),
         DeclareLaunchArgument("enable_static_base_tf", default_value="false"),
+        DeclareLaunchArgument(
+            "global_planner_config",
+            default_value=default_global_planner_config,
+        ),
         DeclareLaunchArgument("static_base_x", default_value="0.0"),
         DeclareLaunchArgument("static_base_y", default_value="0.0"),
         DeclareLaunchArgument("static_base_z", default_value="0.0"),

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import struct
+import math
 from pathlib import Path
 
 import rclpy
@@ -20,6 +21,9 @@ class NavPcdMapPublisher(Node):
         self.declare_parameter("planground_dir", "")
         self.declare_parameter("frame_id", "map")
         self.declare_parameter("publish_period", 1.0)
+        self.declare_parameter("map_down_sample", 0.0)
+        self.declare_parameter("ground_down_sample", 0.0)
+        self.declare_parameter("planground_down_sample", 0.0)
 
         self.frame_id = str(self.get_parameter("frame_id").value)
         self.publish_period = float(self.get_parameter("publish_period").value)
@@ -31,10 +35,10 @@ class NavPcdMapPublisher(Node):
         )
 
         self.entries: list[tuple[str, PointCloud2, object]] = []
-        for param_name, topic in (
-            ("map_dir", "/mapcloud"),
-            ("ground_dir", "/mapground"),
-            ("planground_dir", "/planground"),
+        for param_name, topic, downsample_param in (
+            ("map_dir", "/mapcloud", "map_down_sample"),
+            ("ground_dir", "/mapground", "ground_down_sample"),
+            ("planground_dir", "/planground", "planground_down_sample"),
         ):
             file_name = str(self.get_parameter(param_name).value).strip()
             if not file_name:
@@ -42,11 +46,15 @@ class NavPcdMapPublisher(Node):
                 continue
 
             points = self._read_pcd(Path(file_name))
+            raw_count = len(points)
+            leaf_size = float(self.get_parameter(downsample_param).value)
+            points = self._voxel_downsample(points, leaf_size)
             message = self._build_message(points)
             publisher = self.create_publisher(PointCloud2, topic, qos)
             self.entries.append((topic, message, publisher))
             self.get_logger().info(
-                f"发布 {param_name}: {file_name} -> {topic}, points={len(points)}"
+                f"发布 {param_name}: {file_name} -> {topic}, raw_points={raw_count}, "
+                f"points={len(points)}, down_sample={leaf_size:.3f}"
             )
 
         if not self.entries:
@@ -166,6 +174,40 @@ class NavPcdMapPublisher(Node):
             intensity = float(values[intensity_idx]) if intensity_idx >= 0 else 0.0
             points.append((float(values[x_idx]), float(values[y_idx]), float(values[z_idx]), intensity))
         return points
+
+    def _voxel_downsample(
+        self, points: list[tuple[float, float, float, float]], leaf_size: float
+    ) -> list[tuple[float, float, float, float]]:
+        if leaf_size <= 0.0 or len(points) <= 1:
+            return points
+
+        inv_leaf = 1.0 / leaf_size
+        voxels: dict[tuple[int, int, int], list[float]] = {}
+        for x, y, z, intensity in points:
+            key = (
+                math.floor(x * inv_leaf),
+                math.floor(y * inv_leaf),
+                math.floor(z * inv_leaf),
+            )
+            bucket = voxels.get(key)
+            if bucket is None:
+                voxels[key] = [x, y, z, intensity, 1.0]
+            else:
+                bucket[0] += x
+                bucket[1] += y
+                bucket[2] += z
+                bucket[3] += intensity
+                bucket[4] += 1.0
+
+        return [
+            (
+                bucket[0] / bucket[4],
+                bucket[1] / bucket[4],
+                bucket[2] / bucket[4],
+                bucket[3] / bucket[4],
+            )
+            for bucket in voxels.values()
+        ]
 
     def _build_message(self, points: list[tuple[float, float, float, float]]) -> PointCloud2:
         message = PointCloud2()

@@ -25,6 +25,7 @@ def generate_launch_description():
     host_ip = LaunchConfiguration("host_ip")
     livox_config_path = LaunchConfiguration("livox_config_path")
     lio_voxel_filter_size = LaunchConfiguration("lio_voxel_filter_size")
+    map_ds_size = LaunchConfiguration("map_ds_size")
     map_preview_ds_size = LaunchConfiguration("map_preview_ds_size")
     lidar_time_offset = LaunchConfiguration("lidar_time_offset")
     imu_na = LaunchConfiguration("imu_na")
@@ -108,6 +109,7 @@ def generate_launch_description():
                 "lio.map.save_map": True,
                 "lio.map.save_map_dir": map_dir,
                 "lio.map.map_name": map_name,
+                "lio.map.ds_size": map_ds_size,
                 "lio.sensor.voxel_fliter_size": lio_voxel_filter_size,
                 "lio.output.map_preview_ds_size": map_preview_ds_size,
                 "lio.sensor.lidar_time_offset": lidar_time_offset,
@@ -188,6 +190,7 @@ def generate_launch_description():
         DeclareLaunchArgument("lidar_ip", default_value="192.168.123.179"),
         DeclareLaunchArgument("host_ip", default_value=""),
         DeclareLaunchArgument("lio_voxel_filter_size", default_value="0.5"),
+        DeclareLaunchArgument("map_ds_size", default_value="0.2"),
         DeclareLaunchArgument("map_preview_ds_size", default_value="0.3"),
         DeclareLaunchArgument("lidar_time_offset", default_value="0.0"),
         DeclareLaunchArgument("imu_na", default_value="0.03"),
@@ -196,8 +199,8 @@ def generate_launch_description():
         DeclareLaunchArgument("imu_nbg", default_value="0.0003"),
         DeclareLaunchArgument("estimate_gravity", default_value="true"),
         DeclareLaunchArgument("use_query_time_undistort", default_value="false"),
-        DeclareLaunchArgument("lidar_imu_roll_deg", default_value="1.3"),
-        DeclareLaunchArgument("lidar_imu_pitch_deg", default_value="-1.3"),
+        DeclareLaunchArgument("lidar_imu_roll_deg", default_value="0.0"),
+        DeclareLaunchArgument("lidar_imu_pitch_deg", default_value="0.0"),
         DeclareLaunchArgument("lidar_imu_yaw_deg", default_value="0.0"),
         DeclareLaunchArgument("loop_closure", default_value="false"),
         DeclareLaunchArgument("loop_search_radius", default_value="5.0"),

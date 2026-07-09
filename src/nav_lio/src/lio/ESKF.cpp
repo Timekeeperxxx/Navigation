@@ -56,7 +56,10 @@ void ESKF::SetInitialConditions(Options options, const V3& init_bg,
   imu_scale_ = imu_scale;
 
   P_ = 1e-4 * COV::Identity();
-  P_.template block<3, 3>(0, 0) = 0.1 * M_PI / 180.0 * M3::Identity();   // r
+  P_.template block<3, 3>(kIdxR, kIdxR) = 0.1 * M_PI / 180.0 * M3::Identity();   // r
+  P_.template block<3, 3>(kIdxG, kIdxG) =
+      (options_.estimate_gravity_ ? 1e-2 : 1e-8) * M3::Identity();
+  NormalizeGravity();
 
 }
 
@@ -93,13 +96,27 @@ void ESKF::BuildNoise(const Options& options) {
                    ea2, ea2, ea2;    // nba: ba -> a -> v -> p
 }
 
-void ESKF::Update() {
-  R_ = R_ * SO3::Exp(dx_.template block<3, 1>(0, 0));
-  p_ += dx_.template block<3, 1>(3, 0);
-  v_ += dx_.template block<3, 1>(6, 0);
+void ESKF::NormalizeGravity() {
+  const scalar gravity_norm = static_cast<scalar>(g_gravity_norm);
+  const scalar norm = g_.norm();
+  if (norm > static_cast<scalar>(1e-6)) {
+    g_ = gravity_norm * g_ / norm;
+  } else {
+    g_ = V3(0, 0, -gravity_norm);
+  }
+}
 
-  bg_ += dx_.template block<3, 1>(9, 0);
-  ba_ += dx_.template block<3, 1>(12, 0);
+void ESKF::Update() {
+  R_ = R_ * SO3::Exp(dx_.template block<3, 1>(kIdxR, 0));
+  p_ += dx_.template block<3, 1>(kIdxP, 0);
+  v_ += dx_.template block<3, 1>(kIdxV, 0);
+
+  bg_ += dx_.template block<3, 1>(kIdxBg, 0);
+  ba_ += dx_.template block<3, 1>(kIdxBa, 0);
+  if (options_.estimate_gravity_) {
+    g_ += dx_.template block<3, 1>(kIdxG, 0);
+    NormalizeGravity();
+  }
 
   fw_R_ = R_;
   fw_p_ = p_;
@@ -195,18 +212,22 @@ bool ESKF::Predict(const IMUData& imu) {
   M3 R_dt = R_m3 * dt;
 
   F_X f_x = F_X::Identity();
-  f_x.template block<3, 3>(0, 0) = SO3::Exp(-body_omega_, dt).R_;
-  f_x.template block<3, 3>(0, 9) = - Jr_dt;
-  f_x.template block<3, 3>(3, 6) = M3::Identity() * dt;
-  f_x.template block<3, 3>(6, 0) = - R_m3 * SO3::hat(acc) * dt;
-  f_x.template block<3, 3>(6, 12) = - R_dt;
+  f_x.template block<3, 3>(kIdxR, kIdxR) = SO3::Exp(-body_omega_, dt).R_;
+  f_x.template block<3, 3>(kIdxR, kIdxBg) = - Jr_dt;
+  f_x.template block<3, 3>(kIdxP, kIdxV) = M3::Identity() * dt;
+  f_x.template block<3, 3>(kIdxV, kIdxR) = - R_m3 * SO3::hat(acc) * dt;
+  f_x.template block<3, 3>(kIdxV, kIdxBa) = - R_dt;
+  if (options_.estimate_gravity_) {
+    f_x.template block<3, 3>(kIdxP, kIdxG) = 0.5 * M3::Identity() * dt * dt;
+    f_x.template block<3, 3>(kIdxV, kIdxG) = M3::Identity() * dt;
+  }
   
 
   F_W f_w = F_W::Zero();
-  f_w.template block<3, 3>(0, 0) = - Jr_dt;
-  f_w.template block<3, 3>(6, 3) = - R_dt;                 // v -> na
-  f_w.template block<3, 3>(9, 6) = M3::Identity() * dt;    // bg 随机游走
-  f_w.template block<3, 3>(12, 9) = M3::Identity() * dt;   // ba 随机游走
+  f_w.template block<3, 3>(kIdxR, 0) = - Jr_dt;
+  f_w.template block<3, 3>(kIdxV, 3) = - R_dt;                 // v -> na
+  f_w.template block<3, 3>(kIdxBg, 6) = M3::Identity() * dt;   // bg 随机游走
+  f_w.template block<3, 3>(kIdxBa, 9) = M3::Identity() * dt;   // ba 随机游走
 
   P_ = f_x * P_ * f_x.transpose() + f_w * Q_ * f_w.transpose();
 
@@ -288,7 +309,7 @@ bool ESKF::UpdateObserve(ESKF::ObsFunc obs) {
   Pk = P_;
 
   // project P
-  M3 J_theta = M3::Identity() - 0.5 * SO3::hat(dx_.template block<3, 1>(0, 0));
+  M3 J_theta = M3::Identity() - 0.5 * SO3::hat(dx_.template block<3, 1>(kIdxR, 0));
   for(int j = 0; j < kStateDim; j+=3){
     Pk.block<3,3>(0, j).noalias() = J_theta * P_.block<3,3>(0, j);
   }

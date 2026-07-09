@@ -78,6 +78,7 @@ type edge_t is inside here
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 namespace global_planner
 {
@@ -157,6 +158,7 @@ class GlobalPlanner : public rclcpp::Node {
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
       rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_static_graph_;
       rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_weighted_pc_;
+      rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_planner_ready_;
 
       /*cb*/
       rclcpp::TimerBase::SharedPtr perception_3d_check_timer_;

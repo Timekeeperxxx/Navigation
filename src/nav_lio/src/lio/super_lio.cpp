@@ -301,6 +301,7 @@ bool SuperLIO::kf_init(){
   options.bias_acce_var_ = g_imu_nba;
   options.num_iterations_ = g_kf_max_iterations;
   options.quit_eps_ = g_kf_quit_eps;
+  options.estimate_gravity_ = g_kf_estimate_gravity;
 
   float imu_scale = g_gravity_norm / mean_acce.norm();
   kf_->SetInitialConditions(options, V3::Zero(), V3::Zero(), imu_scale, ref_gravity);

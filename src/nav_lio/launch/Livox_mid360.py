@@ -43,6 +43,11 @@ def generate_launch_description():
         default_value='0.5',
         description='前端匹配点云体素大小'
     )
+    declare_map_ds_size_arg = DeclareLaunchArgument(
+        'map_ds_size',
+        default_value='0.2',
+        description='最终 map.pcd 保存体素大小'
+    )
     declare_lidar_time_offset_arg = DeclareLaunchArgument(
         'lidar_time_offset',
         default_value='0.0',
@@ -103,6 +108,7 @@ def generate_launch_description():
                     {"lio.map.save_map": LaunchConfiguration('save_map'),
                      "lio.map.save_map_dir": LaunchConfiguration('save_map_dir'),
                      "lio.map.map_name": LaunchConfiguration('map_name'),
+                     "lio.map.ds_size": LaunchConfiguration('map_ds_size'),
                      "lio.sensor.voxel_fliter_size": LaunchConfiguration('lio_voxel_filter_size'),
                      "lio.sensor.lidar_time_offset": LaunchConfiguration('lidar_time_offset'),
                      "lio.sensor.use_query_time_undistort": LaunchConfiguration('use_query_time_undistort'),
@@ -150,6 +156,7 @@ def generate_launch_description():
     ld.add_action(declare_save_map_dir_arg)
     ld.add_action(declare_map_name_arg)
     ld.add_action(declare_lio_voxel_filter_size_arg)
+    ld.add_action(declare_map_ds_size_arg)
     ld.add_action(declare_lidar_time_offset_arg)
     ld.add_action(declare_estimate_gravity_arg)
     ld.add_action(declare_use_query_time_undistort_arg)

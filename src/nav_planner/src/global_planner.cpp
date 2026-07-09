@@ -204,6 +204,7 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   pub_path_ = this->create_publisher<nav_msgs::msg::Path>("global_path", 1);
   pub_static_graph_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("static_graph", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
   pub_weighted_pc_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("weighted_ground", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
+  pub_planner_ready_ = this->create_publisher<std_msgs::msg::Bool>("/nav/planner_ready", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
 
   //@ Subscribe to planground point cloud
   sub_planground_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -658,6 +659,10 @@ void GlobalPlanner::getStaticGraphFromPerception3D(){
     marker_array.markers.push_back(marker);
   }
   pub_static_graph_->publish(marker_array);
+  graph_ready_ = true;
+  std_msgs::msg::Bool ready_msg;
+  ready_msg.data = true;
+  pub_planner_ready_->publish(ready_msg);
   RCLCPP_INFO(this->get_logger(), "Published static graph with %lu markers", static_graph_.getSize());
 }
 

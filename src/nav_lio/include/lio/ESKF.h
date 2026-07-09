@@ -12,12 +12,18 @@ namespace LI2Sup{
 class ESKF {
 public:
   using Ptr   = std::shared_ptr<ESKF>;
-  static constexpr int kStateDim = 15;
+  static constexpr int kStateDim = 18;
   static constexpr int kNoiseDim = 12;
-                                                  //         0 3 6 9 12
-  using STATE = Eigen::Matrix<BASIC::scalar, kStateDim, 1>;     // 误差状态: R p v bg ba；重力 g_ 不进入滤波更新。
+  static constexpr int kIdxR = 0;
+  static constexpr int kIdxP = 3;
+  static constexpr int kIdxV = 6;
+  static constexpr int kIdxBg = 9;
+  static constexpr int kIdxBa = 12;
+  static constexpr int kIdxG = 15;
+                                                  //         0 3 6 9 12 15
+  using STATE = Eigen::Matrix<BASIC::scalar, kStateDim, 1>;     // 误差状态: R p v bg ba g
   using STATE_DOF = STATE;
-  using NOISE = Eigen::Matrix<BASIC::scalar, 12, 12>;
+  using NOISE = Eigen::Matrix<BASIC::scalar, kNoiseDim, kNoiseDim>;
   using COV   = Eigen::Matrix<BASIC::scalar, kStateDim, kStateDim>;
   using F_X   = Eigen::Matrix<BASIC::scalar, kStateDim, kStateDim>;
   using F_W   = Eigen::Matrix<BASIC::scalar, kStateDim, kNoiseDim>;
@@ -32,6 +38,7 @@ public:
     double acce_var_ = 1e-2;
     double bias_gyro_var_ = 1e-6;
     double bias_acce_var_ = 1e-4;
+    bool estimate_gravity_ = false;
   };
 
 
@@ -90,6 +97,7 @@ public:
 private:
   void BuildNoise(const Options& options);
   void Update();
+  void NormalizeGravity();
   
   bool  need_converge_  = true;
   float imu_scale_ = 1.0;

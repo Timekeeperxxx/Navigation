@@ -13,6 +13,7 @@ install(DIRECTORY
 install(PROGRAMS
   scripts/pcd_debug_publisher.py
   scripts/nav_pcd_map_publisher.py
+  scripts/rviz_2d_goal_planner.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -135,22 +135,12 @@ void LoadParamFromRos(rclcpp::Node& node)
     r_data[i] = static_cast<scalar>(extrinsic_lidar_imu[3 + i]);
   }
   M3 __R(r_data.data());
-  double lidar_imu_roll_deg = 0.0;
-  double lidar_imu_pitch_deg = 0.0;
   double lidar_imu_yaw_deg = 0.0;
-  node.declare_parameter<double>("lio.extrinsic.lidar_imu_roll_deg", 0.0);
-  node.declare_parameter<double>("lio.extrinsic.lidar_imu_pitch_deg", 0.0);
   node.declare_parameter<double>("lio.extrinsic.lidar_imu_yaw_deg", 0.0);
-  node.get_parameter("lio.extrinsic.lidar_imu_roll_deg", lidar_imu_roll_deg);
-  node.get_parameter("lio.extrinsic.lidar_imu_pitch_deg", lidar_imu_pitch_deg);
   node.get_parameter("lio.extrinsic.lidar_imu_yaw_deg", lidar_imu_yaw_deg);
   const auto lidar_imu_correction_R =
       Eigen::AngleAxisd(lidar_imu_yaw_deg * M_PI / 180.0,
-                        Eigen::Vector3d::UnitZ()) *
-      Eigen::AngleAxisd(lidar_imu_pitch_deg * M_PI / 180.0,
-                        Eigen::Vector3d::UnitY()) *
-      Eigen::AngleAxisd(lidar_imu_roll_deg * M_PI / 180.0,
-                        Eigen::Vector3d::UnitX());
+                        Eigen::Vector3d::UnitZ());
   __R = __R * lidar_imu_correction_R.toRotationMatrix().cast<scalar>();
   g_lidar_imu = SE3(__R, __t);
 
