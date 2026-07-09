@@ -4,6 +4,8 @@ log/
 logs/
 runtime/
 maps/
+.agents/
+.codex/
 launch_params_*
 __pycache__/
 *.py[cod]

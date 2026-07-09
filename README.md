@@ -6,6 +6,7 @@
 
 - `src/nav_bringup`：统一启动与配置包。
 - `src/nav_runtime`：JSON topic 到兼容脚本的运行时封装。
+- `src/nav_robot_control`：Go2/B2 可切换底盘控制适配器。
 - `adapters/legacy_scripts`：通用兼容脚本，供上层后端通过 subprocess 调用。
 - `tools/test_app`：Navigation 自带轻量测试前后端。
 - `docs`：设计、接口、动态避障、覆盖矩阵和实施计划。
@@ -98,6 +99,30 @@ ros2 launch nav_bringup navigation.launch.py scene_dir:=/home/frankluo/Projects/
 ```bash
 bash adapters/legacy_scripts/stop_navigation.sh
 ```
+
+## Go2/B2 控制切换
+
+默认不启动底盘控制。真机控制时通过参数选择目标：
+
+```bash
+ros2 launch nav_bringup navigation.launch.py \
+  scene_dir:=/path/to/scene \
+  enable_path_follower:=true \
+  enable_robot_control:=true \
+  robot_model:=go2_webrtc \
+  go2_connection_method:=LocalAP
+```
+
+```bash
+ros2 launch nav_bringup navigation.launch.py \
+  scene_dir:=/path/to/scene \
+  enable_path_follower:=true \
+  enable_robot_control:=true \
+  robot_model:=b2 \
+  b2_cmd_vel_topic:=/unitree/b2/cmd_vel
+```
+
+详细说明见 `docs/17_Go2_B2控制切换.md`。
 
 ## 当前阶段限制
 
