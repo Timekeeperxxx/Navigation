@@ -14,6 +14,7 @@
   <exec_depend>nav_terrain</exec_depend>
   <exec_depend>nav_planner</exec_depend>
   <exec_depend>nav_lio</exec_depend>
+  <exec_depend>nav_robot_control</exec_depend>
   <exec_depend>pcl_ros</exec_depend>
   <exec_depend>rclcpp</exec_depend>
   <exec_depend>rclpy</exec_depend>

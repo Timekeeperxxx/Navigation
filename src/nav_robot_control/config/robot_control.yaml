@@ -1,0 +1,62 @@
+go2_webrtc_bridge:
+  ros__parameters:
+    cmd_vel_topic: "/cmd_vel_safe"
+    nav_stop_topic: "/nav_stop"
+    nav_start_topic: "/nav_start"
+    status_topic: "/robot_control/status"
+
+    connection_method: "LocalSTA"
+    robot_ip: "192.168.8.181"
+    serial_number: ""
+    aes_128_key: ""
+    reconnect_delay_sec: 3.0
+    command_period_sec: 0.05
+    watchdog_timeout_sec: 0.3
+    require_nav_start: false
+
+    ensure_motion_mode: false
+    motion_mode: "normal"
+    stand_on_connect: true
+    stand_command: "BalanceStand"
+    stand_wait_sec: 1.0
+    continuous_gait_on_connect: false
+    continuous_gait_value: 1
+    speed_level_on_connect: false
+    speed_level: 1
+    move_command_mode: "no_reply"
+    mcf_linear_scale: 1.0
+    mcf_angular_scale: 1.0
+    mcf_max_x: 1.0
+    mcf_max_y: 1.0
+    mcf_max_z: 1.0
+    wireless_linear_scale: 3.0
+    wireless_angular_scale: 2.0
+    soft_stop_mode: "zero_velocity"
+    hard_stop_on_nav_stop: true
+    use_remote_command_from_api: false
+    enable_builtin_obstacle_avoidance: false
+    stop_on_shutdown: true
+
+    max_linear_x: 0.15
+    max_linear_y: 0.10
+    max_angular_z: 0.40
+    deadband_linear: 0.01
+    deadband_angular: 0.02
+
+b2_cmd_vel_bridge:
+  ros__parameters:
+    cmd_vel_topic: "/cmd_vel_safe"
+    nav_stop_topic: "/nav_stop"
+    nav_start_topic: "/nav_start"
+    status_topic: "/robot_control/status"
+    b2_cmd_vel_topic: "/unitree/b2/cmd_vel"
+
+    watchdog_timeout_sec: 0.3
+    publish_period_sec: 0.05
+    require_nav_start: false
+
+    max_linear_x: 0.15
+    max_linear_y: 0.10
+    max_angular_z: 0.40
+    deadband_linear: 0.01
+    deadband_angular: 0.02
