@@ -1,9 +1,13 @@
 #include <chrono> // Date and time
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <functional> // Arithmetic, comparisons, and logical operations
 #include <memory> // Dynamic memory management
 #include <string> // String functions
  
 #include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/image_encodings.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
@@ -13,16 +17,33 @@
 #include <pcl/filters/filter.h>
 #include <pcl/filters/voxel_grid.h>
 
-// ros
-#include <cv_bridge/cv_bridge.h>
-#include <image_geometry/pinhole_camera_model.h>
-
-#include <opencv2/core/core.hpp>
-#include <opencv2/imgproc/imgproc.hpp>
-#include <opencv2/opencv.hpp>
-
 // chrono_literals handles user-defined time durations (e.g. 500ms) 
 using namespace std::chrono_literals;
+
+namespace
+{
+uint16_t readUint16(const uint8_t* pixel, bool big_endian)
+{
+  return big_endian
+             ? static_cast<uint16_t>((static_cast<uint16_t>(pixel[0]) << 8U) | pixel[1])
+             : static_cast<uint16_t>(pixel[0] | (static_cast<uint16_t>(pixel[1]) << 8U));
+}
+
+float readFloat32(const uint8_t* pixel, bool big_endian)
+{
+  const uint32_t bits = big_endian
+                            ? (static_cast<uint32_t>(pixel[0]) << 24U) |
+                                  (static_cast<uint32_t>(pixel[1]) << 16U) |
+                                  (static_cast<uint32_t>(pixel[2]) << 8U) | pixel[3]
+                            : static_cast<uint32_t>(pixel[0]) |
+                                  (static_cast<uint32_t>(pixel[1]) << 8U) |
+                                  (static_cast<uint32_t>(pixel[2]) << 16U) |
+                                  (static_cast<uint32_t>(pixel[3]) << 24U);
+  float value = 0.0F;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+}  // namespace
  
 class DepthImg2PointCloud : public rclcpp::Node
 {
@@ -39,7 +60,6 @@ class DepthImg2PointCloud : public rclcpp::Node
     bool has_info_;
     sensor_msgs::msg::CameraInfo camera_info_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
-    cv_bridge::CvImagePtr cv_image_;
     rclcpp::Time last_pub_time_;
     double max_distance_;
     double frequency_;
@@ -113,13 +133,20 @@ void DepthImg2PointCloud::cbDepthImg(const sensor_msgs::msg::Image::SharedPtr ms
   fx = 1.0f / camera_info_.k[0]; 
   fy = 1.0f / camera_info_.k[4]; 
 
-  try
+  const bool is_u16 = msg->encoding == sensor_msgs::image_encodings::TYPE_16UC1 ||
+                      msg->encoding == sensor_msgs::image_encodings::MONO16;
+  const bool is_f32 = msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1;
+  if (!is_u16 && !is_f32)
   {
-    cv_image_ = cv_bridge::toCvCopy(msg, msg->encoding);
+    RCLCPP_ERROR(this->get_logger(), "Unsupported depth encoding: %s", msg->encoding.c_str());
+    return;
   }
-  catch (cv_bridge::Exception& e)
+  const size_t bytes_per_pixel = is_u16 ? sizeof(uint16_t) : sizeof(float);
+  const size_t min_step = static_cast<size_t>(msg->width) * bytes_per_pixel;
+  const size_t required_size = static_cast<size_t>(msg->step) * msg->height;
+  if (msg->step < min_step || msg->data.size() < required_size)
   {
-    RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
+    RCLCPP_ERROR(this->get_logger(), "Depth image dimensions do not match step/data size");
     return;
   }
   
@@ -129,10 +156,13 @@ void DepthImg2PointCloud::cbDepthImg(const sensor_msgs::msg::Image::SharedPtr ms
     for (unsigned int u = 0; u < msg->width; u+=sample_step_)
     {
       pcl::PointXYZ pt;
-      float z = cv_image_->image.at<unsigned short>(v, u) * 0.001;
+      const uint8_t* pixel = msg->data.data() + static_cast<size_t>(v) * msg->step +
+                             static_cast<size_t>(u) * bytes_per_pixel;
+      const float z = is_u16 ? static_cast<float>(readUint16(pixel, msg->is_bigendian)) * 0.001F
+                             : readFloat32(pixel, msg->is_bigendian);
 
       // Check for invalid measurements
-      if (std::isnan(z) || z>max_distance_)
+      if (!std::isfinite(z) || z <= 0.0F || z > max_distance_)
       {
         continue;
         //pt.x = pt.y = pt.z = Z;

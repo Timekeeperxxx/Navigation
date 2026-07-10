@@ -35,6 +35,7 @@ class NavigationRuntimeNode(Node):
         self.current_process: Optional[subprocess.Popen] = None
         self.current_mode = "idle"
         self.current_log_path: Optional[Path] = None
+        self.current_request_id: Optional[str] = None
 
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -92,8 +93,10 @@ class NavigationRuntimeNode(Node):
             return
 
         action = str(command.get("command", command.get("action", ""))).strip()
+        self.current_request_id = str(command.get("request_id", "")).strip() or None
         if not action:
             self._publish_result(False, "missing_command", "缺少 command 字段")
+            self.current_request_id = None
             return
 
         handlers = {
@@ -109,6 +112,7 @@ class NavigationRuntimeNode(Node):
         handler = handlers.get(action)
         if handler is None:
             self._publish_result(False, "unsupported_command", f"不支持的命令：{action}")
+            self.current_request_id = None
             return
 
         try:
@@ -116,6 +120,8 @@ class NavigationRuntimeNode(Node):
         except Exception as exc:  # pylint: disable=broad-except
             self.get_logger().exception(f"执行命令失败：{action}")
             self._publish_result(False, "command_failed", str(exc), {"command": action})
+        finally:
+            self.current_request_id = None
 
     def _start_mapping(self, command: Dict[str, Any]) -> None:
         map_dir = str(command.get("map_dir", "")).strip()
@@ -274,6 +280,8 @@ class NavigationRuntimeNode(Node):
             "message": message,
             "timestamp": time.time(),
         }
+        if self.current_request_id:
+            payload["request_id"] = self.current_request_id
         if extra:
             payload.update(extra)
         self._publish_json(self.result_pub, payload)

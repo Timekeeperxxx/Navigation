@@ -8,11 +8,11 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    default_scene_dir = "/home/frankluo/Projects/Navigation/maps/bag_mid360_raw_01_20260709_161602"
+    default_scene_dir = "/home/jetson/Project/BOTDOG/MAPS/Scene23_多楼层"
     default_map_pcd = f"{default_scene_dir}/map.pcd"
-    default_ground_pcd = f"{default_scene_dir}/terrain_map_20260709_162509_ground.pcd"
+    default_ground_pcd = f"{default_scene_dir}/terrain_map_20260702_213550_ground.pcd"
     default_planground_pcd = (
-        f"{default_scene_dir}/terrain_map_20260709_162509_base_footprint_fill.pcd"
+        f"{default_scene_dir}/terrain_map_20260702_213550_base_footprint_fill.pcd"
     )
 
     map_pcd = LaunchConfiguration("map_pcd")

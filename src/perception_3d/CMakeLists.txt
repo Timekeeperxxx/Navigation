@@ -25,11 +25,7 @@ find_package(tf2_eigen REQUIRED)
 find_package(angles REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(pcl_conversions REQUIRED)
-find_package(cv_bridge REQUIRED)
-find_package(image_geometry REQUIRED)
-
 find_package(PCL REQUIRED)
-find_package(OpenCV REQUIRED)
 find_package(OpenMP REQUIRED)
 
 set(dependencies
@@ -167,13 +163,10 @@ set(utils_dependencies
   sensor_msgs
   builtin_interfaces
   pcl_conversions
-  cv_bridge
-  image_geometry
 )
 add_executable(depthimg2pointcloud_node utils/depthimg2pointcloud_node.cpp)
 target_link_libraries(depthimg2pointcloud_node
   ${PCL_LIBRARIES}
-  ${OpenCV_LIBRARIES}
 )
 ament_target_dependencies(depthimg2pointcloud_node
   ${utils_dependencies}

@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointField
@@ -24,9 +25,13 @@ class NavPcdMapPublisher(Node):
         self.declare_parameter("map_down_sample", 0.0)
         self.declare_parameter("ground_down_sample", 0.0)
         self.declare_parameter("planground_down_sample", 0.0)
+        self.declare_parameter("max_input_bytes", 67_108_864)
+        self.declare_parameter("max_input_points", 4_000_000)
 
         self.frame_id = str(self.get_parameter("frame_id").value)
         self.publish_period = float(self.get_parameter("publish_period").value)
+        self.max_input_bytes = int(self.get_parameter("max_input_bytes").value)
+        self.max_input_points = int(self.get_parameter("max_input_points").value)
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -70,6 +75,14 @@ class NavPcdMapPublisher(Node):
             publisher.publish(message)
 
     def _read_pcd(self, path: Path) -> list[tuple[float, float, float, float]]:
+        if not path.is_file():
+            raise RuntimeError(f"PCD 文件不存在：{path}")
+        file_size = path.stat().st_size
+        if self.max_input_bytes > 0 and file_size > self.max_input_bytes:
+            raise RuntimeError(
+                f"PCD 超过 Jetson 原始文件安全上限：{path} size={file_size} "
+                f"limit={self.max_input_bytes}；请先生成体素降采样导航缓存"
+            )
         data = path.read_bytes()
         data_offset = data.find(b"DATA ")
         if data_offset < 0:
@@ -92,13 +105,18 @@ class NavPcdMapPublisher(Node):
         types = header.get("TYPE", [])
         counts = [int(value) for value in header.get("COUNT", ["1"] * len(fields))]
         points_count = int(header.get("POINTS", header.get("WIDTH", ["0"]))[0])
+        if self.max_input_points > 0 and points_count > self.max_input_points:
+            raise RuntimeError(
+                f"PCD 超过 Jetson 点数安全上限：{path} points={points_count} "
+                f"limit={self.max_input_points}；请先生成体素降采样导航缓存"
+            )
         data_type = header.get("DATA", [""])[0].lower()
         if not {"x", "y", "z"}.issubset(set(fields)):
             raise RuntimeError(f"PCD 缺少 x/y/z 字段：{path}")
 
         if data_type == "binary":
             return self._read_binary_points(
-                data[line_end + 1 :], fields, sizes, types, counts, points_count
+                memoryview(data)[line_end + 1 :], fields, sizes, types, counts, points_count
             )
         if data_type == "ascii":
             return self._read_ascii_points(
@@ -108,7 +126,7 @@ class NavPcdMapPublisher(Node):
 
     def _read_binary_points(
         self,
-        body: bytes,
+        body: bytes | memoryview,
         fields: list[str],
         sizes: list[int],
         types: list[str],
@@ -139,7 +157,7 @@ class NavPcdMapPublisher(Node):
 
     def _unpack_value(
         self,
-        body: bytes,
+        body: bytes | memoryview,
         offset: int,
         fields: list[str],
         sizes: list[int],
@@ -233,12 +251,11 @@ def main() -> None:
     node = NavPcdMapPublisher()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

@@ -47,7 +47,13 @@ def _launch_setup(context, *args, **kwargs):
     if not base_footprint_fill_pcd:
         base_footprint_fill_pcd = _latest_file(
             scene_dir,
-            ["footprint_fill.pcd", "*_base_footprint_fill.pcd", "*footprint_fill.pcd"],
+            [
+                "footprint_fill.pcd",
+                "fill_footpoint.pcd",
+                "*_base_footprint_fill.pcd",
+                "*footprint_fill.pcd",
+                "*fill_footpoint*.pcd",
+            ],
         )
 
     actions = [
@@ -94,7 +100,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "scene_dir",
-            default_value="/home/frankluo/Projects/Navigation/maps/test_scene1",
+            default_value="/home/jetson/Project/BOTDOG/MAPS/Scene23_多楼层",
         ),
         DeclareLaunchArgument("map_pcd", default_value=""),
         DeclareLaunchArgument("ground_pcd", default_value=""),

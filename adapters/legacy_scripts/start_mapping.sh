@@ -17,6 +17,8 @@ LOG_FILE="$ROBOT_NAV_LOG_ROOT/start_mapping_debug.log"
 PID_FILE="$ROBOT_NAV_RUNTIME_ROOT/mapping.pid"
 READY_FILE="$MAP_DIR/.ground_generation_started"
 STATUS_FILE="$ROBOT_NAV_RUNTIME_ROOT/mapping_status.json"
+MAPPING_READY_TIMEOUT_SECONDS="${MAPPING_READY_TIMEOUT_SECONDS:-55}"
+RUN_LOG_OFFSET=0
 
 mkdir -p "$MAP_DIR"
 rm -f "$READY_FILE" "$PID_FILE"
@@ -28,7 +30,7 @@ cleanup() {
   local status=$?
   if [ -n "${LAUNCH_PID:-}" ] && kill -0 "$LAUNCH_PID" 2>/dev/null; then
     log_info "收到停止信号，正在请求保存 terrain_map 并停止建图"
-    ros2 service call /save_terrain_map std_srvs/srv/Trigger "{}" >> "$LOG_FILE" 2>&1 || true
+    request_save_terrain_map "$LOG_FILE" || true
     kill -INT "$LAUNCH_PID" 2>/dev/null || true
     wait "$LAUNCH_PID" 2>/dev/null || true
   fi
@@ -56,25 +58,49 @@ launch_args=(
   "map_dir:=$MAP_DIR"
   "lidar_ip:=$LIVOX_LIDAR_IP"
   "livox_config_path:=$LIVOX_CONFIG_PATH"
+  "publish_base_footprint_tf:=true"
 )
 
 if [ -n "$LIVOX_HOST_IP" ]; then
   launch_args+=("host_ip:=$LIVOX_HOST_IP")
 fi
 
+RUN_LOG_OFFSET="$(stat -c '%s' "$LOG_FILE" 2>/dev/null || printf '0')"
 ros2 launch nav_bringup mapping.launch.py "${launch_args[@]}" >> "$LOG_FILE" 2>&1 &
 
 LAUNCH_PID=$!
 printf '%s\n' "$LAUNCH_PID" > "$PID_FILE"
 
-sleep 3
-if kill -0 "$LAUNCH_PID" 2>/dev/null; then
+mapping_log_has() {
+  local marker="$1"
+  grep -Fq "$marker" < <(tail -c "+$((RUN_LOG_OFFSET + 1))" "$LOG_FILE" 2>/dev/null)
+}
+
+mapping_service_ready() {
+  [ "$(ros2 service type /save_terrain_map 2>/dev/null || true)" = "std_srvs/srv/Trigger" ]
+}
+
+ready_waited=0
+while kill -0 "$LAUNCH_PID" 2>/dev/null && [ "$ready_waited" -lt "$MAPPING_READY_TIMEOUT_SECONDS" ]; do
+  if mapping_log_has "publish use livox custom format" \
+    && mapping_log_has "Map init done" \
+    && mapping_service_ready; then
+    break
+  fi
+  sleep 1
+  ready_waited=$((ready_waited + 1))
+done
+
+if kill -0 "$LAUNCH_PID" 2>/dev/null \
+  && mapping_log_has "publish use livox custom format" \
+  && mapping_log_has "Map init done" \
+  && mapping_service_ready; then
   date '+%Y-%m-%d %H:%M:%S' > "$READY_FILE"
   write_json_file "$STATUS_FILE" "{\"running\":true,\"map_dir\":\"$MAP_DIR\",\"pid\":$LAUNCH_PID,\"stage\":\"running\"}"
   log_info "建图进程已启动：PID=$LAUNCH_PID"
   log_info "ready 文件：$READY_FILE"
 else
-  log_error "建图进程启动后立即退出，请查看日志：$LOG_FILE"
+  log_error "建图链路在 ${MAPPING_READY_TIMEOUT_SECONDS}s 内未就绪，请检查 Livox、SuperLIO 和 terrain 服务：$LOG_FILE"
   exit 1
 fi
 

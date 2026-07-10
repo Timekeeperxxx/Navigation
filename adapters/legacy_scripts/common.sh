@@ -25,6 +25,9 @@ LIVOX_DEFAULT_HOST_IP="${LIVOX_DEFAULT_HOST_IP:-192.168.123.222}"
 LIVOX_CONFIG_PATH="${LIVOX_CONFIG_PATH:-$ROBOT_NAV_RUNTIME_ROOT/livox_mid360_config.json}"
 SUPERLIO_ROOT_DIR="${SUPERLIO_ROOT_DIR:-$ROBOT_NAV_WS/src/nav_lio}"
 NAV_EXTRA_SETUP_FILES="${NAV_EXTRA_SETUP_FILES:-}"
+NAV_FASTDDS_PROFILE="${NAV_FASTDDS_PROFILE:-$SCRIPT_DIR/fastdds_navigation.xml}"
+NAV_MAX_RAW_PCD_BYTES="${NAV_MAX_RAW_PCD_BYTES:-67108864}"
+NAV_MAX_RAW_PCD_POINTS="${NAV_MAX_RAW_PCD_POINTS:-4000000}"
 
 mkdir -p "$ROBOT_NAV_MAP_ROOT" "$ROBOT_NAV_LOG_ROOT" "$ROBOT_NAV_RUNTIME_ROOT" "$ROS_LOG_DIR"
 
@@ -40,11 +43,36 @@ log_error() {
   printf '[Navigation][错误] %s\n' "$*" >&2
 }
 
+reset_navigation_overlay_env() {
+  local clean_path=""
+  local entry=""
+  local old_ifs="$IFS"
+
+  # BotDog usually runs inside its Python venv and may have sourced legacy ROS
+  # workspaces. Native ROS executables must start from the board's Humble base.
+  IFS=':'
+  for entry in ${PATH:-}; do
+    case "$entry" in
+      *"/.venv/"*|*"/virtualenv/"*) ;;
+      *) clean_path="${clean_path:+$clean_path:}$entry" ;;
+    esac
+  done
+  IFS="$old_ifs"
+  export PATH="$clean_path"
+
+  unset VIRTUAL_ENV PYTHONHOME
+  unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH
+  unset ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION
+  unset PYTHONPATH LD_LIBRARY_PATH PKG_CONFIG_PATH CPATH CPLUS_INCLUDE_PATH
+}
+
 source_navigation_env() {
   if [ ! -f "$ROS2_SETUP_FILE" ]; then
     log_error "找不到 ROS2 环境文件：$ROS2_SETUP_FILE"
     exit 1
   fi
+
+  reset_navigation_overlay_env
 
   set +u
   # shellcheck disable=SC1090
@@ -80,6 +108,13 @@ source_navigation_env() {
   export ROS_DOMAIN_ID
   export RMW_IMPLEMENTATION
   export ROS_LOG_DIR
+  if [ -f "$NAV_FASTDDS_PROFILE" ]; then
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$NAV_FASTDDS_PROFILE"
+    unset FASTDDS_DEFAULT_PROFILES_FILE
+  else
+    log_warn "未找到 Navigation FastDDS profile：$NAV_FASTDDS_PROFILE"
+    unset FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE
+  fi
 }
 
 detect_livox_host_ip() {
@@ -156,8 +191,46 @@ EOF
 write_json_file() {
   local file_path="$1"
   local content="$2"
+  local tmp_path="${file_path}.tmp.$$"
   mkdir -p "$(dirname "$file_path")"
-  printf '%s\n' "$content" > "$file_path"
+  printf '%s\n' "$content" > "$tmp_path"
+  mv -f "$tmp_path" "$file_path"
+}
+
+validate_navigation_pcd_input() {
+  local file_path="$1"
+  local label="$2"
+  local file_size=""
+  local point_count=""
+
+  if [ ! -f "$file_path" ]; then
+    log_error "$label 文件不存在：$file_path"
+    return 1
+  fi
+  if ! [[ "$NAV_MAX_RAW_PCD_BYTES" =~ ^[0-9]+$ ]] || ! [[ "$NAV_MAX_RAW_PCD_POINTS" =~ ^[0-9]+$ ]]; then
+    log_error "PCD 安全上限必须是非负整数：bytes=$NAV_MAX_RAW_PCD_BYTES points=$NAV_MAX_RAW_PCD_POINTS"
+    return 1
+  fi
+
+  file_size="$(stat -c '%s' "$file_path" 2>/dev/null || printf '0')"
+  point_count="$(awk 'toupper($1) == "POINTS" { print $2; exit } toupper($1) == "DATA" { exit }' "$file_path" 2>/dev/null || true)"
+  if ! [[ "$point_count" =~ ^[0-9]+$ ]]; then
+    log_error "$label PCD header 缺少有效 POINTS：$file_path"
+    return 1
+  fi
+
+  if [ "$NAV_MAX_RAW_PCD_BYTES" -gt 0 ] && [ "$file_size" -gt "$NAV_MAX_RAW_PCD_BYTES" ]; then
+    log_error "$label 超过 Jetson 原始 PCD 安全上限：size=$file_size limit=$NAV_MAX_RAW_PCD_BYTES file=$file_path"
+    log_error "请先在大内存主机生成体素降采样 PCD，再替换该场景的导航输入文件"
+    return 1
+  fi
+  if [ "$NAV_MAX_RAW_PCD_POINTS" -gt 0 ] && [ "$point_count" -gt "$NAV_MAX_RAW_PCD_POINTS" ]; then
+    log_error "$label 超过 Jetson PCD 点数安全上限：points=$point_count limit=$NAV_MAX_RAW_PCD_POINTS file=$file_path"
+    log_error "请先在大内存主机生成体素降采样 PCD，再替换该场景的导航输入文件"
+    return 1
+  fi
+
+  log_info "$label 容量检查通过：bytes=$file_size points=$point_count"
 }
 
 find_scene_pcd_file() {
@@ -166,11 +239,25 @@ find_scene_pcd_file() {
   local fallback_pattern="$3"
   local label="$4"
   local selected=""
+  local pattern=""
+  local old_ifs="$IFS"
 
-  selected="$(find "$scene_dir" -maxdepth 1 -type f -iname "$exact_name" -print -quit 2>/dev/null || true)"
+  IFS='|'
+  for pattern in $exact_name; do
+    selected="$(find "$scene_dir" -maxdepth 1 -type f -iname "$pattern" -print -quit 2>/dev/null || true)"
+    if [ -n "$selected" ]; then
+      break
+    fi
+  done
   if [ -z "$selected" ]; then
-    selected="$(find "$scene_dir" -maxdepth 1 -type f -iname "$fallback_pattern" -print 2>/dev/null | sort | tail -n 1 || true)"
+    for pattern in $fallback_pattern; do
+      selected="$(find "$scene_dir" -maxdepth 1 -type f -iname "$pattern" -print 2>/dev/null | sort | tail -n 1 || true)"
+      if [ -n "$selected" ]; then
+        break
+      fi
+    done
   fi
+  IFS="$old_ifs"
 
   if [ -z "$selected" ]; then
     log_error "场景缺少 $label：$scene_dir"
@@ -196,6 +283,7 @@ stop_pid_file() {
   local pid_file="$1"
   local label="$2"
   local grace_seconds="${3:-2}"
+  local expected_pattern="${4:-}"
   local pid=""
   local pgid=""
   local current_pgid=""
@@ -211,6 +299,15 @@ stop_pid_file() {
   fi
 
   if kill -0 "$pid" 2>/dev/null; then
+    if [ -n "$expected_pattern" ]; then
+      local cmdline=""
+      cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+      if [ -n "$cmdline" ] && [[ "$cmdline" != *"$expected_pattern"* ]]; then
+        log_warn "$label PID 已被其他进程复用，拒绝发送信号：PID=$pid cmd=$cmdline"
+        rm -f "$pid_file"
+        return 0
+      fi
+    fi
     log_info "停止 $label：PID=$pid"
     pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
     current_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]' || true)"

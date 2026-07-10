@@ -141,6 +141,6 @@ def generate_launch_description():
         livox_node,
         static_tf_node,
         relocation_node,
-        OpaqueFunction(function=_ground_pcd_setup),
+        OpaqueFunction(function=_ground_pcd_setup, condition=IfCondition(rviz)),
         rviz_node,
     ])

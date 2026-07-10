@@ -74,7 +74,9 @@ class ProcessManager:
                     "has_terrain_map": any(name.endswith("_map.pcd") for name in files),
                     "has_ground": "ground.pcd" in files or any(name.endswith("ground.pcd") for name in files),
                     "has_footprint": "footprint_fill.pcd" in files
-                    or any(name.endswith("footprint_fill.pcd") for name in files),
+                    or "fill_footpoint.pcd" in files
+                    or any(name.endswith("footprint_fill.pcd") for name in files)
+                    or any("fill_footpoint" in name and name.endswith(".pcd") for name in files),
                     "files": sorted(files),
                 }
             )
@@ -98,7 +100,13 @@ class ProcessManager:
                 "base_footprint_fill",
                 self._find_scene_file(
                     scene_dir,
-                    ["footprint_fill.pcd", "*_base_footprint_fill.pcd", "*footprint_fill.pcd"],
+                    [
+                        "footprint_fill.pcd",
+                        "fill_footpoint.pcd",
+                        "*_base_footprint_fill.pcd",
+                        "*footprint_fill.pcd",
+                        "*fill_footpoint*.pcd",
+                    ],
                 ),
             ),
         ]
