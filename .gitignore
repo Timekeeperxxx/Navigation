@@ -14,3 +14,4 @@ __pycache__/
 .coverage
 *.bag
 *.db3
+adapters/legacy_scripts/env.local

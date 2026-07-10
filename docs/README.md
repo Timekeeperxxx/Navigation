@@ -30,4 +30,5 @@
 - [15_常用命令.md](./15_常用命令.md)
 - [16_功能补齐自检.md](./16_功能补齐自检.md)
 - [17_Go2_B2控制切换.md](./17_Go2_B2控制切换.md)
+- [18_SCAN-Planner集成.md](./18_SCAN-Planner集成.md)
 - [go2_control_chain/README.md](./go2_control_chain/README.md)
