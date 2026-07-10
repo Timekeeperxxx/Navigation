@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>traj_utils</name>
+  <version>0.0.0</version>
+  <description>Trajectory and visualization utilities for SCAN-Planner.</description>
+
+  <maintainer email="bzhouai@todo.todo">bzhouai</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>bspline_opt</depend>
+  <depend>path_searching</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
