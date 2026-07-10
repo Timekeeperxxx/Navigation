@@ -19,13 +19,16 @@ pcl_publisher:
     map_down_sample: 0.2
     ground_down_sample: 0.1
     planground_down_sample: 0.1
+    max_input_bytes: 67108864
+    max_input_points: 4000000
 
 perception_3d_global:
   ros__parameters:
     global_frame: "map"
     robot_base_frame: "base_footprint"
     max_obstacle_distance: 9999.0
-    inscribed_radius: 0.1
+    # Half of the Unitree B2 standing width (0.450m), rounded up to 0.23m.
+    inscribed_radius: 0.23
     inflation_descending_rate: 2.0
     inflation_radius: 1.5
     sensors_collected_frequency: 5.0

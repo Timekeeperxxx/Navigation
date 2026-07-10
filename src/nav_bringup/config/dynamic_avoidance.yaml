@@ -7,13 +7,15 @@ dynamic_avoidance_monitor:
     global_frame: "map"
     robot_frame: "base_footprint"
     global_path_topic: "/global_path"
-    obstacle_topic: "/nav/local_obstacles"
+    obstacle_topic: "/grid_map/occupancy_inflate"
     status_topic: "/nav/obstacle_status"
     replan_request_topic: "/nav/replan_request"
     prune_plan_topic: "/prune_plan"
     local_path_topic: "/nav/local_path"
     cmd_vel_in_topic: "/cmd_vel"
     cmd_vel_safe_topic: "/cmd_vel_safe"
+    nav_start_topic: "/nav_start"
+    nav_stop_topic: "/nav_stop"
 
     lookahead_distance: 2.0
     backward_prune_distance: 0.5
@@ -27,9 +29,10 @@ dynamic_avoidance_monitor:
     check_period_sec: 0.2
     slow_speed_scale: 0.35
 
-    require_obstacle_stream: false
+    require_obstacle_stream: true
     allow_path_start_without_tf: false
     enable_cmd_vel_filter: true
+    require_nav_start: true
     publish_zero_on_stop: true
     publish_prune_plan: true
     replan_publish_period: 1.0

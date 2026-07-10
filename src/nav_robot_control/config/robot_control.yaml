@@ -5,18 +5,21 @@ go2_webrtc_bridge:
     nav_start_topic: "/nav_start"
     status_topic: "/robot_control/status"
 
-    connection_method: "LocalSTA"
+    connection_method: "LocalAP"
     robot_ip: "192.168.8.181"
     serial_number: ""
     aes_128_key: ""
     reconnect_delay_sec: 3.0
     command_period_sec: 0.05
-    watchdog_timeout_sec: 0.3
+    # BotDog 前端按键约每 0.5 秒续发，0.75 秒可避免按住时脉冲停车；
+    # 松键仍会立即发布零速，断流则在 0.75 秒内停车。
+    watchdog_timeout_sec: 0.75
     require_nav_start: false
 
     ensure_motion_mode: false
     motion_mode: "normal"
-    stand_on_connect: true
+    # 安全默认：连接热点不自动改变机器狗姿态。
+    stand_on_connect: false
     stand_command: "BalanceStand"
     stand_wait_sec: 1.0
     continuous_gait_on_connect: false

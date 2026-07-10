@@ -1,0 +1,16 @@
+# Unitree Go2 size-related parameter backup from before the B2 migration.
+# These values belong to the previous Go2 deployment; do not use them for B2.
+# Pass this file after the active planner config only when restoring a Go2 robot.
+
+scan_planner_node:
+  ros__parameters:
+    "grid_map/body_height": 0.30
+    "grid_map/double_cylinder_radius": 0.25
+    "grid_map/double_cylinder_offset": 0.18
+    "grid_map/obstacles_inflation_z_up": 0.10
+    "grid_map/obstacles_inflation_z_down": 0.40
+
+perception_3d_global:
+  ros__parameters:
+    # Previous Go2 global-planner collision radius.
+    inscribed_radius: 0.10

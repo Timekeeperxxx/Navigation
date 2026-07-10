@@ -27,6 +27,19 @@ def generate_launch_description():
     enable_dynamic_avoidance = LaunchConfiguration("enable_dynamic_avoidance")
     enable_path_follower = LaunchConfiguration("enable_path_follower")
     enable_obstacle_simulator = LaunchConfiguration("enable_obstacle_simulator")
+    enable_scan_planner = LaunchConfiguration("enable_scan_planner")
+    enable_scan_controller = LaunchConfiguration("enable_scan_controller")
+    enable_scan_path_adapter = LaunchConfiguration("enable_scan_path_adapter")
+    enable_scan_tf_pose = LaunchConfiguration("enable_scan_tf_pose")
+    scan_planner_config = LaunchConfiguration("scan_planner_config")
+    scan_body_pose_topic = LaunchConfiguration("scan_body_pose_topic")
+    scan_sensor_pose_topic = LaunchConfiguration("scan_sensor_pose_topic")
+    scan_cloud_topic = LaunchConfiguration("scan_cloud_topic")
+    scan_global_frame = LaunchConfiguration("scan_global_frame")
+    scan_robot_frame = LaunchConfiguration("scan_robot_frame")
+    scan_tf_pose_rate = LaunchConfiguration("scan_tf_pose_rate")
+    scan_raw_path_topic = LaunchConfiguration("scan_raw_path_topic")
+    scan_initial_path_topic = LaunchConfiguration("scan_initial_path_topic")
     enable_robot_control = LaunchConfiguration("enable_robot_control")
     robot_model = LaunchConfiguration("robot_model")
     robot_control_config = LaunchConfiguration("robot_control_config")
@@ -116,6 +129,19 @@ def generate_launch_description():
             "enable_dynamic_avoidance": enable_dynamic_avoidance,
             "enable_path_follower": enable_path_follower,
             "enable_obstacle_simulator": enable_obstacle_simulator,
+            "enable_scan_planner": enable_scan_planner,
+            "enable_scan_controller": enable_scan_controller,
+            "enable_scan_path_adapter": enable_scan_path_adapter,
+            "enable_scan_tf_pose": enable_scan_tf_pose,
+            "scan_planner_config": scan_planner_config,
+            "scan_body_pose_topic": scan_body_pose_topic,
+            "scan_sensor_pose_topic": scan_sensor_pose_topic,
+            "scan_cloud_topic": scan_cloud_topic,
+            "scan_global_frame": scan_global_frame,
+            "scan_robot_frame": scan_robot_frame,
+            "scan_tf_pose_rate": scan_tf_pose_rate,
+            "scan_raw_path_topic": scan_raw_path_topic,
+            "scan_initial_path_topic": scan_initial_path_topic,
             "enable_static_base_tf": enable_static_base_tf,
             "static_base_x": static_base_x,
             "static_base_y": static_base_y,
@@ -213,6 +239,26 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_dynamic_avoidance", default_value="true"),
         DeclareLaunchArgument("enable_path_follower", default_value="false"),
         DeclareLaunchArgument("enable_obstacle_simulator", default_value="false"),
+        DeclareLaunchArgument("enable_scan_planner", default_value="false"),
+        DeclareLaunchArgument("enable_scan_controller", default_value="false"),
+        DeclareLaunchArgument("enable_scan_path_adapter", default_value="true"),
+        DeclareLaunchArgument("enable_scan_tf_pose", default_value="true"),
+        DeclareLaunchArgument(
+            "scan_planner_config",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("nav_bringup"),
+                "config",
+                "scan_planner.yaml",
+            ]),
+        ),
+        DeclareLaunchArgument("scan_body_pose_topic", default_value="/scan/body_pose"),
+        DeclareLaunchArgument("scan_sensor_pose_topic", default_value="/lio/odom"),
+        DeclareLaunchArgument("scan_cloud_topic", default_value="/lio/cloud_world"),
+        DeclareLaunchArgument("scan_global_frame", default_value="map"),
+        DeclareLaunchArgument("scan_robot_frame", default_value="base_footprint"),
+        DeclareLaunchArgument("scan_tf_pose_rate", default_value="30.0"),
+        DeclareLaunchArgument("scan_raw_path_topic", default_value="/global_path"),
+        DeclareLaunchArgument("scan_initial_path_topic", default_value="/scan/initial_path"),
         DeclareLaunchArgument("enable_robot_control", default_value="false"),
         DeclareLaunchArgument("robot_model", default_value="none"),
         DeclareLaunchArgument(

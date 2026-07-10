@@ -15,9 +15,9 @@ livox:
   xfer_format: 0
 
 paths:
-  maps_root: "/home/frankluo/Projects/Navigation/maps"
-  logs_root: "/home/frankluo/Projects/Navigation/logs"
-  runtime_root: "/home/frankluo/Projects/Navigation/runtime"
+  maps_root: "/home/jetson/Project/BOTDOG/MAPS"
+  logs_root: "/home/jetson/Project/BOTDOG/BotDog/logs"
+  runtime_root: "/home/jetson/Project/BOTDOG/BotDog/data/nav_runtime"
 
 topics:
   clicked_point: "/clicked_point"
@@ -29,12 +29,13 @@ topics:
   nav_status: "/nav_status"
   lio_cloud_world: "/lio/cloud_world"
   lio_odom: "/lio/odom"
+  scan_body_pose: "/scan/body_pose"
   terrain_map: "/terrain_map"
   base_footprint_fill_cloud: "/base_footprint_fill_cloud"
 
 dynamic_avoidance:
   enabled: true
-  obstacle_topic: "/nav/local_obstacles"
+  obstacle_topic: "/grid_map/occupancy_inflate"
   status_topic: "/nav/obstacle_status"
   replan_request_topic: "/nav/replan_request"
   lookahead_distance: 2.0

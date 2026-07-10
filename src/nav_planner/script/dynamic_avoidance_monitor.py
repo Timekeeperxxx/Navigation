@@ -63,6 +63,8 @@ class DynamicAvoidanceMonitor(Node):
         self.declare_parameter("local_path_topic", "/nav/local_path")
         self.declare_parameter("cmd_vel_in_topic", "/cmd_vel")
         self.declare_parameter("cmd_vel_safe_topic", "/cmd_vel_safe")
+        self.declare_parameter("nav_start_topic", "/nav_start")
+        self.declare_parameter("nav_stop_topic", "/nav_stop")
         self.declare_parameter("lookahead_distance", 2.0)
         self.declare_parameter("backward_prune_distance", 0.5)
         self.declare_parameter("path_deviation_tolerance", 1.0)
@@ -77,6 +79,7 @@ class DynamicAvoidanceMonitor(Node):
         self.declare_parameter("require_obstacle_stream", False)
         self.declare_parameter("allow_path_start_without_tf", False)
         self.declare_parameter("enable_cmd_vel_filter", True)
+        self.declare_parameter("require_nav_start", True)
         self.declare_parameter("publish_zero_on_stop", True)
         self.declare_parameter("publish_prune_plan", True)
         self.declare_parameter("replan_publish_period", 1.0)
@@ -111,6 +114,7 @@ class DynamicAvoidanceMonitor(Node):
         self.enable_cmd_vel_filter = bool(
             self.get_parameter("enable_cmd_vel_filter").value
         )
+        self.require_nav_start = bool(self.get_parameter("require_nav_start").value)
         self.publish_zero_on_stop = bool(
             self.get_parameter("publish_zero_on_stop").value
         )
@@ -129,6 +133,7 @@ class DynamicAvoidanceMonitor(Node):
         self.current_status = "idle"
         self.current_action = "none"
         self.current_path_blocked = False
+        self.navigation_enabled = not self.require_nav_start
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -165,6 +170,18 @@ class DynamicAvoidanceMonitor(Node):
             Twist,
             str(self.get_parameter("cmd_vel_in_topic").value),
             self._on_cmd_vel,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("nav_start_topic").value),
+            self._on_nav_start,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("nav_stop_topic").value),
+            self._on_nav_stop,
             10,
         )
 
@@ -209,10 +226,26 @@ class DynamicAvoidanceMonitor(Node):
     def _on_cmd_vel(self, msg: Twist) -> None:
         if not self.enable_cmd_vel_filter:
             return
+        if not self.navigation_enabled:
+            self.cmd_vel_safe_pub.publish(Twist())
+            return
         self.cmd_vel_safe_pub.publish(self._filter_twist(msg))
+
+    def _on_nav_start(self, msg: Bool) -> None:
+        self.navigation_enabled = bool(msg.data)
+        if not self.navigation_enabled:
+            self.cmd_vel_safe_pub.publish(Twist())
+
+    def _on_nav_stop(self, msg: Bool) -> None:
+        if not msg.data:
+            return
+        self.navigation_enabled = False
+        self.cmd_vel_safe_pub.publish(Twist())
 
     def _on_timer(self) -> None:
         now = self._now_sec()
+        if not self.navigation_enabled:
+            self.cmd_vel_safe_pub.publish(Twist())
         robot_point, robot_error = self._get_robot_point()
         status_payload: dict[str, object]
 
@@ -666,8 +699,7 @@ def main(args: Optional[list[str]] = None) -> None:
         pass
     finally:
         node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

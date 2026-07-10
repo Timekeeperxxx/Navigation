@@ -1,7 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -19,6 +19,19 @@ def generate_launch_description():
     enable_dynamic_avoidance = LaunchConfiguration("enable_dynamic_avoidance")
     enable_path_follower = LaunchConfiguration("enable_path_follower")
     enable_obstacle_simulator = LaunchConfiguration("enable_obstacle_simulator")
+    enable_scan_planner = LaunchConfiguration("enable_scan_planner")
+    enable_scan_controller = LaunchConfiguration("enable_scan_controller")
+    enable_scan_path_adapter = LaunchConfiguration("enable_scan_path_adapter")
+    enable_scan_tf_pose = LaunchConfiguration("enable_scan_tf_pose")
+    scan_planner_config = LaunchConfiguration("scan_planner_config")
+    scan_body_pose_topic = LaunchConfiguration("scan_body_pose_topic")
+    scan_sensor_pose_topic = LaunchConfiguration("scan_sensor_pose_topic")
+    scan_cloud_topic = LaunchConfiguration("scan_cloud_topic")
+    scan_global_frame = LaunchConfiguration("scan_global_frame")
+    scan_robot_frame = LaunchConfiguration("scan_robot_frame")
+    scan_tf_pose_rate = LaunchConfiguration("scan_tf_pose_rate")
+    scan_raw_path_topic = LaunchConfiguration("scan_raw_path_topic")
+    scan_initial_path_topic = LaunchConfiguration("scan_initial_path_topic")
     enable_static_base_tf = LaunchConfiguration("enable_static_base_tf")
     global_planner_config = LaunchConfiguration("global_planner_config")
     static_base_x = LaunchConfiguration("static_base_x")
@@ -37,6 +50,11 @@ def generate_launch_description():
         FindPackageShare("nav_bringup"),
         "config",
         "dynamic_avoidance.yaml",
+    ])
+    default_scan_planner_config = PathJoinSubstitution([
+        FindPackageShare("nav_bringup"),
+        "config",
+        "scan_planner.yaml",
     ])
 
     pcl_publisher = Node(
@@ -129,8 +147,13 @@ def generate_launch_description():
                 "goal_pose_topic": "/goal_pose",
                 "waypoint_reached_topic": "/waypoint_reached",
                 "status_topic": "/nav/waypoint_progress",
+                "nav_status_topic": "/nav_status",
+                "goal_yaw_topic": "goal_yaw",
+                "nav_start_topic": "/nav_start",
+                "nav_stop_topic": "/nav_stop",
                 "reach_tolerance_xy": 0.25,
                 "reach_tolerance_z": 1.0,
+                "reach_tolerance_yaw": 0.15,
                 "timeout_sec": 0.0,
             }
         ],
@@ -162,6 +185,88 @@ def generate_launch_description():
         output="screen",
         parameters=[dynamic_avoidance_config],
         condition=IfCondition(enable_obstacle_simulator),
+    )
+
+    scan_path_adapter = Node(
+        package="nav_bringup",
+        executable="scan_initial_path_adapter.py",
+        name="scan_initial_path_adapter",
+        output="screen",
+        parameters=[
+            {
+                "input_path_topic": scan_raw_path_topic,
+                "output_path_topic": scan_initial_path_topic,
+                "min_point_spacing": 0.5,
+                "max_points": 120,
+            }
+        ],
+        condition=IfCondition(
+            PythonExpression([
+                "'",
+                enable_scan_planner,
+                "' in ['true', 'True', '1'] and '",
+                enable_scan_path_adapter,
+                "' in ['true', 'True', '1']",
+            ])
+        ),
+    )
+
+    scan_tf_pose = Node(
+        package="nav_bringup",
+        executable="scan_tf_pose_publisher.py",
+        name="scan_tf_pose_publisher",
+        output="screen",
+        parameters=[{
+            "global_frame": scan_global_frame,
+            "robot_frame": scan_robot_frame,
+            "output_topic": scan_body_pose_topic,
+            "publish_rate_hz": scan_tf_pose_rate,
+        }],
+        condition=IfCondition(
+            PythonExpression([
+                "('",
+                enable_scan_planner,
+                "' in ['true', 'True', '1'] or '",
+                enable_scan_controller,
+                "' in ['true', 'True', '1']) and '",
+                enable_scan_tf_pose,
+                "' in ['true', 'True', '1']",
+            ])
+        ),
+    )
+
+    scan_planner = Node(
+        package="scan_planner",
+        executable="scan_planner_node",
+        name="scan_planner_node",
+        output="screen",
+        parameters=[
+            scan_planner_config,
+            {
+                "body_pose_topic": scan_body_pose_topic,
+            },
+        ],
+        remappings=[
+            ("/initial_path", scan_initial_path_topic),
+            ("/grid_map/body_pose", scan_body_pose_topic),
+            ("/grid_map/sensor_pose", scan_sensor_pose_topic),
+            ("/grid_map/cloud", scan_cloud_topic),
+        ],
+        condition=IfCondition(enable_scan_planner),
+    )
+
+    scan_controller = Node(
+        package="scan_planner",
+        executable="closed_loop_controller",
+        name="closed_loop_controller",
+        output="screen",
+        parameters=[
+            scan_planner_config,
+            {
+                "body_pose_topic": scan_body_pose_topic,
+            },
+        ],
+        condition=IfCondition(enable_scan_controller),
     )
 
     static_base_tf = Node(
@@ -217,6 +322,22 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_dynamic_avoidance", default_value="true"),
         DeclareLaunchArgument("enable_path_follower", default_value="false"),
         DeclareLaunchArgument("enable_obstacle_simulator", default_value="false"),
+        DeclareLaunchArgument("enable_scan_planner", default_value="false"),
+        DeclareLaunchArgument("enable_scan_controller", default_value="false"),
+        DeclareLaunchArgument("enable_scan_path_adapter", default_value="true"),
+        DeclareLaunchArgument("enable_scan_tf_pose", default_value="true"),
+        DeclareLaunchArgument(
+            "scan_planner_config",
+            default_value=default_scan_planner_config,
+        ),
+        DeclareLaunchArgument("scan_body_pose_topic", default_value="/scan/body_pose"),
+        DeclareLaunchArgument("scan_sensor_pose_topic", default_value="/lio/odom"),
+        DeclareLaunchArgument("scan_cloud_topic", default_value="/lio/cloud_world"),
+        DeclareLaunchArgument("scan_global_frame", default_value="map"),
+        DeclareLaunchArgument("scan_robot_frame", default_value="base_footprint"),
+        DeclareLaunchArgument("scan_tf_pose_rate", default_value="30.0"),
+        DeclareLaunchArgument("scan_raw_path_topic", default_value="/global_path"),
+        DeclareLaunchArgument("scan_initial_path_topic", default_value="/scan/initial_path"),
         DeclareLaunchArgument("enable_static_base_tf", default_value="false"),
         DeclareLaunchArgument(
             "global_planner_config",
@@ -236,6 +357,10 @@ def generate_launch_description():
         dynamic_avoidance_monitor,
         path_follower,
         obstacle_simulator,
+        scan_path_adapter,
+        scan_tf_pose,
+        scan_planner,
+        scan_controller,
         static_base_tf,
         rviz_node,
     ])
