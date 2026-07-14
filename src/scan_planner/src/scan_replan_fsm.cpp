@@ -56,6 +56,7 @@ namespace scan_planner
     getParam(nh, "grid_map/obstacles_inflation_z_down", self_inflation_z_down_, 0.0);
     getParam(nh, "grid_map/double_cylinder_radius", self_double_cylinder_radius_, 0.0);
     getParam(nh, "grid_map/double_cylinder_offset", self_double_cylinder_offset_, 0.0);
+    getParam(nh, "grid_map/double_cylinder_center_offset", self_double_cylinder_center_offset_, 0.0);
     getParam(nh, "grid_map/body_height", body_height_, 0.4);
     getParam(nh, "grid_map/frame_id", self_inflation_frame_id_, std::string("world"));
 
@@ -374,6 +375,7 @@ namespace scan_planner
       wp(2) = pose_stamped.pose.position.z + body_height_; // Adjust for body height
       waypoints.push_back(wp);
     }
+    active_waypoints_ = waypoints;
     bool success = planGlobalTrajByWaypoints(waypoints);
 
     if (success)
@@ -411,7 +413,10 @@ namespace scan_planner
 
     odom_vel_(0) = msg->twist.twist.linear.x;
     odom_vel_(1) = msg->twist.twist.linear.y;
-    odom_vel_(2) = msg->twist.twist.linear.z;
+    // B2 has no commanded vertical degree of freedom.  Preserve z positions
+    // for terrain geometry, but do not feed estimated terrain-following vz
+    // into the trajectory boundary conditions as if it were controllable.
+    odom_vel_(2) = 0.0;
 
     //odom_acc_ = estimateAcc( msg );
 
@@ -486,6 +491,7 @@ namespace scan_planner
     center(2) += 0.5 * (z_up - z_down);
 
     Eigen::Vector3d heading(std::cos(getOdomYaw()), std::sin(getOdomYaw()), 0.0);
+    center += self_double_cylinder_center_offset_ * heading;
     Eigen::Vector3d front = center + self_double_cylinder_offset_ * heading;
     Eigen::Vector3d rear = center - self_double_cylinder_offset_ * heading;
 
@@ -984,6 +990,13 @@ namespace scan_planner
     {
       bool found_free_target = false;
       double adjusted_t = target_t;
+      const Eigen::Vector3d original_target = local_target_pt_;
+      const double start_to_goal = (start_pt_ - end_pt_).norm();
+
+      auto isBoundedCandidate = [&](const Eigen::Vector3d &pt) {
+        return (pt - original_target).norm() <= planning_horizon_ &&
+               (pt - end_pt_).norm() <= start_to_goal + 0.5;
+      };
 
       for (double dt = 0.0; dt <= planner_manager_->global_data_.global_duration_; dt += t_step)
       {
@@ -991,7 +1004,7 @@ namespace scan_planner
         if (t_forward <= planner_manager_->global_data_.global_duration_)
         {
           Eigen::Vector3d pt = planner_manager_->global_data_.getPosition(t_forward);
-          if (targetOccupancy(pt) == 0)
+          if (isBoundedCandidate(pt) && targetOccupancy(pt) == 0)
           {
             local_target_pt_ = pt;
             adjusted_t = t_forward;
@@ -1004,7 +1017,7 @@ namespace scan_planner
         if (t_backward >= std::max(0.0, dist_min_t))
         {
           Eigen::Vector3d pt = planner_manager_->global_data_.getPosition(t_backward);
-          if (targetOccupancy(pt) == 0)
+          if (isBoundedCandidate(pt) && targetOccupancy(pt) == 0)
           {
             local_target_pt_ = pt;
             adjusted_t = t_backward;
@@ -1021,7 +1034,20 @@ namespace scan_planner
       }
       else
       {
-        ROS_WARN_THROTTLE(1.0, "Local target in collision and no nearby collision-free target was found.");
+        // Prefer a known point from the original global reference path over a
+        // polynomial sample that has drifted after repeated frozen replans.
+        for (auto it = active_waypoints_.rbegin(); it != active_waypoints_.rend(); ++it)
+        {
+          if (isBoundedCandidate(*it) && targetOccupancy(*it) == 0)
+          {
+            local_target_pt_ = *it;
+            local_target_vel_.setZero();
+            ROS_WARN_THROTTLE(1.0, "Local target collision fallback uses a bounded reference-path point.");
+            return;
+          }
+        }
+        local_target_pt_ = original_target;
+        ROS_WARN_THROTTLE(1.0, "Local target in collision and no bounded collision-free target was found.");
       }
     }
 

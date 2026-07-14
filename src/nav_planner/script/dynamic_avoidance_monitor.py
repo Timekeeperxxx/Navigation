@@ -41,6 +41,7 @@ class PathWindow:
 class ObstacleCheck:
     path_blocked: bool
     blocker_count: int
+    self_filtered_count: int
     nearest_obstacle_distance: Optional[float]
     nearest_blocker_distance: Optional[float]
     nearest_path_distance: Optional[float]
@@ -56,6 +57,9 @@ class DynamicAvoidanceMonitor(Node):
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("robot_frame", "base_footprint")
         self.declare_parameter("global_path_topic", "/global_path")
+        self.declare_parameter("scan_execution_path_topic", "/scan/execution_path")
+        self.declare_parameter("scan_execution_path_timeout", 0.5)
+        self.declare_parameter("scan_execution_path_global_tolerance", 1.0)
         self.declare_parameter("obstacle_topic", "/nav/local_obstacles")
         self.declare_parameter("status_topic", "/nav/obstacle_status")
         self.declare_parameter("replan_request_topic", "/nav/replan_request")
@@ -63,6 +67,9 @@ class DynamicAvoidanceMonitor(Node):
         self.declare_parameter("local_path_topic", "/nav/local_path")
         self.declare_parameter("cmd_vel_in_topic", "/cmd_vel")
         self.declare_parameter("cmd_vel_safe_topic", "/cmd_vel_safe")
+        self.declare_parameter(
+            "safety_execution_frozen_topic", "/planning/safety_execution_frozen"
+        )
         self.declare_parameter("nav_start_topic", "/nav_start")
         self.declare_parameter("nav_stop_topic", "/nav_stop")
         self.declare_parameter("lookahead_distance", 2.0)
@@ -72,13 +79,17 @@ class DynamicAvoidanceMonitor(Node):
         self.declare_parameter("z_tolerance", 1.0)
         self.declare_parameter("stop_distance", 0.6)
         self.declare_parameter("slow_distance", 1.2)
+        self.declare_parameter("robot_self_clear_radius", 0.90)
         self.declare_parameter("replan_blocked_duration", 2.0)
-        self.declare_parameter("sensor_timeout", 0.5)
+        self.declare_parameter("sensor_timeout", 1.5)
         self.declare_parameter("check_period_sec", 0.2)
+        self.declare_parameter("obstacle_processing_period_sec", 0.2)
+        self.declare_parameter("max_obstacle_points", 8000)
         self.declare_parameter("slow_speed_scale", 0.35)
         self.declare_parameter("require_obstacle_stream", False)
         self.declare_parameter("allow_path_start_without_tf", False)
         self.declare_parameter("enable_cmd_vel_filter", True)
+        self.declare_parameter("enforce_path_blocking", True)
         self.declare_parameter("require_nav_start", True)
         self.declare_parameter("publish_zero_on_stop", True)
         self.declare_parameter("publish_prune_plan", True)
@@ -87,6 +98,13 @@ class DynamicAvoidanceMonitor(Node):
         self.enabled = bool(self.get_parameter("enabled").value)
         self.global_frame = str(self.get_parameter("global_frame").value)
         self.robot_frame = str(self.get_parameter("robot_frame").value)
+        self.scan_execution_path_timeout = max(
+            float(self.get_parameter("scan_execution_path_timeout").value), 0.1
+        )
+        self.scan_execution_path_global_tolerance = max(
+            float(self.get_parameter("scan_execution_path_global_tolerance").value),
+            0.1,
+        )
         self.lookahead_distance = float(self.get_parameter("lookahead_distance").value)
         self.backward_prune_distance = float(
             self.get_parameter("backward_prune_distance").value
@@ -100,10 +118,19 @@ class DynamicAvoidanceMonitor(Node):
         self.z_tolerance = float(self.get_parameter("z_tolerance").value)
         self.stop_distance = float(self.get_parameter("stop_distance").value)
         self.slow_distance = float(self.get_parameter("slow_distance").value)
+        self.robot_self_clear_radius = max(
+            float(self.get_parameter("robot_self_clear_radius").value), 0.0
+        )
         self.replan_blocked_duration = float(
             self.get_parameter("replan_blocked_duration").value
         )
         self.sensor_timeout = float(self.get_parameter("sensor_timeout").value)
+        self.obstacle_processing_period = max(
+            float(self.get_parameter("obstacle_processing_period_sec").value), 0.05
+        )
+        self.max_obstacle_points = max(
+            int(self.get_parameter("max_obstacle_points").value), 1
+        )
         self.slow_speed_scale = float(self.get_parameter("slow_speed_scale").value)
         self.require_obstacle_stream = bool(
             self.get_parameter("require_obstacle_stream").value
@@ -113,6 +140,9 @@ class DynamicAvoidanceMonitor(Node):
         )
         self.enable_cmd_vel_filter = bool(
             self.get_parameter("enable_cmd_vel_filter").value
+        )
+        self.enforce_path_blocking = bool(
+            self.get_parameter("enforce_path_blocking").value
         )
         self.require_nav_start = bool(self.get_parameter("require_nav_start").value)
         self.publish_zero_on_stop = bool(
@@ -125,8 +155,18 @@ class DynamicAvoidanceMonitor(Node):
 
         self.path_points: list[Point3] = []
         self.path_frame = self.global_frame
+        self.execution_path_points: list[Point3] = []
+        self.last_execution_path_time: Optional[float] = None
+        self.execution_path_generation_time: Optional[float] = None
+        self.last_global_path_time: Optional[float] = None
+        self.active_path_points: list[Point3] = []
+        self.active_path_source = "none"
+        self.execution_path_age: Optional[float] = None
+        self.execution_path_generation_matches = False
+        self.execution_path_spatially_matches = False
         self.obstacles: list[Point3] = []
         self.last_obstacle_time: Optional[float] = None
+        self.last_obstacle_processing_time: Optional[float] = None
         self.blocked_since: Optional[float] = None
         self.last_replan_publish_time = 0.0
         self.replan_active = False
@@ -153,6 +193,11 @@ class DynamicAvoidanceMonitor(Node):
         self.cmd_vel_safe_pub = self.create_publisher(
             Twist, str(self.get_parameter("cmd_vel_safe_topic").value), 10
         )
+        self.execution_frozen_pub = self.create_publisher(
+            Bool,
+            str(self.get_parameter("safety_execution_frozen_topic").value),
+            10,
+        )
 
         self.create_subscription(
             Path,
@@ -161,10 +206,16 @@ class DynamicAvoidanceMonitor(Node):
             10,
         )
         self.create_subscription(
+            Path,
+            str(self.get_parameter("scan_execution_path_topic").value),
+            self._on_execution_path,
+            10,
+        )
+        self.create_subscription(
             PointCloud2,
             str(self.get_parameter("obstacle_topic").value),
             self._on_obstacles,
-            10,
+            1,
         )
         self.create_subscription(
             Twist,
@@ -190,11 +241,31 @@ class DynamicAvoidanceMonitor(Node):
         self.get_logger().info(
             "动态避障监测已启动："
             f"path={self.get_parameter('global_path_topic').value}, "
+            f"execution_path={self.get_parameter('scan_execution_path_topic').value}, "
             f"obstacles={self.get_parameter('obstacle_topic').value}, "
-            f"require_obstacle_stream={self.require_obstacle_stream}"
+            f"require_obstacle_stream={self.require_obstacle_stream}, "
+            f"obstacle_period={self.obstacle_processing_period:.2f}s, "
+            f"max_obstacle_points={self.max_obstacle_points}"
         )
 
     def _on_global_path(self, msg: Path) -> None:
+        points = self._points_from_path(msg)
+        self.path_points = points
+        self.path_frame = self.global_frame
+        self.last_global_path_time = self._now_sec()
+        if not points:
+            self.get_logger().warn("收到空的全局路径，动态避障进入 no_path 状态")
+
+    def _on_execution_path(self, msg: Path) -> None:
+        self.execution_path_points = self._points_from_path(msg)
+        self.last_execution_path_time = self._now_sec()
+        stamp = msg.header.stamp
+        generation_time = float(stamp.sec) + float(stamp.nanosec) / 1e9
+        self.execution_path_generation_time = (
+            generation_time if generation_time > 0.0 else self.last_execution_path_time
+        )
+
+    def _points_from_path(self, msg: Path) -> list[Point3]:
         frame_id = msg.header.frame_id or self.global_frame
         points: list[Point3] = []
         for pose in msg.poses:
@@ -207,12 +278,22 @@ class DynamicAvoidanceMonitor(Node):
             transformed = self._transform_point(point, pose_frame)
             if transformed is not None:
                 points.append(transformed)
-        self.path_points = points
-        self.path_frame = self.global_frame
-        if not points:
-            self.get_logger().warn("收到空的全局路径，动态避障进入 no_path 状态")
+        return points
 
     def _on_obstacles(self, msg: PointCloud2) -> None:
+        now = self._now_sec()
+        self.last_obstacle_time = now
+        if not self.navigation_enabled:
+            self.obstacles = []
+            return
+        if (
+            self.last_obstacle_processing_time is not None
+            and now - self.last_obstacle_processing_time
+            < self.obstacle_processing_period
+        ):
+            return
+        self.last_obstacle_processing_time = now
+
         points = self._read_cloud_points(msg)
         transformed: list[Point3] = []
         frame_id = msg.header.frame_id or self.global_frame
@@ -221,7 +302,6 @@ class DynamicAvoidanceMonitor(Node):
             if global_point is not None:
                 transformed.append(global_point)
         self.obstacles = transformed
-        self.last_obstacle_time = self._now_sec()
 
     def _on_cmd_vel(self, msg: Twist) -> None:
         if not self.enable_cmd_vel_filter:
@@ -244,6 +324,7 @@ class DynamicAvoidanceMonitor(Node):
 
     def _on_timer(self) -> None:
         now = self._now_sec()
+        self.active_path_points, self.active_path_source = self._active_path(now)
         if not self.navigation_enabled:
             self.cmd_vel_safe_pub.publish(Twist())
         robot_point, robot_error = self._get_robot_point()
@@ -257,10 +338,10 @@ class DynamicAvoidanceMonitor(Node):
             self._publish_status(status_payload)
             return
 
-        if not self.path_points:
+        if not self.active_path_points:
             self.blocked_since = None
             status_payload = self._status_payload(
-                "no_path", "idle", False, now, message="尚未收到 /global_path"
+                "no_path", "idle", False, now, message="尚未收到可用导航路径"
             )
             self._set_state(status_payload)
             self._publish_status(status_payload)
@@ -280,7 +361,7 @@ class DynamicAvoidanceMonitor(Node):
             self._publish_stop_if_needed()
             return
 
-        window = self._make_path_window(robot_point)
+        window = self._make_path_window(robot_point, self.active_path_points)
         if window is None:
             self.blocked_since = None
             status_payload = self._status_payload(
@@ -289,7 +370,7 @@ class DynamicAvoidanceMonitor(Node):
                 False,
                 now,
                 robot=robot_point,
-                message="机器人偏离全局路径过远，停止输出安全速度",
+                message=f"机器人偏离{self.active_path_source}过远，停止输出安全速度",
             )
             self._set_state(status_payload)
             self._publish_status(status_payload)
@@ -320,16 +401,80 @@ class DynamicAvoidanceMonitor(Node):
         self._publish_status(status_payload)
         self._publish_stop_if_needed()
 
+    def _active_path(self, now: float) -> tuple[list[Point3], str]:
+        self.execution_path_age = (
+            None
+            if self.last_execution_path_time is None
+            else max(0.0, now - self.last_execution_path_time)
+        )
+        execution_fresh = (
+            bool(self.execution_path_points)
+            and self.execution_path_age is not None
+            and self.execution_path_age <= self.scan_execution_path_timeout
+        )
+        # A controller from the previous goal may still be alive briefly.  Its
+        # B-spline keeps its original generation stamp even though the remaining
+        # path is republished, so do not let it override a newer global goal.
+        self.execution_path_generation_matches = (
+            self.last_global_path_time is None
+            or self.execution_path_generation_time is None
+            or self.execution_path_generation_time >= self.last_global_path_time - 0.2
+        )
+        self.execution_path_spatially_matches = self._execution_path_matches_global()
+        if execution_fresh and (
+            self.execution_path_generation_matches
+            or self.execution_path_spatially_matches
+        ):
+            return self.execution_path_points, "scan_execution_path"
+        if self.path_points:
+            return self.path_points, "global_path"
+        return [], "none"
+
+    def _execution_path_matches_global(self) -> bool:
+        if not self.execution_path_points:
+            return False
+        if not self.path_points:
+            return True
+
+        tolerance = self.scan_execution_path_global_tolerance
+        execution_start = self.execution_path_points[0]
+        execution_end = self.execution_path_points[-1]
+        if self._distance_3d(execution_start, self.path_points[0]) > tolerance:
+            return False
+        if min(
+            self._distance_3d(execution_end, point) for point in self.path_points
+        ) > tolerance:
+            return False
+
+        global_span = self._distance_3d(self.path_points[0], self.path_points[-1])
+        execution_length = sum(
+            self._distance_3d(start, end)
+            for start, end in zip(
+                self.execution_path_points[:-1], self.execution_path_points[1:]
+            )
+        )
+        # A completed one-point trajectory from the previous goal often sits at
+        # the new global path start.  It is spatially close but must not override
+        # a new long navigation request.
+        if global_span > 1.0 and execution_length < 0.3:
+            return False
+        return True
+
     def _read_cloud_points(self, msg: PointCloud2) -> list[Point3]:
         if point_cloud2 is None:
             self.get_logger().error("缺少 sensor_msgs_py，无法读取 PointCloud2")
             return []
-        points: list[Point3] = []
-        for raw_point in point_cloud2.read_points(
+        raw_points = point_cloud2.read_points(
             msg, field_names=("x", "y", "z"), skip_nans=True
-        ):
-            points.append(Point3(float(raw_point[0]), float(raw_point[1]), float(raw_point[2])))
-        return points
+        )
+        point_count = len(raw_points)
+        if point_count > self.max_obstacle_points:
+            stride = math.ceil(point_count / self.max_obstacle_points)
+            raw_points = raw_points[::stride]
+        return [
+            Point3(float(point[0]), float(point[1]), float(point[2]))
+            for point in raw_points
+        ]
 
     def _transform_point(self, point: Point3, source_frame: str) -> Optional[Point3]:
         if not source_frame or source_frame == self.global_frame:
@@ -384,17 +529,19 @@ class DynamicAvoidanceMonitor(Node):
                 return self.path_points[0], "使用路径起点作为无 TF 离线兜底"
             return None, str(exc)
 
-    def _make_path_window(self, robot: Point3) -> Optional[PathWindow]:
+    def _make_path_window(
+        self, robot: Point3, path_points: list[Point3]
+    ) -> Optional[PathWindow]:
         nearest_index = min(
-            range(len(self.path_points)),
-            key=lambda index: self._distance_3d(robot, self.path_points[index]),
+            range(len(path_points)),
+            key=lambda index: self._distance_3d(robot, path_points[index]),
         )
-        robot_distance = self._distance_3d(robot, self.path_points[nearest_index])
+        robot_distance = self._distance_3d(robot, path_points[nearest_index])
         if robot_distance > self.path_deviation_tolerance:
             return None
 
-        backward = self._collect_backward(nearest_index)
-        forward = self._collect_forward(nearest_index)
+        backward = self._collect_backward(nearest_index, path_points)
+        forward = self._collect_forward(nearest_index, path_points)
         prune_points = list(reversed(backward))
         if prune_points and forward and self._same_point(prune_points[-1], forward[0]):
             prune_points.extend(forward[1:])
@@ -402,12 +549,14 @@ class DynamicAvoidanceMonitor(Node):
             prune_points.extend(forward)
         return PathWindow(prune_points, forward, nearest_index, robot_distance)
 
-    def _collect_backward(self, nearest_index: int) -> list[Point3]:
-        points = [self.path_points[nearest_index]]
+    def _collect_backward(
+        self, nearest_index: int, path_points: list[Point3]
+    ) -> list[Point3]:
+        points = [path_points[nearest_index]]
         remaining = self.backward_prune_distance
-        last = self.path_points[nearest_index]
+        last = path_points[nearest_index]
         for index in range(nearest_index - 1, -1, -1):
-            current = self.path_points[index]
+            current = path_points[index]
             remaining -= self._distance_3d(last, current)
             points.append(current)
             last = current
@@ -415,12 +564,14 @@ class DynamicAvoidanceMonitor(Node):
                 break
         return points
 
-    def _collect_forward(self, nearest_index: int) -> list[Point3]:
-        points = [self.path_points[nearest_index]]
+    def _collect_forward(
+        self, nearest_index: int, path_points: list[Point3]
+    ) -> list[Point3]:
+        points = [path_points[nearest_index]]
         remaining = self.lookahead_distance
-        last = self.path_points[nearest_index]
-        for index in range(nearest_index + 1, len(self.path_points)):
-            current = self.path_points[index]
+        last = path_points[nearest_index]
+        for index in range(nearest_index + 1, len(path_points)):
+            current = path_points[index]
             remaining -= self._distance_3d(last, current)
             points.append(current)
             last = current
@@ -464,9 +615,17 @@ class DynamicAvoidanceMonitor(Node):
         nearest_blocker_distance: Optional[float] = None
         nearest_path_distance: Optional[float] = None
         blocker_count = 0
+        self_filtered_count = 0
 
         for obstacle in self.obstacles:
             robot_distance = self._distance_2d(robot, obstacle)
+            # /grid_map/occupancy_inflate contains returns from the B2 body and
+            # points inside its inflated footprint.  Treating those as external
+            # obstacles makes the safety layer permanently report a blocker a
+            # few centimetres from the robot and clamps every command to zero.
+            if robot_distance <= self.robot_self_clear_radius:
+                self_filtered_count += 1
+                continue
             nearest_obstacle_distance = self._min_optional(
                 nearest_obstacle_distance, robot_distance
             )
@@ -481,6 +640,7 @@ class DynamicAvoidanceMonitor(Node):
         return ObstacleCheck(
             path_blocked=blocker_count > 0,
             blocker_count=blocker_count,
+            self_filtered_count=self_filtered_count,
             nearest_obstacle_distance=nearest_obstacle_distance,
             nearest_blocker_distance=nearest_blocker_distance,
             nearest_path_distance=nearest_path_distance,
@@ -518,7 +678,7 @@ class DynamicAvoidanceMonitor(Node):
     def _decide_status(
         self, now: float, robot: Point3, window: PathWindow, check: ObstacleCheck
     ) -> dict[str, object]:
-        if check.path_blocked:
+        if check.path_blocked and self.enforce_path_blocking:
             if self.blocked_since is None:
                 self.blocked_since = now
             blocked_duration = now - self.blocked_since
@@ -624,7 +784,13 @@ class DynamicAvoidanceMonitor(Node):
             "message": message,
             "global_frame": self.global_frame,
             "robot_frame": self.robot_frame,
-            "has_path": bool(self.path_points),
+            "has_path": bool(self.active_path_points),
+            "path_source": self.active_path_source,
+            "has_global_path": bool(self.path_points),
+            "has_scan_execution_path": bool(self.execution_path_points),
+            "execution_path_age": self.execution_path_age,
+            "execution_path_generation_matches": self.execution_path_generation_matches,
+            "execution_path_spatially_matches": self.execution_path_spatially_matches,
             "obstacle_points": len(self.obstacles),
             "blocked_duration": blocked_duration,
         }
@@ -639,6 +805,7 @@ class DynamicAvoidanceMonitor(Node):
             payload["prune_plan_size"] = prune_plan_size
         if check is not None:
             payload["blocker_count"] = check.blocker_count
+            payload["self_filtered_count"] = check.self_filtered_count
             payload["nearest_obstacle_distance"] = check.nearest_obstacle_distance
             payload["nearest_blocker_distance"] = check.nearest_blocker_distance
             payload["nearest_path_distance"] = check.nearest_path_distance
@@ -648,6 +815,9 @@ class DynamicAvoidanceMonitor(Node):
         self.current_status = str(payload.get("status", "unknown"))
         self.current_action = str(payload.get("action", "none"))
         self.current_path_blocked = bool(payload.get("path_blocked", False))
+        frozen = Bool()
+        frozen.data = self.navigation_enabled and self.current_action == "stop"
+        self.execution_frozen_pub.publish(frozen)
 
     def _publish_status(self, payload: dict[str, object]) -> None:
         msg = String()
@@ -665,9 +835,11 @@ class DynamicAvoidanceMonitor(Node):
         scale = self.slow_speed_scale if self.current_action == "slow" else 1.0
         filtered.linear.x = msg.linear.x * scale
         filtered.linear.y = msg.linear.y * scale
-        filtered.linear.z = msg.linear.z * scale
-        filtered.angular.x = msg.angular.x * scale
-        filtered.angular.y = msg.angular.y * scale
+        # B2 SportClient exposes planar vx/vy/yaw only.  Never propagate
+        # unsupported Twist axes even if an upstream node populates them.
+        filtered.linear.z = 0.0
+        filtered.angular.x = 0.0
+        filtered.angular.y = 0.0
         filtered.angular.z = msg.angular.z * scale
         return filtered
 

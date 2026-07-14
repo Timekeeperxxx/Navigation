@@ -6,8 +6,10 @@
 #include <vector>
 
 #include <Eigen/Eigen>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
@@ -27,9 +29,11 @@ constexpr double kMaxVYawLimit = 1.0;
 rclcpp::Node::SharedPtr node;
 rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub;
 rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr execution_frozen_pub;
+rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr execution_path_pub;
 rclcpp::Subscription<scan_planner::msg::Bspline>::SharedPtr bspline_sub;
 rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
 rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr goal_yaw_sub;
+rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr safety_execution_frozen_sub;
 rclcpp::TimerBase::SharedPtr cmd_timer;
 
 bool receive_traj = false;
@@ -43,6 +47,8 @@ double odom_yaw = 0.0;
 
 double exec_time = 0.0;
 rclcpp::Time last_update_time;
+rclcpp::Time traj_start_time;
+rclcpp::Time last_execution_path_publish_time;
 
 double time_forward;
 double heading_error_threshold;
@@ -55,8 +61,14 @@ double finish_dist;
 double final_yaw_tolerance;
 bool enable_final_yaw;
 bool have_goal_yaw = false;
+bool safety_execution_frozen = false;
 double goal_yaw = 0.0;
 std::string body_pose_topic;
+std::string execution_path_topic;
+std::string execution_path_frame;
+std::string safety_execution_frozen_topic;
+double execution_path_publish_period;
+double execution_path_sample_dt;
 
 template <typename T>
 T getParamWithDefault(const std::string &name, const T &default_value)
@@ -79,6 +91,14 @@ bool loadParams()
 {
   bool ok = true;
   body_pose_topic = getParamWithDefault<std::string>("body_pose_topic", "/quad_0/body_pose");
+  execution_path_topic = getParamWithDefault<std::string>("execution_path_topic", "/scan/execution_path");
+  execution_path_frame = getParamWithDefault<std::string>("execution_path_frame", "map");
+  safety_execution_frozen_topic = getParamWithDefault<std::string>(
+      "safety_execution_frozen_topic", "/planning/safety_execution_frozen");
+  execution_path_publish_period = std::max(
+      getParamWithDefault<double>("execution_path_publish_period", 0.1), 0.02);
+  execution_path_sample_dt = std::max(
+      getParamWithDefault<double>("execution_path_sample_dt", 0.1), 0.02);
   ok &= loadRequiredParam("time_forward", time_forward);
   ok &= loadRequiredParam("heading_error_threshold", heading_error_threshold);
   ok &= loadRequiredParam("kp_pos", kp_pos);
@@ -161,6 +181,41 @@ void publishExecutionFrozen(bool frozen)
   execution_frozen_pub->publish(msg);
 }
 
+void publishExecutionPath(const rclcpp::Time &now)
+{
+  if (!receive_traj || traj.empty())
+    return;
+  if (last_execution_path_publish_time.nanoseconds() > 0 &&
+      (now - last_execution_path_publish_time).seconds() < execution_path_publish_period)
+    return;
+
+  nav_msgs::msg::Path path;
+  // Keep the trajectory generation time fixed in the header.  The safety
+  // monitor uses message receipt time for liveness and this stamp to reject a
+  // trajectory that belongs to an older global goal.
+  path.header.stamp = traj_start_time;
+  path.header.frame_id = execution_path_frame;
+
+  const double start = std::min(exec_time, traj_duration);
+  auto append_pose = [&](double t) {
+    const Eigen::Vector3d point = traj[0].evaluateDeBoorT(t);
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header = path.header;
+    pose.pose.position.x = point(0);
+    pose.pose.position.y = point(1);
+    pose.pose.position.z = point(2);
+    pose.pose.orientation.w = 1.0;
+    path.poses.push_back(pose);
+  };
+
+  for (double t = start; t < traj_duration; t += execution_path_sample_dt)
+    append_pose(t);
+  append_pose(traj_duration);
+
+  execution_path_pub->publish(path);
+  last_execution_path_publish_time = now;
+}
+
 void bsplineCallback(const scan_planner::msg::Bspline::ConstSharedPtr &msg)
 {
   Eigen::MatrixXd pos_pts(3, msg->pos_pts.size());
@@ -186,6 +241,7 @@ void bsplineCallback(const scan_planner::msg::Bspline::ConstSharedPtr &msg)
 
   traj_duration = traj[0].getTimeSum();
   traj_id = msg->traj_id;
+  traj_start_time = rclcpp::Time(msg->start_time, node->get_clock()->get_clock_type());
   exec_time = 0.0;
   last_update_time = node->now();
   receive_traj = true;
@@ -209,8 +265,24 @@ void goalYawCallback(const std_msgs::msg::Float64::ConstSharedPtr &msg)
   have_goal_yaw = true;
 }
 
+void safetyExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg)
+{
+  safety_execution_frozen = msg->data;
+}
+
 void cmdCallback()
 {
+  const rclcpp::Time now = node->now();
+  publishExecutionPath(now);
+
+  if (safety_execution_frozen)
+  {
+    publishExecutionFrozen(true);
+    publishStop();
+    last_update_time = now;
+    return;
+  }
+
   if (!receive_traj || !have_odom)
   {
     publishExecutionFrozen(false);
@@ -218,7 +290,6 @@ void cmdCallback()
     return;
   }
 
-  const rclcpp::Time now = node->now();
   double dt = (now - last_update_time).seconds();
   if (dt < 0.0 || dt > 0.2)
     dt = 0.0;
@@ -288,8 +359,11 @@ int main(int argc, char **argv)
       body_pose_topic, 20, odomCallback);
   goal_yaw_sub = node->create_subscription<std_msgs::msg::Float64>(
       "goal_yaw", 10, goalYawCallback);
+  safety_execution_frozen_sub = node->create_subscription<std_msgs::msg::Bool>(
+      safety_execution_frozen_topic, 10, safetyExecutionFrozenCallback);
   cmd_vel_pub = node->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 20);
   execution_frozen_pub = node->create_publisher<std_msgs::msg::Bool>("planning/go2_execution_frozen", 10);
+  execution_path_pub = node->create_publisher<nav_msgs::msg::Path>(execution_path_topic, 10);
   cmd_timer = node->create_wall_timer(std::chrono::milliseconds(10), cmdCallback);
 
   last_update_time = node->now();

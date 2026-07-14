@@ -147,7 +147,14 @@ namespace scan_planner
     {
       //cout << "in=" << in.transpose() << " out=" << out.transpose() << endl;
       Eigen::Vector3d in(init_points.col(segment_ids[i].first)), out(init_points.col(segment_ids[i].second));
-      ASTAR_RET ret = a_star_->AstarSearch(grid_map_->getResolution(), in, out);
+      const double fine_step = grid_map_->getResolution();
+      ASTAR_RET ret = a_star_->AstarSearch(fine_step, in, out);
+      if (ret != ASTAR_RET::SUCCESS)
+      {
+        const double retry_step = std::max(0.10, fine_step * 2.0);
+        ROS_WARN("Fine A-star failed for collision segment %zu; retry with step=%.3f.", i, retry_step);
+        ret = a_star_->AstarSearch(retry_step, in, out);
+      }
       if (ret == ASTAR_RET::SUCCESS)
       {
         vector<Eigen::Vector3d> path = a_star_->getPath();
@@ -806,7 +813,14 @@ namespace scan_planner
       {
         /*** a star search ***/
         Eigen::Vector3d in(cps_.points.col(segment_ids[i].first)), out(cps_.points.col(segment_ids[i].second));
-        ASTAR_RET ret = a_star_->AstarSearch(grid_map_->getResolution(), in, out);
+        const double fine_step = grid_map_->getResolution();
+        ASTAR_RET ret = a_star_->AstarSearch(fine_step, in, out);
+        if (ret != ASTAR_RET::SUCCESS)
+        {
+          const double retry_step = std::max(0.10, fine_step * 2.0);
+          ROS_WARN("Fine A-star failed for rebound segment %zu; retry with step=%.3f.", i, retry_step);
+          ret = a_star_->AstarSearch(retry_step, in, out);
+        }
         if (ret == ASTAR_RET::SUCCESS)
         {
           vector<Eigen::Vector3d> path = a_star_->getPath();

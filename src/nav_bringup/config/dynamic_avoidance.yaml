@@ -7,6 +7,11 @@ dynamic_avoidance_monitor:
     global_frame: "map"
     robot_frame: "base_footprint"
     global_path_topic: "/global_path"
+    scan_execution_path_topic: "/scan/execution_path"
+    # The controller republishes the remaining B-spline every 0.1 s.  A short
+    # timeout makes loss of that stream fall back to the conservative global path.
+    scan_execution_path_timeout: 2.0
+    scan_execution_path_global_tolerance: 1.0
     obstacle_topic: "/grid_map/occupancy_inflate"
     status_topic: "/nav/obstacle_status"
     replan_request_topic: "/nav/replan_request"
@@ -14,6 +19,7 @@ dynamic_avoidance_monitor:
     local_path_topic: "/nav/local_path"
     cmd_vel_in_topic: "/cmd_vel"
     cmd_vel_safe_topic: "/cmd_vel_safe"
+    safety_execution_frozen_topic: "/planning/safety_execution_frozen"
     nav_start_topic: "/nav_start"
     nav_stop_topic: "/nav_stop"
 
@@ -22,16 +28,29 @@ dynamic_avoidance_monitor:
     path_deviation_tolerance: 1.0
     path_corridor_radius: 0.45
     z_tolerance: 1.0
-    stop_distance: 0.6
-    slow_distance: 1.2
+    # Distances are measured from the B2 body centre.  Ignore points inside
+    # the robot envelope, then retain a 0.35 m stopping margin outside it.
+    # SCAN occupancy inflation expands B2 body/leg returns to about 0.80 m.
+    # Clear that self-envelope while keeping a 0.30 m external stop margin.
+    robot_self_clear_radius: 0.90
+    stop_distance: 1.20
+    slow_distance: 1.80
     replan_blocked_duration: 2.0
-    sensor_timeout: 0.5
+    # Livox/grid-map updates can have ~0.7 s gaps under Jetson load.
+    sensor_timeout: 1.5
     check_period_sec: 0.2
-    slow_speed_scale: 0.35
+    # At 0.15 m/s, 0.3 s is 4.5 cm of travel; the 1.2 m stop envelope remains
+    # conservative while avoiding Python callback starvation on Jetson.
+    obstacle_processing_period_sec: 0.3
+    max_obstacle_points: 4000
+    slow_speed_scale: 0.70
 
     require_obstacle_stream: true
     allow_path_start_without_tf: false
     enable_cmd_vel_filter: true
+    # Keep the independent hard-stop layer enabled.  Self-occupancy must be
+    # fixed at the grid/footprint source; bypassing this check is unsafe.
+    enforce_path_blocking: true
     require_nav_start: true
     publish_zero_on_stop: true
     publish_prune_plan: true

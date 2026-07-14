@@ -164,6 +164,7 @@ ASTAR_RET AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d
     const Eigen::Vector2d search_start_xy = search_start.head<2>();
     const Eigen::Vector2d search_xy_delta = search_end.head<2>() - search_start_xy;
     const double search_xy_len2 = search_xy_delta.squaredNorm();
+    const double search_yaw = std::atan2(search_xy_delta(1), search_xy_delta(0));
 
     auto interpolateZIndexOnSearchPlane = [&](const int x_idx, const int y_idx) -> int {
         if (search_xy_len2 < 1e-8)
@@ -251,8 +252,14 @@ ASTAR_RET AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d
 
                 neighborPtr->rounds = rounds_;
 
-                const double neighbor_yaw = std::atan2(static_cast<double>(dy), static_cast<double>(dx));
-                if (checkOccupancy(Index2Coord(neighborPtr->index), neighbor_yaw))
+                // B2 is holonomic: a lateral A-star step does not imply that
+                // the 1.1 m body instantly rotates to face that grid edge.
+                // Using each neighbor direction as body yaw can make every
+                // neighbor occupied around a valid start (open set exhausted
+                // after one iteration).  Keep the segment heading used to
+                // validate the start/end footprint; the closed-loop controller
+                // aligns the body with this overall path heading.
+                if (checkOccupancy(Index2Coord(neighborPtr->index), search_yaw))
                 {
                     continue;
                 }
@@ -281,7 +288,10 @@ ASTAR_RET AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d
         const double elapsed = std::chrono::duration<double>(time_2 - time_1).count();
         if (elapsed > 0.2)
         {
-            ROS_WARN("Failed in A star path searching !!! 0.2 seconds time limit exceeded.");
+            ROS_WARN("Failed in A star path searching: timeout=0.2s, step=%.3f, iter=%d, start=(%.2f %.2f %.2f), end=(%.2f %.2f %.2f).",
+                     step_size_, num_iter,
+                     search_start(0), search_start(1), search_start(2),
+                     search_end(0), search_end(1), search_end(2));
             return ASTAR_RET::SEARCH_ERR;
         }
     }
@@ -292,6 +302,10 @@ ASTAR_RET AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d
     if (elapsed > 0.1)
         ROS_WARN("Time consume in A star path finding is %.3fs, iter=%d", elapsed, num_iter);
 
+    ROS_WARN("Failed in A star path searching: open set exhausted, step=%.3f, iter=%d, start=(%.2f %.2f %.2f), end=(%.2f %.2f %.2f).",
+             step_size_, num_iter,
+             search_start(0), search_start(1), search_start(2),
+             search_end(0), search_end(1), search_end(2));
     return ASTAR_RET::SEARCH_ERR;
 }
 

@@ -71,6 +71,7 @@ struct MappingParameters {
   double resolution_, resolution_inv_;
   double obstacles_inflation_z_up, obstacles_inflation_z_down;
   double double_cylinder_radius_, double_cylinder_offset_;
+  double double_cylinder_center_offset_;
   bool map_sliding_en_;
   double map_sliding_thresh_;
   int map_sliding_thresh_vox_;
@@ -99,6 +100,7 @@ struct MappingParameters {
   string sensor_type_;
   bool cloud_is_world_;
   bool need_extrinsic_;
+  double lidar_min_range_;
   Eigen::Matrix4d lidar_extrinsic_;
   Eigen::Matrix4d depth_extrinsic_;
 
@@ -379,8 +381,9 @@ inline int GridMap::getOccupancy(Eigen::Vector3d pos) {
 
 inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos, double yaw) {
   Eigen::Vector3d heading(std::cos(yaw), std::sin(yaw), 0.0);
-  Eigen::Vector3d front = pos + mp_.double_cylinder_offset_ * heading;
-  Eigen::Vector3d rear = pos - mp_.double_cylinder_offset_ * heading;
+  Eigen::Vector3d center = pos + mp_.double_cylinder_center_offset_ * heading;
+  Eigen::Vector3d front = center + mp_.double_cylinder_offset_ * heading;
+  Eigen::Vector3d rear = center - mp_.double_cylinder_offset_ * heading;
 
   int front_occ = getInflateOccupancyFromBuffer(front, md_.occupancy_buffer_inflate_);
   if (front_occ != 0) return front_occ;

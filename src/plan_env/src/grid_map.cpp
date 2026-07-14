@@ -107,6 +107,7 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   getParam(node_, "grid_map/obstacles_inflation_z_down", mp_.obstacles_inflation_z_down, -1.0);
   getParam(node_, "grid_map/double_cylinder_radius", mp_.double_cylinder_radius_, -1.0);
   getParam(node_, "grid_map/double_cylinder_offset", mp_.double_cylinder_offset_, 0.0);
+  getParam(node_, "grid_map/double_cylinder_center_offset", mp_.double_cylinder_center_offset_, 0.0);
   getParam(node_, "grid_map/map_sliding_en", mp_.map_sliding_en_, true);
   getParam(node_, "grid_map/map_sliding_thresh", mp_.map_sliding_thresh_, mp_.resolution_);
 
@@ -138,6 +139,7 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   getParam(node_, "grid_map/sensor_type", mp_.sensor_type_, string("lidar"));
   getParam(node_, "grid_map/cloud_is_world", mp_.cloud_is_world_, true);
   getParam(node_, "grid_map/need_extrinsic", mp_.need_extrinsic_, true);
+  getParam(node_, "grid_map/lidar_min_range", mp_.lidar_min_range_, 0.0);
 
   mp_.lidar_extrinsic_ <<
       1.0, 0.0, 0.0, -0.01100,
@@ -986,6 +988,11 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
     }
     const Eigen::Vector3d devi = pt_world - ray_pos;
     const double ray_length = devi.norm();
+    // Reject returns from the robot body before raycasting and footprint
+    // inflation.  Without this filter, body/leg returns become a dense
+    // inflated shell that follows the robot and is mistaken for an obstacle.
+    if (ray_length < mp_.lidar_min_range_)
+      continue;
     const bool in_local_range =
         fabs(devi(0)) <= mp_.local_update_range_(0) && fabs(devi(1)) <= mp_.local_update_range_(1) &&
         fabs(devi(2)) <= mp_.local_update_range_(2);

@@ -21,6 +21,9 @@ scan_planner_node:
     "grid_map/sensor_type": "lidar"
     "grid_map/cloud_is_world": true
     "grid_map/need_extrinsic": false
+    # B2 body/leg returns are inside about 0.60 m of the Mid-360.  Filter them
+    # before occupancy inflation while retaining nearby external obstacles.
+    "grid_map/lidar_min_range": 0.70
     "grid_map/resolution": 0.05
     "grid_map/sliding_map_size_x": 10.0
     "grid_map/sliding_map_size_y": 10.0
@@ -32,10 +35,13 @@ scan_planner_node:
     "grid_map/map_sliding_thresh": 0.2
     # Replaces the previous Unitree Go2 collision profile backed up separately.
     # Unitree B2 standing size: 1.098m x 0.450m x 0.645m.
-    # Two radius-0.36m cylinders at +/-0.28m cover the full horizontal rectangle.
+    # base_footprint is projected below the head-mounted lidar, not at the
+    # geometric body centre.  Bias the pair rearward so their centres are
+    # 0.00m (front) and -0.56m (rear) instead of +0.28m/-0.28m.
     "grid_map/body_height": 0.32
     "grid_map/double_cylinder_radius": 0.36
     "grid_map/double_cylinder_offset": 0.28
+    "grid_map/double_cylinder_center_offset": -0.28
     "grid_map/obstacles_inflation_z_up": 0.10
     "grid_map/obstacles_inflation_z_down": 0.33
     "grid_map/ground_height": 0.0
@@ -77,13 +83,18 @@ scan_planner_node:
 closed_loop_controller:
   ros__parameters:
     body_pose_topic: "/scan/body_pose"
+    execution_path_topic: "/scan/execution_path"
+    execution_path_frame: "map"
+    safety_execution_frozen_topic: "/planning/safety_execution_frozen"
+    execution_path_publish_period: 0.2
+    execution_path_sample_dt: 0.25
     time_forward: 0.8
     heading_error_threshold: 0.8
     kp_pos: 0.8
     kp_yaw: 1.5
-    # 首次真机联调使用保守限速，验证稳定后再逐步提高。
-    max_vx: 0.10
-    max_vy: 0.05
+    # Stay just above the B2 SportClient deadband while limiting test energy.
+    max_vx: 0.15
+    max_vy: 0.08
     max_vyaw: 0.30
     finish_dist: 0.20
     enable_final_yaw: true
