@@ -118,6 +118,11 @@ class A_Star_on_Graph{
       //@ kd-tree for ground connectivity check (line-of-sight on ground)
       nanoflann::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree_ground_los_;
 
+      //@ Stable copy of perception ground used to translate arbitrary planning-cloud
+      //@ indices (hybrid/planground) back to the dGraph/static-graph index space.
+      pcl::PointCloud<pcl::PointXYZI>::Ptr perception_ground_cloud_;
+      nanoflann::KdTreeFLANN<pcl::PointXYZI>::Ptr perception_ground_kdtree_;
+
       pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up_;
 
       /*Provide dynamic graph for obstacle avoidance*/
@@ -136,6 +141,7 @@ class A_Star_on_Graph{
       double getPitchFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding);
 
       bool isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius);
+      bool getPerceptionGroundIndex(unsigned int planning_index, unsigned int& ground_index);
 };
 
 #endif // A_STAR_ON_PC_H

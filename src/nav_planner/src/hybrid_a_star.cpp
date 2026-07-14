@@ -481,7 +481,8 @@ double Hybrid_A_Star::calculateEdgePenalty(const pcl::PointXYZI& pt)
 
 bool Hybrid_A_Star::planOnPlangroundOnly(const pcl::PointXYZI& start_pose,
                                            const pcl::PointXYZI& goal_pose,
-                                           double& path_length)
+                                           double& path_length,
+                                           std::vector<unsigned int>* path_out)
 {
   if (pc_planground_->size() < 2) {
     path_length = straightLineDistance(start_pose, goal_pose);
@@ -522,6 +523,10 @@ bool Hybrid_A_Star::planOnPlangroundOnly(const pcl::PointXYZI& start_pose,
   if (planground_path.empty()) {
     path_length = straightLineDistance(start_pose, goal_pose);
     return false;
+  }
+
+  if (path_out) {
+    *path_out = planground_path;
   }
   
   path_length = calculatePathLength(planground_path, pc_planground_);
@@ -659,7 +664,9 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
     start_neighbors.end());
   
   unsigned int actual_start_idx = hybrid_start_idx;
-  if (start_neighbors.size() < 2) {
+  // A start node only needs one valid edge to enter the graph. Treating a
+  // single neighbor as isolated discards the real robot pose unnecessarily.
+  if (start_neighbors.empty()) {
     // Save goal position before any cloud modification
     pcl::PointXYZI goal_position = pc_hybrid_->points[hybrid_goal_idx];
     
@@ -729,8 +736,27 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
   a_star_planner_->setupTurningWeight(turning_weight_);
   
   a_star_planner_->getPath(actual_start_idx, hybrid_goal_idx, path);
-  
+
   if (path.empty()) {
+    std::vector<unsigned int> planground_fallback;
+    double fallback_length = straight_line_distance;
+    const double start_to_planground = distanceToNearestPlanground(start_pose);
+    const double goal_to_planground = distanceToNearestPlanground(goal_pose);
+    if (start_to_planground <= 0.5 && goal_to_planground <= 0.5 &&
+        planOnPlangroundOnly(
+          start_pose, goal_pose, fallback_length, &planground_fallback) &&
+        !planground_fallback.empty()) {
+      path = planground_fallback;
+      if (hybrid_start_idx < pc_hybrid_->size() &&
+          path.front() != hybrid_start_idx) {
+        path.insert(path.begin(), hybrid_start_idx);
+      }
+      RCLCPP_WARN(perception_ros_->get_logger(),
+        "[Hybrid] Hybrid A* failed; using connected planground fallback: "
+        "%lu nodes, start_offset=%.3f, goal_offset=%.3f",
+        path.size(), start_to_planground, goal_to_planground);
+      return true;
+    }
     RCLCPP_WARN(perception_ros_->get_logger(), 
       "[Hybrid] No path found on hybrid cloud (expanding_radius=%.2f)",
       a_star_expanding_radius_);

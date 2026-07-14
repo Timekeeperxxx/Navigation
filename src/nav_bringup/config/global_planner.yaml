@@ -17,7 +17,7 @@ pcl_publisher:
     ground_translate_y: 0.0
     ground_translate_z: 0.0
     map_down_sample: 0.2
-    ground_down_sample: 0.1
+    ground_down_sample: 0.3
     planground_down_sample: 0.1
     max_input_bytes: 67108864
     max_input_points: 4000000
@@ -52,20 +52,22 @@ global_planner:
   ros__parameters:
     turning_weight: 0.1
     enable_detail_log: false
-    a_star_expanding_radius: 0.05
+    # 与 0.15m hybrid voxel 和 0.3m ground voxel 匹配；0.05m 会让
+    # 距离地图约 0.18m 的 B2 起点成为孤立点，导致目标已收到却无全局路径。
+    a_star_expanding_radius: 0.2
     use_pre_graph: false
     roi_file_path: ""
     roi_radius: 1.0
     roi_z_tolerance: 0.2
 
-    planground_search_radius: 0.1
+    planground_search_radius: 0.2
     planground_fallback_ratio: 0.3
     planground_downsample_leaf_size: 0.2
 
     use_hybrid_planner: true
     hybrid_planground_bias: 15.0
     hybrid_downsample_leaf_size: 0.15
-    hybrid_max_ground_bridge_length: 0.12
+    hybrid_max_ground_bridge_length: 0.25
     hybrid_max_ground_cost: 250.0
     hybrid_min_ground_cost: 150.0
     hybrid_detour_ratio_threshold: 4.0

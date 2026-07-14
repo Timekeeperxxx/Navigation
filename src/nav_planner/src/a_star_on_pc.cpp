@@ -130,6 +130,14 @@ A_Star_on_Graph::A_Star_on_Graph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_origina
   //@ Initialize ground line-of-sight kdtree
   kdtree_ground_los_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
   kdtree_ground_los_->setInputCloud(pc_original_z_up_);
+
+  perception_ground_cloud_.reset(new pcl::PointCloud<pcl::PointXYZI>());
+  perception_ground_kdtree_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
+  auto shared_data = perception_ros_->getSharedDataPtr();
+  if (shared_data && shared_data->pcl_ground_) {
+    *perception_ground_cloud_ = *shared_data->pcl_ground_;
+  }
+  perception_ground_kdtree_->setInputCloud(perception_ground_cloud_);
 }
 
 A_Star_on_Graph::~A_Star_on_Graph(){
@@ -271,6 +279,25 @@ bool A_Star_on_Graph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::Point
   return true;
 }
 
+bool A_Star_on_Graph::getPerceptionGroundIndex(
+  unsigned int planning_index, unsigned int& ground_index){
+  if (planning_index >= pc_original_z_up_->points.size() ||
+      !perception_ground_cloud_ || perception_ground_cloud_->empty()) {
+    return false;
+  }
+
+  std::vector<int> indices(1);
+  std::vector<float> distances(1);
+  if (perception_ground_kdtree_->nearestKSearch(
+        pc_original_z_up_->points[planning_index], 1, indices, distances) <= 0 ||
+      indices[0] < 0) {
+    return false;
+  }
+
+  ground_index = static_cast<unsigned int>(indices[0]);
+  return ground_index < perception_ground_cloud_->points.size();
+}
+
 void A_Star_on_Graph::getPath(
   unsigned int start, unsigned int goal,
   std::vector<unsigned int>& path){
@@ -405,8 +432,15 @@ void A_Star_on_Graph::getPath(
       }
       float current_expanding_g = sqrt(pointRadiusSquaredDistance[it]);
 
-      //@ dGraphValue is the distance to lethal
-      double dGraphValue = perception_ros_->get_min_dGraphValue(current_expanding_index);
+      //@ dGraph/static graph are indexed by perception ground, while hybrid A*
+      //@ uses planground + ground + an injected start pose. Resolve by XYZ first;
+      //@ directly reusing current_expanding_index marks most hybrid nodes lethal.
+      unsigned int perception_ground_index = 0;
+      if (!getPerceptionGroundIndex(
+            static_cast<unsigned int>(current_expanding_index), perception_ground_index)) {
+        continue;
+      }
+      double dGraphValue = perception_ros_->get_min_dGraphValue(perception_ground_index);
 
       /*This is for lethal*/
       if(dGraphValue<inscribed_radius){
@@ -439,7 +473,7 @@ void A_Star_on_Graph::getPath(
       //if(getPitchFromParent2Expanding(pcl_current_parent, pcl_current, pcl_expanding)>0.2)
       //  continue;
       
-      float node_weight = perception_ros_->getSharedDataPtr()->sGraph_ptr_->getNodeWeight(current_expanding_index);
+      float node_weight = perception_ros_->getSharedDataPtr()->sGraph_ptr_->getNodeWeight(perception_ground_index);
       float new_g = current_node.g + current_expanding_g + factor * 1.0 + node_weight + theta*turning_weight_ + ground_edge_weight;
       float new_h = sqrt(pcl::geometry::squaredDistance(pcl_expanding, pcl_goal));
       float new_f = new_g + new_h;

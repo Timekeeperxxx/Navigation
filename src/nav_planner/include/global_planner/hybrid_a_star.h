@@ -438,7 +438,8 @@ private:
    */
   bool planOnPlangroundOnly(const pcl::PointXYZI& start_pose,
                              const pcl::PointXYZI& goal_pose,
-                             double& path_length);
+                             double& path_length,
+                             std::vector<unsigned int>* path_out = nullptr);
 
 public:
   /**
@@ -587,4 +588,3 @@ private:
 };
 
 #endif // HYBRID_A_STAR_H
-
