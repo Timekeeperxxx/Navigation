@@ -330,6 +330,39 @@ stop_pid_file() {
       else
         kill -TERM "$pid" 2>/dev/null || true
       fi
+
+      waited=0
+      while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 5 ]; do
+        sleep 1
+        waited=$((waited + 1))
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        log_warn "$label 收到 TERM 后仍未退出，发送 KILL"
+        if [ -n "$pgid" ] && [ "$pgid" != "$current_pgid" ]; then
+          kill -KILL -- "-$pgid" 2>/dev/null || true
+        else
+          kill -KILL "$pid" 2>/dev/null || true
+        fi
+      fi
+    fi
+
+    # ros2 launch 可能先于其子节点退出。此时只检查 leader PID 会误以为整条
+    # 链路已经停止，遗留 relocation/SCAN 等同 PGID 孤儿进程。无论 leader
+    # 是否还存在，都对旧进程组做一次有界收尾。
+    if [ -n "$pgid" ] && [ "$pgid" != "$current_pgid" ] \
+      && ps -eo pgid= 2>/dev/null | awk -v target="$pgid" '$1 == target { found=1 } END { exit !found }'; then
+      log_warn "$label 主进程已退出但进程组仍有残留，发送 TERM：PGID=$pgid"
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+      local group_waited=0
+      while ps -eo pgid= 2>/dev/null | awk -v target="$pgid" '$1 == target { found=1 } END { exit !found }' \
+        && [ "$group_waited" -lt 5 ]; do
+        sleep 1
+        group_waited=$((group_waited + 1))
+      done
+      if ps -eo pgid= 2>/dev/null | awk -v target="$pgid" '$1 == target { found=1 } END { exit !found }'; then
+        log_warn "$label 进程组收到 TERM 后仍有残留，发送 KILL：PGID=$pgid"
+        kill -KILL -- "-$pgid" 2>/dev/null || true
+      fi
     fi
   fi
 

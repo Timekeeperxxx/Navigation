@@ -44,8 +44,8 @@ NAV_GO2_IP="${NAV_GO2_IP:-}"
 NAV_GO2_SERIAL_NUMBER="${NAV_GO2_SERIAL_NUMBER:-}"
 NAV_GO2_AES_128_KEY="${NAV_GO2_AES_128_KEY:-}"
 NAV_READY_TIMEOUT_SECONDS="${NAV_READY_TIMEOUT_SECONDS:-540}"
-RUN_LOG_OFFSET=0
 RUN_ID="$(date +%s)-$$"
+RUN_LOG_MARKER="[Navigation][run:$RUN_ID] launch"
 
 if { [ "$NAV_ENABLE_ROBOT_CONTROL" = "true" ] || [ "$NAV_ENABLE_ROBOT_CONTROL" = "1" ]; } \
   && [ "$NAV_ROBOT_MODEL" = "go2_webrtc" ] \
@@ -144,8 +144,7 @@ record_navigation_children() {
 }
 
 global_planner_map_ready() {
-  grep -Fq "Published static graph with" \
-    < <(tail -c "+$((RUN_LOG_OFFSET + 1))" "$LOG_FILE" 2>/dev/null)
+  run_log_has "Published static graph with"
 }
 
 scan_body_pose_ready() {
@@ -153,15 +152,24 @@ scan_body_pose_ready() {
     && { [ "$NAV_ENABLE_SCAN_CONTROLLER" != "true" ] && [ "$NAV_ENABLE_SCAN_CONTROLLER" != "1" ]; }; then
     return 0
   fi
-  grep -Fq "SCAN body pose TF ready: map -> base_footprint" \
-    < <(tail -c "+$((RUN_LOG_OFFSET + 1))" "$LOG_FILE" 2>/dev/null)
+  run_log_has "SCAN body pose TF ready: map -> base_footprint"
+}
+
+run_log_has() {
+  local needle="$1"
+  awk -v marker="$RUN_LOG_MARKER" -v needle="$needle" '
+    index($0, marker) { in_current_run = 1; next }
+    in_current_run && index($0, needle) { matched = 1 }
+    END { exit matched ? 0 : 1 }
+  ' "$LOG_FILE" 2>/dev/null
 }
 
 cleanup() {
   local status=$?
+  trap - INT TERM EXIT
   if [ -n "${LAUNCH_PID:-}" ] && kill -0 "$LAUNCH_PID" 2>/dev/null; then
     log_info "收到停止信号，正在停止导航定位链路"
-    kill -INT "$LAUNCH_PID" 2>/dev/null || true
+    stop_pid_file "$PID_FILE" "导航定位链路" 10 "ros2 launch nav_bringup navigation.launch.py"
     wait "$LAUNCH_PID" 2>/dev/null || true
   fi
 
@@ -179,7 +187,11 @@ log_info "Livox 雷达 IP：$LIVOX_LIDAR_IP"
 log_info "Livox 配置文件：$LIVOX_CONFIG_PATH"
 log_info "导航控制链：SCAN planner=$NAV_ENABLE_SCAN_PLANNER controller=$NAV_ENABLE_SCAN_CONTROLLER path_follower=$NAV_ENABLE_PATH_FOLLOWER"
 log_info "安全链：dynamic_avoidance=$NAV_ENABLE_DYNAMIC_AVOIDANCE Navigation底盘直控=$NAV_ENABLE_ROBOT_CONTROL"
-log_info "底盘适配：model=$NAV_ROBOT_MODEL cmd_vel=$NAV_ROBOT_CMD_VEL_TOPIC go2_method=$NAV_GO2_CONNECTION_METHOD go2_ip=${NAV_GO2_IP:-未设置}"
+if [ "$NAV_ROBOT_MODEL" = "go2_webrtc" ]; then
+  log_info "底盘适配：model=$NAV_ROBOT_MODEL cmd_vel=$NAV_ROBOT_CMD_VEL_TOPIC go2_method=$NAV_GO2_CONNECTION_METHOD go2_ip=${NAV_GO2_IP:-未设置}"
+else
+  log_info "底盘适配：model=$NAV_ROBOT_MODEL cmd_vel=$NAV_ROBOT_CMD_VEL_TOPIC，Go2 参数未启用"
+fi
 if [ -n "$LIVOX_HOST_IP" ]; then
   log_info "本机雷达网卡 IP：$LIVOX_HOST_IP"
 else
@@ -211,21 +223,35 @@ launch_args=(
   "enable_robot_control:=$NAV_ENABLE_ROBOT_CONTROL"
   "robot_model:=$NAV_ROBOT_MODEL"
   "robot_cmd_vel_topic:=$NAV_ROBOT_CMD_VEL_TOPIC"
-  "robot_max_linear_x:=0.10"
-  "robot_max_linear_y:=0.05"
+  "robot_max_linear_x:=0.15"
+  "robot_max_linear_y:=0.08"
   "robot_max_angular_z:=0.30"
-  "go2_connection_method:=$NAV_GO2_CONNECTION_METHOD"
-  "go2_ip:=$NAV_GO2_IP"
-  "go2_serial_number:=$NAV_GO2_SERIAL_NUMBER"
-  "go2_aes_128_key:=$NAV_GO2_AES_128_KEY"
-  "go2_ensure_motion_mode:=false"
-  "go2_stand_on_connect:=false"
-  "go2_stand_command:=BalanceStand"
-  "go2_move_command_mode:=no_reply"
-  "go2_use_remote_command_from_api:=false"
-  "go2_enable_builtin_obstacle_avoidance:=false"
   "rviz:=false"
 )
+
+# B2 导航完全不传 Go2 参数。仅启用 go2_webrtc 适配器时组装 Go2 配置；
+# 其中空的可选值必须省略，因为 ROS2 launch CLI 不接受 name:= 形式的空值。
+if [ "$NAV_ROBOT_MODEL" = "go2_webrtc" ]; then
+  launch_args+=(
+    "go2_connection_method:=$NAV_GO2_CONNECTION_METHOD"
+    "go2_ensure_motion_mode:=false"
+    "go2_stand_on_connect:=false"
+    "go2_stand_command:=BalanceStand"
+    "go2_move_command_mode:=no_reply"
+    "go2_use_remote_command_from_api:=false"
+    "go2_enable_builtin_obstacle_avoidance:=false"
+  )
+
+  if [ -n "$NAV_GO2_IP" ]; then
+    launch_args+=("go2_ip:=$NAV_GO2_IP")
+  fi
+  if [ -n "$NAV_GO2_SERIAL_NUMBER" ]; then
+    launch_args+=("go2_serial_number:=$NAV_GO2_SERIAL_NUMBER")
+  fi
+  if [ -n "$NAV_GO2_AES_128_KEY" ]; then
+    launch_args+=("go2_aes_128_key:=$NAV_GO2_AES_128_KEY")
+  fi
+fi
 
 if [ -n "$LIVOX_HOST_IP" ]; then
   launch_args+=("host_ip:=$LIVOX_HOST_IP")
@@ -235,15 +261,16 @@ if [ -n "$PLANGROUND_PCD" ]; then
   launch_args+=("planground_pcd:=$PLANGROUND_PCD")
 fi
 
-RUN_LOG_OFFSET="$(stat -c '%s' "$LOG_FILE" 2>/dev/null || printf '0')"
-ros2 launch nav_bringup navigation.launch.py "${launch_args[@]}" >> "$LOG_FILE" 2>&1 &
+log_info "$RUN_LOG_MARKER"
+# 独立进程组便于有界停止；关闭 fd 9，防止 ROS 子进程继承 navigation.lock。
+setsid ros2 launch nav_bringup navigation.launch.py "${launch_args[@]}" 9>&- >> "$LOG_FILE" 2>&1 &
 
 LAUNCH_PID=$!
 printf '%s\n' "$LAUNCH_PID" > "$PID_FILE"
 
 ready_waited=0
 while kill -0 "$LAUNCH_PID" 2>/dev/null && [ "$ready_waited" -lt "$NAV_READY_TIMEOUT_SECONDS" ]; do
-  if record_navigation_children && global_planner_map_ready && scan_body_pose_ready; then
+  if record_navigation_children; then
     break
   fi
   sleep 1
@@ -251,16 +278,26 @@ while kill -0 "$LAUNCH_PID" 2>/dev/null && [ "$ready_waited" -lt "$NAV_READY_TIM
 done
 
 if kill -0 "$LAUNCH_PID" 2>/dev/null \
-  && record_navigation_children \
-  && global_planner_map_ready \
-  && scan_body_pose_ready; then
-  write_json_file "$READY_FILE" "{\"ready\":true,\"run_id\":\"$RUN_ID\",\"scene_dir\":\"$SCENE_DIR\",\"map_pcd\":\"$MAP_PCD\",\"ground_pcd\":\"$GROUND_PCD\",\"planground_pcd\":\"$PLANGROUND_PCD\",\"pid\":$LAUNCH_PID,\"control_chain\":\"scan_planner_cmd_vel_safe\"}"
-  write_json_file "$STATUS_FILE" "{\"running\":true,\"scene_dir\":\"$SCENE_DIR\",\"pid\":$LAUNCH_PID,\"stage\":\"running\"}"
-  log_info "导航定位进程已启动：PID=$LAUNCH_PID"
+  && record_navigation_children; then
+  write_json_file "$READY_FILE" "{\"ready\":true,\"stage\":\"awaiting_initialpose\",\"run_id\":\"$RUN_ID\",\"scene_dir\":\"$SCENE_DIR\",\"map_pcd\":\"$MAP_PCD\",\"ground_pcd\":\"$GROUND_PCD\",\"planground_pcd\":\"$PLANGROUND_PCD\",\"pid\":$LAUNCH_PID,\"control_chain\":\"scan_planner_cmd_vel_safe\"}"
+  write_json_file "$STATUS_FILE" "{\"running\":true,\"scene_dir\":\"$SCENE_DIR\",\"pid\":$LAUNCH_PID,\"stage\":\"awaiting_initialpose\"}"
+  log_info "导航定位进程已启动，正在等待 initialpose：PID=$LAUNCH_PID"
   log_info "ready 文件：$READY_FILE"
 else
-  log_error "导航定位关键节点或全局规划地图未在 ${NAV_READY_TIMEOUT_SECONDS} 秒内就绪，请查看日志：$LOG_FILE"
+  log_error "导航定位关键节点未在 ${NAV_READY_TIMEOUT_SECONDS} 秒内启动，请查看日志：$LOG_FILE"
   exit 1
 fi
+
+# global planner 静态图和 map -> base_footprint 都依赖用户发送 initialpose。
+# ready 文件先解除前端重启等待；标点完成后再升级为完整导航就绪状态。
+while kill -0 "$LAUNCH_PID" 2>/dev/null; do
+  if record_navigation_children && global_planner_map_ready && scan_body_pose_ready; then
+    write_json_file "$READY_FILE" "{\"ready\":true,\"stage\":\"running\",\"run_id\":\"$RUN_ID\",\"scene_dir\":\"$SCENE_DIR\",\"map_pcd\":\"$MAP_PCD\",\"ground_pcd\":\"$GROUND_PCD\",\"planground_pcd\":\"$PLANGROUND_PCD\",\"pid\":$LAUNCH_PID,\"control_chain\":\"scan_planner_cmd_vel_safe\"}"
+    write_json_file "$STATUS_FILE" "{\"running\":true,\"scene_dir\":\"$SCENE_DIR\",\"pid\":$LAUNCH_PID,\"stage\":\"running\"}"
+    log_info "initialpose 已生效，global planner 和 SCAN TF 已就绪"
+    break
+  fi
+  sleep 1
+done
 
 wait "$LAUNCH_PID"
