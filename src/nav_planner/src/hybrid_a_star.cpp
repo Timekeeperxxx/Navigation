@@ -1461,4 +1461,43 @@ void Hybrid_A_Star::smoothPathToRosPath(const std::vector<unsigned int>& raw_pat
       ros_path.poses.push_back(pst);
     }
   }
+
+  // A* searches on a point cloud, so its last node is the nearest traversable
+  // cloud sample rather than necessarily the exact requested waypoint.  The
+  // completion monitor, however, measures against the requested waypoint.
+  // Restore a short, bounded goal connector so SCAN and the monitor use the
+  // same XY endpoint instead of stopping on opposite sides of their tolerance.
+  if (!ros_path.poses.empty()) {
+    auto &path_goal = ros_path.poses.back();
+    const double goal_dx = goal_pose.pose.position.x - path_goal.pose.position.x;
+    const double goal_dy = goal_pose.pose.position.y - path_goal.pose.position.y;
+    const double goal_offset = std::hypot(goal_dx, goal_dy);
+    constexpr double kMaxExactGoalConnector = 0.25;
+
+    if (goal_offset <= kMaxExactGoalConnector) {
+      path_goal.pose.position = goal_pose.pose.position;
+      if (ros_path.poses.size() >= 2) {
+        auto &previous = ros_path.poses[ros_path.poses.size() - 2];
+        const double segment_yaw = std::atan2(
+            path_goal.pose.position.y - previous.pose.position.y,
+            path_goal.pose.position.x - previous.pose.position.x);
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, segment_yaw);
+        previous.pose.orientation.x = q.getX();
+        previous.pose.orientation.y = q.getY();
+        previous.pose.orientation.z = q.getZ();
+        previous.pose.orientation.w = q.getW();
+        path_goal.pose.orientation = previous.pose.orientation;
+      }
+      RCLCPP_INFO(
+          perception_ros_->get_logger(),
+          "[Hybrid] Restored exact requested goal at path end (cloud snap offset=%.3fm).",
+          goal_offset);
+    } else {
+      RCLCPP_WARN(
+          perception_ros_->get_logger(),
+          "[Hybrid] Requested goal is %.3fm from the planned cloud endpoint; keep the validated endpoint.",
+          goal_offset);
+    }
+  }
 }
