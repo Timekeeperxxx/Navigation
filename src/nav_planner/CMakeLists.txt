@@ -169,6 +169,18 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(
+    test_dynamic_avoidance_monitor
+    test/test_dynamic_avoidance_monitor.py
+  )
+  ament_add_pytest_test(
+    test_waypoint_progress_monitor
+    test/test_waypoint_progress_monitor.py
+  )
+endif()
+
 ament_export_include_directories(include)
 ament_export_libraries(a_star_on_graph global_planner dynamic_window_aware_global_planner)
 ament_export_dependencies(${dependencies})

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 
 namespace
 {
@@ -49,6 +50,10 @@ namespace scan_planner
     getParam(nh, "fsm/thresh_replan", replan_thresh_, -1.0);
     getParam(nh, "fsm/thresh_no_replan", no_replan_thresh_, -1.0);
     getParam(nh, "fsm/planning_horizon", planning_horizon_, -1.0);
+    getParam(nh, "fsm/start_height_offset", start_height_offset_, 0.3);
+    start_height_offset_ = std::max(0.0, start_height_offset_);
+    getParam(nh, "fsm/final_goal_tolerance", final_goal_tolerance_, 0.12);
+    final_goal_tolerance_ = std::max(0.05, final_goal_tolerance_);
     getParam(nh, "fsm/emergency_time_", emergency_time_, 1.0);
     getParam(nh, "fsm/fail_safe", enable_fail_safe_, true);
     getParam(nh, "fsm/max_replan_fail_count", max_replan_fail_count_, 1000);
@@ -90,10 +95,14 @@ namespace scan_planner
 
     std::string body_pose_topic;
     getParam(nh, "body_pose_topic", body_pose_topic, std::string("/quad_0/body_pose"));
+    std::string replan_request_topic;
+    getParam(nh, "replan_request_topic", replan_request_topic, std::string("/nav/replan_request"));
     odom_sub_ = nh->create_subscription<nav_msgs::msg::Odometry>(
         body_pose_topic, 1, std::bind(&SCANReplanFSM::odometryCallback, this, std::placeholders::_1));
     go2_execution_frozen_sub_ = nh->create_subscription<std_msgs::msg::Bool>(
         "/planning/go2_execution_frozen", 10, std::bind(&SCANReplanFSM::go2ExecutionFrozenCallback, this, std::placeholders::_1));
+    replan_request_sub_ = nh->create_subscription<std_msgs::msg::Bool>(
+        replan_request_topic, 10, std::bind(&SCANReplanFSM::replanRequestCallback, this, std::placeholders::_1));
 
     bspline_pub_ = nh->create_publisher<scan_planner::msg::Bspline>("/planning/bspline", 10);
     data_disp_pub_ = nh->create_publisher<scan_planner::msg::DataDisp>("/planning/data_display", 100);
@@ -129,7 +138,7 @@ namespace scan_planner
     active_waypoints_ = wps;
     current_wp_ = 0;
     trigger_ = true;
-    init_pt_ = odom_pos_;
+    init_pt_ = getPlanningStartPosition();
 
     if (planNextWaypoint())
     {
@@ -171,11 +180,11 @@ namespace scan_planner
 
     cout << "Triggered!" << endl;
     trigger_ = true;
-    init_pt_ = odom_pos_;
+    init_pt_ = getPlanningStartPosition();
 
     bool success = false;
     end_pt_ << msg->poses[0].pose.position.x, msg->poses[0].pose.position.y, rviz_goal_height_;
-    success = planner_manager_->planGlobalTraj(odom_pos_, odom_vel_, Eigen::Vector3d::Zero(), end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+    success = planner_manager_->planGlobalTraj(getPlanningStartPosition(), odom_vel_, Eigen::Vector3d::Zero(), end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
     if (success)
       success = adjustGlobalTargetIfOccupied();
@@ -229,9 +238,16 @@ namespace scan_planner
       rclcpp::sleep_for(std::chrono::milliseconds(1));
     }
 
+    // A newly clicked reference path starts from a stationary boundary
+    // condition.  TF differentiation can report lateral velocity while the
+    // body is only rotating, which would otherwise bend the first spline away
+    // from the supplied global path.
+    const Eigen::Vector3d initial_velocity =
+        navi_mode_ == NAVI_MODE::REFERENCE_PATH ? Eigen::Vector3d::Zero() : odom_vel_;
+    const Eigen::Vector3d planning_start = getPlanningStartPosition();
     bool success = planner_manager_->planGlobalTrajWaypoints(
-        odom_pos_,
-        odom_vel_,
+        planning_start,
+        initial_velocity,
         Eigen::Vector3d::Zero(),
         waypoints,
         Eigen::Vector3d::Zero(),
@@ -243,7 +259,10 @@ namespace scan_planner
       return false;
     }
 
-    if (!adjustGlobalTargetIfOccupied())
+    // Reference-path mode validates each bounded local lookahead directly on
+    // the original polyline.  Do not move its final target to a sample from a
+    // smoothed polynomial, which can lie off the supplied global path.
+    if (navi_mode_ != NAVI_MODE::REFERENCE_PATH && !adjustGlobalTargetIfOccupied())
       return false;
 
     constexpr double step_size_t = 0.1;
@@ -376,6 +395,8 @@ namespace scan_planner
       waypoints.push_back(wp);
     }
     active_waypoints_ = waypoints;
+    reference_progress_segment_ = 0;
+    reference_progress_ratio_ = 0.0;
     bool success = planGlobalTrajByWaypoints(waypoints);
 
     if (success)
@@ -431,7 +452,28 @@ namespace scan_planner
 
   void SCANReplanFSM::go2ExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg)
   {
+    if (msg->data && !go2_execution_frozen_)
+    {
+      odom_vel_.setZero();
+      ROS_INFO("[execution freeze] Hold SCAN trajectory execution; replanning remains enabled with zero boundary velocity.");
+    }
     go2_execution_frozen_ = msg->data;
+  }
+
+  void SCANReplanFSM::replanRequestCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg)
+  {
+    if (!msg->data || !have_odom_ || !have_target_)
+      return;
+
+    // The dynamic safety monitor freezes command execution before publishing
+    // this request.  Replanning must still run while frozen: the replacement
+    // execution path is what lets the monitor decide that a bypass is clear
+    // and release the zero-velocity hold.
+    if (exec_state_ == EXEC_TRAJ)
+    {
+      ROS_WARN("[dynamic avoidance] Obstacle persisted; request a frozen-start SCAN replan.");
+      changeFSMExecState(REPLAN_TRAJ, "DYNAMIC");
+    }
   }
 
   void SCANReplanFSM::updateLocalTrajTimeFreeze()
@@ -446,6 +488,13 @@ namespace scan_planner
     LocalTrajData *info = &planner_manager_->local_data_;
     if (go2_execution_frozen_ && info->start_time_.seconds() > 1e-5)
       info->start_time_ += rclcpp::Duration::from_seconds(dt);
+  }
+
+  Eigen::Vector3d SCANReplanFSM::getPlanningStartPosition() const
+  {
+    Eigen::Vector3d planning_start = odom_pos_;
+    planning_start(2) += start_height_offset_;
+    return planning_start;
   }
 
   double SCANReplanFSM::getOdomYaw() const
@@ -609,7 +658,6 @@ namespace scan_planner
 
     case REPLAN_TRAJ:
     {
-
       if (planFromCurrentTraj())
       {
         replan_fail_count_ = 0;
@@ -663,6 +711,32 @@ namespace scan_planner
           replan_fail_count_++;
           changeFSMExecState(GEN_NEW_TRAJ, "FSM");
           return;
+        }
+
+        // A REFERENCE_PATH trajectory is only a bounded local lookahead.  In
+        // particular, collision fallback can deliberately end it at an
+        // earlier free point.  Finishing that spline is not equivalent to
+        // reaching the final point of /initial_path: keep the original target
+        // and build the next bounded segment from the current body position.
+        if (navi_mode_ == NAVI_MODE::REFERENCE_PATH && !active_waypoints_.empty())
+        {
+          const double final_goal_distance =
+              (active_waypoints_.back() - odom_pos_).head<2>().norm();
+          if (final_goal_distance > final_goal_tolerance_)
+          {
+            ROS_INFO("[reference path] Local trajectory finished %.3fm before final goal; continue planning.",
+                     final_goal_distance);
+            have_target_ = true;
+            have_new_target_ = true;
+            changeFSMExecState(GEN_NEW_TRAJ, "REFERENCE_CONTINUE");
+            return;
+          }
+
+          ROS_INFO("[reference path] Final XY goal reached: distance=%.3fm tolerance=%.3fm.",
+                   final_goal_distance, final_goal_tolerance_);
+          active_waypoints_.clear();
+          reference_progress_segment_ = 0;
+          reference_progress_ratio_ = 0.0;
         }
 
         if (isWaypointSequenceMode())
@@ -746,9 +820,15 @@ namespace scan_planner
 
     //cout << "info->velocity_traj_=" << info->velocity_traj_.get_control_points() << endl;
 
-    start_pt_ = odom_pos_;
+    start_pt_ = getPlanningStartPosition();
     start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
     start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
+
+    if (go2_execution_frozen_)
+    {
+      start_vel_.setZero();
+      start_acc_.setZero();
+    }
 
     const Eigen::Vector2d to_goal = end_pt_.head<2>() - odom_pos_.head<2>();
     if (to_goal.norm() > 1e-3 && start_vel_.head<2>().dot(to_goal) < 0.0)
@@ -757,7 +837,12 @@ namespace scan_planner
       start_acc_.setZero();
     }
 
-    if (!planner_manager_->planGlobalTraj(
+    // Reference-path mode must keep using the original global polyline.  The
+    // previous implementation rebuilt a direct polynomial to the final goal
+    // on every local replan; after repeated frozen replans that polynomial
+    // drifted away from the supplied path and produced jumping local targets.
+    if (navi_mode_ != NAVI_MODE::REFERENCE_PATH &&
+        !planner_manager_->planGlobalTraj(
             start_pt_,
             start_vel_,
             start_acc_,
@@ -769,7 +854,7 @@ namespace scan_planner
       return false;
     }
 
-    if (!adjustGlobalTargetIfOccupied())
+    if (navi_mode_ != NAVI_MODE::REFERENCE_PATH && !adjustGlobalTargetIfOccupied())
       return false;
 
     bool success = callReboundReplan(true, false);
@@ -785,9 +870,17 @@ namespace scan_planner
 
   void SCANReplanFSM::setStartStateFromOdomOrCurrentTraj()
   {
-    start_pt_ = odom_pos_;
+    start_pt_ = getPlanningStartPosition();
     start_vel_ = odom_vel_;
     start_acc_.setZero();
+
+    if (go2_execution_frozen_ ||
+        (navi_mode_ == NAVI_MODE::REFERENCE_PATH && have_new_target_))
+    {
+      start_vel_.setZero();
+      start_acc_.setZero();
+      return;
+    }
 
     LocalTrajData *info = &planner_manager_->local_data_;
     if (info->start_time_.seconds() < 1e-5 || info->duration_ <= 1e-5)
@@ -801,6 +894,13 @@ namespace scan_planner
     start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
     start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
 
+    if (go2_execution_frozen_)
+    {
+      start_vel_.setZero();
+      start_acc_.setZero();
+      return;
+    }
+
     const Eigen::Vector2d to_goal = end_pt_.head<2>() - odom_pos_.head<2>();
     if (to_goal.norm() > 1e-3 && start_vel_.head<2>().dot(to_goal) < 0.0)
     {
@@ -812,6 +912,13 @@ namespace scan_planner
   void SCANReplanFSM::checkCollisionCallback()
   {
     updateLocalTrajTimeFreeze();
+
+    // While the controller rotates in place it intentionally freezes the
+    // active trajectory clock.  Replanning that same frozen first segment on
+    // every collision timer tick makes the desired heading move continuously.
+    // Dynamic avoidance still owns the independent hard safety freeze.
+    if (go2_execution_frozen_)
+      return;
 
     LocalTrajData *info = &planner_manager_->local_data_;
     auto map = planner_manager_->grid_map_;
@@ -940,8 +1047,156 @@ namespace scan_planner
     return true;
   }
 
+  bool SCANReplanFSM::getReferencePathLocalTarget()
+  {
+    if (navi_mode_ != NAVI_MODE::REFERENCE_PATH || active_waypoints_.empty())
+      return false;
+
+    if (active_waypoints_.size() == 1)
+    {
+      local_target_pt_ = active_waypoints_.front();
+      local_target_vel_.setZero();
+      return true;
+    }
+
+    const size_t segment_count = active_waypoints_.size() - 1;
+    const size_t search_begin = std::min(reference_progress_segment_, segment_count - 1);
+    size_t best_segment = search_begin;
+    double best_ratio = search_begin == reference_progress_segment_ ? reference_progress_ratio_ : 0.0;
+    double best_distance_squared = std::numeric_limits<double>::infinity();
+
+    // Project the current body position onto the remaining original polyline.
+    // Progress is monotonic so a loop or localization jitter cannot send the
+    // local target back to a previously completed segment.
+    for (size_t i = search_begin; i < segment_count; ++i)
+    {
+      const Eigen::Vector3d segment = active_waypoints_[i + 1] - active_waypoints_[i];
+      const double length_squared = segment.head<2>().squaredNorm();
+      if (length_squared < 1e-8)
+        continue;
+
+      double ratio = (start_pt_ - active_waypoints_[i]).head<2>().dot(segment.head<2>()) / length_squared;
+      ratio = std::max(0.0, std::min(1.0, ratio));
+      if (i == reference_progress_segment_)
+        ratio = std::max(ratio, reference_progress_ratio_);
+
+      const Eigen::Vector3d projected = active_waypoints_[i] + ratio * segment;
+      const double distance_squared = (projected - start_pt_).head<2>().squaredNorm();
+      if (distance_squared < best_distance_squared)
+      {
+        best_distance_squared = distance_squared;
+        best_segment = i;
+        best_ratio = ratio;
+      }
+    }
+
+    reference_progress_segment_ = std::max(reference_progress_segment_, best_segment);
+    if (reference_progress_segment_ == best_segment)
+      reference_progress_ratio_ = std::max(reference_progress_ratio_, best_ratio);
+    else
+      reference_progress_ratio_ = best_ratio;
+
+    best_segment = reference_progress_segment_;
+    best_ratio = reference_progress_ratio_;
+    double remaining = std::max(0.5, planning_horizon_);
+    size_t target_segment = best_segment;
+    double target_ratio = best_ratio;
+    bool reached_end = false;
+
+    for (size_t i = best_segment; i < segment_count; ++i)
+    {
+      const Eigen::Vector3d segment = active_waypoints_[i + 1] - active_waypoints_[i];
+      const double length = segment.head<2>().norm();
+      if (length < 1e-4)
+        continue;
+
+      const double from_ratio = i == best_segment ? best_ratio : 0.0;
+      const double available = (1.0 - from_ratio) * length;
+      target_segment = i;
+      if (remaining <= available)
+      {
+        target_ratio = from_ratio + remaining / length;
+        remaining = 0.0;
+        break;
+      }
+
+      remaining -= available;
+      target_ratio = 1.0;
+    }
+
+    if (remaining > 1e-4)
+    {
+      target_segment = segment_count - 1;
+      target_ratio = 1.0;
+      reached_end = true;
+    }
+
+    auto targetFromSegment = [&](size_t segment_index, double ratio) {
+      return active_waypoints_[segment_index] +
+             ratio * (active_waypoints_[segment_index + 1] - active_waypoints_[segment_index]);
+    };
+    local_target_pt_ = targetFromSegment(target_segment, target_ratio);
+
+    auto targetOccupancy = [&](const Eigen::Vector3d &point, size_t segment_index) {
+      return planner_manager_->grid_map_->getInflateOccupancy(
+          point,
+          estimateYawFromSegment(active_waypoints_[segment_index], active_waypoints_[segment_index + 1]));
+    };
+
+    if (targetOccupancy(local_target_pt_, target_segment) != 0)
+    {
+      bool found_free_target = false;
+      for (int i = static_cast<int>(target_segment); i >= static_cast<int>(best_segment); --i)
+      {
+        const Eigen::Vector3d &candidate = active_waypoints_[static_cast<size_t>(i)];
+        if ((candidate - start_pt_).head<2>().norm() < 0.4)
+          continue;
+        if (targetOccupancy(candidate, static_cast<size_t>(i)) == 0)
+        {
+          local_target_pt_ = candidate;
+          target_segment = static_cast<size_t>(i);
+          target_ratio = 0.0;
+          reached_end = false;
+          found_free_target = true;
+          RCLCPP_WARN_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 1000,
+              "[reference path] Lookahead target occupied; use earlier collision-free point on original path.");
+          break;
+        }
+      }
+
+      if (!found_free_target)
+      {
+        RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 1000,
+            "[reference path] No collision-free lookahead point found on original path; keep bounded target for fail-safe handling.");
+      }
+    }
+
+    reached_end = reached_end ||
+                  (local_target_pt_ - active_waypoints_.back()).head<2>().norm() < 1e-3;
+
+    local_target_vel_.setZero();
+    const Eigen::Vector2d tangent =
+        (active_waypoints_[target_segment + 1] - active_waypoints_[target_segment]).head<2>();
+    if (!reached_end && tangent.norm() > 1e-4)
+    {
+      local_target_vel_.head<2>() = tangent.normalized() * planner_manager_->pp_.max_vel_;
+    }
+
+    RCLCPP_INFO_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "[reference path] progress=%zu+%.2f target=%zu+%.2f xyz=(%.2f, %.2f, %.2f) horizon=%.2f",
+        reference_progress_segment_, reference_progress_ratio_, target_segment, target_ratio,
+        local_target_pt_(0), local_target_pt_(1), local_target_pt_(2), planning_horizon_);
+    return true;
+  }
+
   void SCANReplanFSM::getLocalTarget()
   {
+    if (getReferencePathLocalTarget())
+      return;
+
     double t;
 
     double t_step = planning_horizon_ / 20 / planner_manager_->pp_.max_vel_;

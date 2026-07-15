@@ -81,6 +81,8 @@ namespace scan_planner
     std::vector<Eigen::Vector3d> preset_waypoints_;
     int waypoint_num_;
     double planning_horizon_;
+    double start_height_offset_;
+    double final_goal_tolerance_;
     double emergency_time_;
     double rviz_goal_height_;
     double self_inflation_z_up_, self_inflation_z_down_;
@@ -107,6 +109,8 @@ namespace scan_planner
     Eigen::Vector3d end_pt_, end_vel_;                                       // goal state
     Eigen::Vector3d local_target_pt_, local_target_vel_;                     // local target state
     std::vector<Eigen::Vector3d> active_waypoints_;
+    size_t reference_progress_segment_{0};
+    double reference_progress_ratio_{0.0};
     int current_wp_;
 
     bool flag_escape_emergency_;
@@ -118,6 +122,7 @@ namespace scan_planner
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr go2_execution_frozen_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr replan_request_sub_;
     rclcpp::Publisher<scan_planner::msg::Bspline>::SharedPtr bspline_pub_;
     rclcpp::Publisher<scan_planner::msg::DataDisp>::SharedPtr data_disp_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr self_inflation_pub_;
@@ -138,9 +143,11 @@ namespace scan_planner
     bool planNextWaypoint();
     bool isWaypointSequenceMode() const;
     bool adjustGlobalTargetIfOccupied();
+    bool getReferencePathLocalTarget();
     void getLocalTarget();
     void finishProcess();
     void publishSelfInflationMarker();
+    Eigen::Vector3d getPlanningStartPosition() const;
     double getOdomYaw() const;
     double estimateYawFromSegment(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const;
     void updateLocalTrajTimeFreeze();
@@ -153,6 +160,7 @@ namespace scan_planner
     void pathCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg);
     void odometryCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &msg);
     void go2ExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg);
+    void replanRequestCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg);
 
     bool checkCollision();
 

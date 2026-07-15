@@ -41,6 +41,8 @@ dynamic_avoidance:
   lookahead_distance: 2.0
   stop_distance: 0.6
   slow_distance: 1.2
-  path_corridor_radius: 0.45
+  # obstacle_topic is the already footprint-inflated SCAN occupancy cloud.
+  path_corridor_radius: 0.10
+  z_tolerance: 0.10
   replan_blocked_duration: 2.0
   sensor_timeout: 0.5

@@ -273,7 +273,7 @@ def generate_launch_description():
         DeclareLaunchArgument("robot_nav_stop_topic", default_value="/nav_stop"),
         DeclareLaunchArgument("robot_nav_start_topic", default_value="/nav_start"),
         DeclareLaunchArgument("robot_status_topic", default_value="/robot_control/status"),
-        DeclareLaunchArgument("robot_max_linear_x", default_value="0.15"),
+        DeclareLaunchArgument("robot_max_linear_x", default_value="0.25"),
         DeclareLaunchArgument("robot_max_linear_y", default_value="0.10"),
         DeclareLaunchArgument("robot_max_angular_z", default_value="0.40"),
         DeclareLaunchArgument("go2_ip", default_value="192.168.8.181"),

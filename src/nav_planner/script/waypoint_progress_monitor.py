@@ -30,9 +30,9 @@ class WaypointProgressMonitor(Node):
         self.declare_parameter("goal_yaw_topic", "goal_yaw")
         self.declare_parameter("nav_start_topic", "/nav_start")
         self.declare_parameter("nav_stop_topic", "/nav_stop")
-        self.declare_parameter("reach_tolerance_xy", 0.25)
+        self.declare_parameter("reach_tolerance_xy", 0.12)
         self.declare_parameter("reach_tolerance_z", 1.0)
-        self.declare_parameter("reach_tolerance_yaw", 0.15)
+        self.declare_parameter("reach_tolerance_yaw", 0.10)
         self.declare_parameter("timeout_sec", 0.0)
         self.declare_parameter("check_period_sec", 0.2)
 
@@ -120,11 +120,13 @@ class WaypointProgressMonitor(Node):
 
     def _on_goal_yaw(self, msg: Float64) -> None:
         yaw = self._normalize_angle(float(msg.data))
+        # The backend intentionally repeats yaw + clicked_point to survive
+        # best-effort startup delivery.  Keep yaw pending for the next point
+        # even when an active point already exists; otherwise the second
+        # repeated point consumes None and silently disables final alignment.
+        self.pending_goal_yaw = yaw
         if self.active_goal is not None:
             self.active_goal_yaw = yaw
-            self.pending_goal_yaw = None
-        else:
-            self.pending_goal_yaw = yaw
 
     def _set_goal(self, goal: PointStamped, source: str) -> None:
         if not goal.header.frame_id:
@@ -146,6 +148,7 @@ class WaypointProgressMonitor(Node):
             return
         self.active_goal = None
         self.active_goal_yaw = None
+        self.pending_goal_yaw = None
         self.last_status = "cancelled"
         self._publish_status("cancelled")
         self._publish_nav_status("canceled", "导航已取消")
@@ -157,6 +160,7 @@ class WaypointProgressMonitor(Node):
         elif not self.navigation_enabled and self.active_goal is not None:
             self.active_goal = None
             self.active_goal_yaw = None
+            self.pending_goal_yaw = None
             self.last_status = "cancelled"
             self._publish_nav_status("canceled", "导航启动信号已关闭")
 
@@ -166,6 +170,7 @@ class WaypointProgressMonitor(Node):
         self.navigation_enabled = False
         self.active_goal = None
         self.active_goal_yaw = None
+        self.pending_goal_yaw = None
         self.last_status = "estop"
         self._publish_status("estop")
         self._publish_nav_status("estop", "收到导航急停")
@@ -187,6 +192,7 @@ class WaypointProgressMonitor(Node):
                 self._publish_reached(False)
                 self.active_goal = None
                 self.active_goal_yaw = None
+                self.pending_goal_yaw = None
                 self.last_status = "timeout"
                 self._publish_status("timeout")
                 self._publish_nav_status("failed", "航点到达超时")
@@ -230,6 +236,7 @@ class WaypointProgressMonitor(Node):
             self._publish_reached(True)
             self.active_goal = None
             self.active_goal_yaw = None
+            self.pending_goal_yaw = None
             self.last_status = "reached"
             self._publish_status("reached", dist_xy=dist_xy, dist_z=dist_z, yaw_error=yaw_error)
             self._publish_nav_status("reached", "已到达目标", distance_to_goal=dist_xy)
@@ -259,6 +266,8 @@ class WaypointProgressMonitor(Node):
                 "y": self.active_goal.point.y,
                 "z": self.active_goal.point.z,
             }
+            if self.active_goal_yaw is not None:
+                payload["goal"]["yaw"] = self.active_goal_yaw
             if self.active_goal_yaw is not None:
                 payload["goal"]["yaw"] = self.active_goal_yaw
         payload.update(extra)

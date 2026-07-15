@@ -151,9 +151,9 @@ def generate_launch_description():
                 "goal_yaw_topic": "goal_yaw",
                 "nav_start_topic": "/nav_start",
                 "nav_stop_topic": "/nav_stop",
-                "reach_tolerance_xy": 0.25,
+                "reach_tolerance_xy": 0.12,
                 "reach_tolerance_z": 1.0,
-                "reach_tolerance_yaw": 0.15,
+                "reach_tolerance_yaw": 0.10,
                 "timeout_sec": 0.0,
             }
         ],

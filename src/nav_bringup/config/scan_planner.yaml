@@ -6,11 +6,20 @@
 scan_planner_node:
   ros__parameters:
     body_pose_topic: "/scan/body_pose"
+    replan_request_topic: "/nav/replan_request"
 
     "fsm/navi_mode": 3
     "fsm/thresh_replan": 1.0
     "fsm/thresh_no_replan": 0.1
-    "fsm/planning_horizon": 5.0
+    # Keep the local target comfortably inside the 10x10m sliding map.  A 5m
+    # target sat on the map boundary and was frequently classified as unknown.
+    "fsm/planning_horizon": 3.0
+    # Lift only the geometric SCAN planning start above base_footprint.  The
+    # B2 controller remains planar and never commands linear.z.
+    "fsm/start_height_offset": 0.30
+    # A completed local lookahead is not the final destination.  Only let the
+    # SCAN FSM wait for a new target after the body reaches this XY radius.
+    "fsm/final_goal_tolerance": 0.12
     "fsm/emergency_time_": 1.0
     "fsm/fail_safe": true
     "fsm/max_replan_fail_count": 1000
@@ -68,7 +77,7 @@ scan_planner_node:
     "manager/max_jerk": 4.0
     "manager/control_points_distance": 0.20
     "manager/feasibility_tolerance": 0.5
-    "manager/planning_horizon": 5.0
+    "manager/planning_horizon": 3.0
 
     "optimization/lambda_smooth": 1.0
     "optimization/lambda_collision": 1.0
@@ -92,10 +101,11 @@ closed_loop_controller:
     heading_error_threshold: 0.8
     kp_pos: 0.8
     kp_yaw: 1.5
-    # Stay just above the B2 SportClient deadband while limiting test energy.
-    max_vx: 0.15
+    # Conservative B2 navigation speed; dynamic avoidance can still scale it
+    # down or clamp it to zero independently.
+    max_vx: 0.25
     max_vy: 0.08
     max_vyaw: 0.30
-    finish_dist: 0.20
+    finish_dist: 0.12
     enable_final_yaw: true
-    final_yaw_tolerance: 0.15
+    final_yaw_tolerance: 0.10

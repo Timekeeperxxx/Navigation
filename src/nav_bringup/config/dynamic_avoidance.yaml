@@ -26,8 +26,13 @@ dynamic_avoidance_monitor:
     lookahead_distance: 2.0
     backward_prune_distance: 0.5
     path_deviation_tolerance: 1.0
-    path_corridor_radius: 0.45
-    z_tolerance: 1.0
+    # /grid_map/occupancy_inflate already contains the B2 footprint inflation.
+    # Add only two 0.05 m voxels of sampling tolerance; 0.45 m double-inflated
+    # the path and rejected trajectories that SCAN itself had marked clear.
+    path_corridor_radius: 0.10
+    # The SCAN path is at the lifted body planning height.  Keep floor voxels
+    # below it out of the independent 2D safety check.
+    z_tolerance: 0.10
     # Distances are measured from the B2 body centre.  Ignore points inside
     # the robot envelope, then retain a 0.35 m stopping margin outside it.
     # SCAN occupancy inflation expands B2 body/leg returns to about 0.80 m.
@@ -44,6 +49,10 @@ dynamic_avoidance_monitor:
     obstacle_processing_period_sec: 0.3
     max_obstacle_points: 4000
     slow_speed_scale: 0.70
+    # This topic is already footprint-inflated.  Nearby points outside the
+    # execution corridor include the robot's own 0.90 m inflation boundary;
+    # only path-relevant points should reduce navigation speed.
+    slow_nearby_obstacles: false
 
     require_obstacle_stream: true
     allow_path_start_without_tf: false

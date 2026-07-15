@@ -70,3 +70,30 @@ def test_velocity_estimator_ignores_duplicate_tf_stamp():
     expected = estimator.update(PoseSample(1.1, 0.1, 0.0, 0.0, 0.0))
 
     assert estimator.update(PoseSample(1.1, 99.0, 0.0, 0.0, 0.0)) == expected
+
+
+def test_velocity_estimator_suppresses_linear_motion_while_execution_is_frozen():
+    estimator = _estimator(smoothing_alpha=0.5)
+    estimator.update(PoseSample(1.0, 0.0, 0.0, 0.0, 0.0))
+    estimator.update(PoseSample(1.1, 0.02, 0.0, 0.0, 0.1))
+
+    velocity = estimator.update(
+        PoseSample(1.2, 0.06, -0.03, 0.0, 0.2),
+        suppress_linear=True,
+    )
+
+    assert velocity[:3] == (0.0, 0.0, 0.0)
+    assert velocity[3] == pytest.approx(0.75)
+
+
+def test_velocity_estimator_does_not_accumulate_frozen_translation():
+    estimator = _estimator()
+    estimator.update(PoseSample(1.0, 0.0, 0.0, 0.0, 0.0))
+    estimator.update(
+        PoseSample(1.1, 0.04, -0.02, 0.0, 0.1),
+        suppress_linear=True,
+    )
+
+    velocity = estimator.update(PoseSample(1.2, 0.05, -0.02, 0.0, 0.1))
+
+    assert velocity == pytest.approx((0.1, 0.0, 0.0, 0.0))

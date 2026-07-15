@@ -10,6 +10,7 @@ from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.time import Time
+from std_msgs.msg import Bool
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
@@ -44,7 +45,12 @@ class TfVelocityEstimator:
         self.previous: PoseSample | None = None
         self.velocity = (0.0, 0.0, 0.0, 0.0)
 
-    def update(self, sample: PoseSample) -> tuple[float, float, float, float]:
+    def update(
+        self,
+        sample: PoseSample,
+        *,
+        suppress_linear: bool = False,
+    ) -> tuple[float, float, float, float]:
         previous = self.previous
         if previous is None:
             self.previous = sample
@@ -67,13 +73,23 @@ class TfVelocityEstimator:
             normalize_angle(sample.yaw - previous.yaw) / dt,
         )
         linear_speed = math.sqrt(raw[0] ** 2 + raw[1] ** 2 + raw[2] ** 2)
-        if (
-            not all(math.isfinite(value) for value in raw)
-            or linear_speed > self.max_linear_speed
-            or abs(raw[3]) > self.max_angular_speed
-        ):
+        if not all(math.isfinite(value) for value in raw) or abs(raw[3]) > self.max_angular_speed:
             self.velocity = (0.0, 0.0, 0.0, 0.0)
             return self.velocity
+
+        if not suppress_linear and linear_speed > self.max_linear_speed:
+            self.velocity = (0.0, 0.0, 0.0, 0.0)
+            return self.velocity
+
+        if suppress_linear:
+            # The closed-loop controller freezes trajectory time while it turns
+            # in place to align with the path.  Differentiating localization TF
+            # during that rotation can look like sizeable lateral motion, even
+            # though the base is not translating.  Keep the angular estimate,
+            # but clear both the raw and smoothed linear components so the next
+            # SCAN replan starts from a stationary boundary condition.
+            raw = (0.0, 0.0, 0.0, raw[3])
+            self.velocity = (0.0, 0.0, 0.0, self.velocity[3])
 
         self.velocity = tuple(
             self.alpha * value + (1.0 - self.alpha) * old
@@ -97,6 +113,9 @@ class ScanTfPosePublisher(Node):
         self.declare_parameter("velocity_reset_gap_sec", 0.5)
         self.declare_parameter("max_linear_speed", 2.0)
         self.declare_parameter("max_angular_speed", 3.0)
+        self.declare_parameter(
+            "execution_frozen_topic", "/planning/go2_execution_frozen"
+        )
 
         self.global_frame = str(self.get_parameter("global_frame").value).strip()
         self.robot_frame = str(self.get_parameter("robot_frame").value).strip()
@@ -123,14 +142,28 @@ class ScanTfPosePublisher(Node):
         self.tf_buffer = Buffer(cache_time=Duration(seconds=5.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.publisher = self.create_publisher(Odometry, self.output_topic, 10)
+        self.execution_frozen = False
+        self.execution_frozen_topic = str(
+            self.get_parameter("execution_frozen_topic").value
+        ).strip()
+        self.execution_frozen_subscription = self.create_subscription(
+            Bool,
+            self.execution_frozen_topic,
+            self._on_execution_frozen,
+            10,
+        )
         self.timer = self.create_timer(1.0 / publish_rate, self._publish_pose)
         self.last_warning_at = -math.inf
         self.ready_logged = False
 
         self.get_logger().info(
             f"SCAN TF pose source: {self.global_frame} -> {self.robot_frame}, "
-            f"output={self.output_topic}, rate={publish_rate:.1f}Hz"
+            f"output={self.output_topic}, rate={publish_rate:.1f}Hz, "
+            f"execution_frozen={self.execution_frozen_topic}"
         )
+
+    def _on_execution_frozen(self, msg: Bool) -> None:
+        self.execution_frozen = bool(msg.data)
 
     def _warn_throttled(self, message: str) -> None:
         now = self.get_clock().now().nanoseconds / 1_000_000_000.0
@@ -200,7 +233,8 @@ class ScanTfPosePublisher(Node):
                 y=float(translation.y),
                 z=float(translation.z),
                 yaw=yaw,
-            )
+            ),
+            suppress_linear=self.execution_frozen,
         )
 
         odom = Odometry()

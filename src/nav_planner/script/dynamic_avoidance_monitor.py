@@ -75,8 +75,14 @@ class DynamicAvoidanceMonitor(Node):
         self.declare_parameter("lookahead_distance", 2.0)
         self.declare_parameter("backward_prune_distance", 0.5)
         self.declare_parameter("path_deviation_tolerance", 1.0)
-        self.declare_parameter("path_corridor_radius", 0.45)
-        self.declare_parameter("z_tolerance", 1.0)
+        # /grid_map/occupancy_inflate is already expanded for the B2 footprint.
+        # Keep only a two-voxel discretization margin here; a body-sized
+        # corridor would inflate the same obstacle twice.
+        self.declare_parameter("path_corridor_radius", 0.10)
+        # The execution path is lifted to the body planning height.  A broad
+        # vertical band includes traversable floor voxels below that path and
+        # permanently freezes otherwise collision-free trajectories.
+        self.declare_parameter("z_tolerance", 0.10)
         self.declare_parameter("stop_distance", 0.6)
         self.declare_parameter("slow_distance", 1.2)
         self.declare_parameter("robot_self_clear_radius", 0.90)
@@ -86,6 +92,7 @@ class DynamicAvoidanceMonitor(Node):
         self.declare_parameter("obstacle_processing_period_sec", 0.2)
         self.declare_parameter("max_obstacle_points", 8000)
         self.declare_parameter("slow_speed_scale", 0.35)
+        self.declare_parameter("slow_nearby_obstacles", True)
         self.declare_parameter("require_obstacle_stream", False)
         self.declare_parameter("allow_path_start_without_tf", False)
         self.declare_parameter("enable_cmd_vel_filter", True)
@@ -132,6 +139,9 @@ class DynamicAvoidanceMonitor(Node):
             int(self.get_parameter("max_obstacle_points").value), 1
         )
         self.slow_speed_scale = float(self.get_parameter("slow_speed_scale").value)
+        self.slow_nearby_obstacles = bool(
+            self.get_parameter("slow_nearby_obstacles").value
+        )
         self.require_obstacle_stream = bool(
             self.get_parameter("require_obstacle_stream").value
         )
@@ -616,6 +626,15 @@ class DynamicAvoidanceMonitor(Node):
         nearest_path_distance: Optional[float] = None
         blocker_count = 0
         self_filtered_count = 0
+        path_check_radius = (
+            self.path_deviation_tolerance
+            + self.lookahead_distance
+            + self.path_corridor_radius
+        )
+        nearby_check_radius = (
+            self.slow_distance if self.slow_nearby_obstacles else 0.0
+        )
+        obstacle_check_radius = max(path_check_radius, nearby_check_radius)
 
         for obstacle in self.obstacles:
             robot_distance = self._distance_2d(robot, obstacle)
@@ -625,6 +644,13 @@ class DynamicAvoidanceMonitor(Node):
             # few centimetres from the robot and clamps every command to zero.
             if robot_distance <= self.robot_self_clear_radius:
                 self_filtered_count += 1
+                continue
+            # The active window starts at most path_deviation_tolerance away
+            # and contains at most lookahead_distance of path.  Points beyond
+            # that geometric bound cannot block it.  Discard them before the
+            # expensive point-to-every-segment calculation so the 5 Hz safety
+            # timer cannot starve the incoming occupancy callback.
+            if robot_distance > obstacle_check_radius:
                 continue
             nearest_obstacle_distance = self._min_optional(
                 nearest_obstacle_distance, robot_distance
@@ -727,7 +753,8 @@ class DynamicAvoidanceMonitor(Node):
         self.blocked_since = None
 
         if (
-            check.nearest_obstacle_distance is not None
+            self.slow_nearby_obstacles
+            and check.nearest_obstacle_distance is not None
             and check.nearest_obstacle_distance <= self.slow_distance
         ):
             return self._status_payload(
