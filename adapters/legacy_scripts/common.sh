@@ -369,6 +369,146 @@ stop_pid_file() {
   rm -f "$pid_file"
 }
 
+navigation_runtime_process_patterns() {
+  # These signatures are scoped to the Navigation workspace (or to an
+  # explicitly named TF node). They are used only after navigation.pid has
+  # been stopped, to catch children that ros2 launch orphaned under PID 1.
+  printf '%s\n' \
+    "navigation.launch.py" \
+    "$ROBOT_NAV_WS/install/livox_ros_driver2/lib/livox_ros_driver2/livox_ros_driver2_node" \
+    "$ROBOT_NAV_WS/install/nav_lio/lib/nav_lio/relocation_node" \
+    "$ROBOT_NAV_WS/install/nav_bringup/lib/nav_bringup/nav_pcd_map_publisher.py" \
+    "$ROBOT_NAV_WS/install/nav_bringup/lib/nav_bringup/scan_initial_path_adapter.py" \
+    "$ROBOT_NAV_WS/install/nav_bringup/lib/nav_bringup/scan_tf_pose_publisher.py" \
+    "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/global_planner_node" \
+    "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/waypoint_progress_monitor.py" \
+    "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/dynamic_avoidance_monitor.py" \
+    "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/nav_path_follower.py" \
+    "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/local_obstacle_simulator.py" \
+    "$ROBOT_NAV_WS/install/scan_planner/lib/scan_planner/scan_planner_node" \
+    "$ROBOT_NAV_WS/install/scan_planner/lib/scan_planner/closed_loop_controller" \
+    "$ROBOT_NAV_WS/install/nav_robot_control/lib/nav_robot_control/b2_cmd_vel_bridge" \
+    "$ROBOT_NAV_WS/install/nav_robot_control/lib/nav_robot_control/go2_webrtc_bridge" \
+    "__node:=static_tf_base_link_to_base_footprint"
+}
+
+find_process_pids_by_pattern() {
+  local expected_arg="$1"
+  local proc_dir=""
+  local pid=""
+  local arg=""
+
+  # Compare complete NUL-delimited argv entries. Substring matching with
+  # pgrep -f also matches shell/diagnostic commands which merely mention a
+  # node name and can create fake PID files and false ready states.
+  for proc_dir in /proc/[0-9]*; do
+    [ -r "$proc_dir/cmdline" ] || continue
+    pid="${proc_dir##*/}"
+    while IFS= read -r -d '' arg; do
+      if [ "$arg" = "$expected_arg" ]; then
+        printf '%s\n' "$pid"
+        break
+      fi
+    done < "$proc_dir/cmdline" 2>/dev/null || true
+  done
+}
+
+navigation_runtime_residual_pids() {
+  local pattern=""
+
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    find_process_pids_by_pattern "$pattern"
+  done < <(navigation_runtime_process_patterns) | sort -n -u
+}
+
+stop_navigation_runtime_residuals() {
+  local grace_seconds="${1:-5}"
+  local pids=""
+  local pid=""
+  local waited=0
+
+  pids="$(navigation_runtime_residual_pids)"
+  if [ -z "$pids" ]; then
+    return 0
+  fi
+
+  log_warn "发现未被 PID 文件覆盖的导航残留进程，正在清理：$(printf '%s' "$pids" | tr '\n' ' ')"
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done <<< "$pids"
+
+  while [ "$waited" -lt "$grace_seconds" ]; do
+    if [ -z "$(navigation_runtime_residual_pids)" ]; then
+      log_info "导航残留进程已清理"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  pids="$(navigation_runtime_residual_pids)"
+  if [ -n "$pids" ]; then
+    log_warn "导航残留进程收到 TERM 后仍未退出，发送 KILL：$(printf '%s' "$pids" | tr '\n' ' ')"
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      kill -KILL "$pid" 2>/dev/null || true
+    done <<< "$pids"
+  fi
+
+  sleep 1
+  pids="$(navigation_runtime_residual_pids)"
+  if [ -n "$pids" ]; then
+    log_error "导航残留进程清理失败：$(printf '%s' "$pids" | tr '\n' ' ')"
+    return 1
+  fi
+
+  log_info "导航残留进程已强制清理"
+}
+
+navigation_process_count() {
+  local pattern="$1"
+  find_process_pids_by_pattern "$pattern" | awk 'END { print NR + 0 }'
+}
+
+assert_single_navigation_runtime() {
+  local checks=(
+    "$ROBOT_NAV_WS/install/nav_bringup/lib/nav_bringup/nav_pcd_map_publisher.py|静态点云发布器"
+    "__node:=static_tf_base_link_to_base_footprint|base_link 静态 TF 发布器"
+  )
+  local item=""
+  local pattern=""
+  local label=""
+  local count=0
+
+  if [ "$NAV_ENABLE_SCAN_PLANNER" = "true" ] || [ "$NAV_ENABLE_SCAN_PLANNER" = "1" ]; then
+    checks+=(
+      "$ROBOT_NAV_WS/install/nav_bringup/lib/nav_bringup/scan_initial_path_adapter.py|SCAN 初始路径适配器"
+      "$ROBOT_NAV_WS/install/scan_planner/lib/scan_planner/scan_planner_node|SCAN planner"
+    )
+  fi
+  if { [ "$NAV_ENABLE_SCAN_PLANNER" = "true" ] || [ "$NAV_ENABLE_SCAN_PLANNER" = "1" ]; } \
+    || { [ "$NAV_ENABLE_SCAN_CONTROLLER" = "true" ] || [ "$NAV_ENABLE_SCAN_CONTROLLER" = "1" ]; }; then
+    checks+=("$ROBOT_NAV_WS/install/nav_bringup/lib/nav_bringup/scan_tf_pose_publisher.py|SCAN TF 发布器")
+  fi
+  if [ "$NAV_ENABLE_SCAN_CONTROLLER" = "true" ] || [ "$NAV_ENABLE_SCAN_CONTROLLER" = "1" ]; then
+    checks+=("$ROBOT_NAV_WS/install/scan_planner/lib/scan_planner/closed_loop_controller|SCAN controller")
+  fi
+
+  for item in "${checks[@]}"; do
+    pattern="${item%%|*}"
+    label="${item#*|}"
+    count="$(navigation_process_count "$pattern")"
+    if [ "$count" -ne 1 ]; then
+      log_error "$label 单实例校验失败：count=$count pattern=$pattern"
+      return 1
+    fi
+  done
+
+  log_info "导航关键节点单实例校验通过"
+}
+
 request_save_terrain_map() {
   local log_file="${1:-/dev/null}"
 

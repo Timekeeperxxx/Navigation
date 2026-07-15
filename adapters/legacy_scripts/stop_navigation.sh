@@ -16,6 +16,10 @@ fi
 stop_pid_file "$ROBOT_NAV_RUNTIME_ROOT/mapping.pid" "建图链路" 90 "ros2 launch nav_bringup mapping.launch.py"
 stop_pid_file "$ROBOT_NAV_RUNTIME_ROOT/navigation_adapter.pid" "导航适配器" 10 "restart_navigation_localization.sh"
 stop_pid_file "$ROBOT_NAV_RUNTIME_ROOT/navigation.pid" "导航定位链路" 10 "ros2 launch nav_bringup navigation.launch.py"
+if ! stop_navigation_runtime_residuals 5; then
+  log_error "导航残留进程未能清理干净"
+  exit 1
+fi
 
 rm -f \
   "$ROBOT_NAV_RUNTIME_ROOT/navigation_ready.json" \

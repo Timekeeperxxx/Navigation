@@ -103,41 +103,50 @@ fi
 printf '%s\n' "$$" > "$ADAPTER_PID_FILE"
 
 stop_pid_file "$PID_FILE" "旧导航定位链路" 10 "ros2 launch nav_bringup navigation.launch.py"
+if ! stop_navigation_runtime_residuals 5; then
+  log_error "旧导航子进程未清理干净，拒绝启动新链路，避免多场景点云互相覆盖"
+  exit 1
+fi
 rm -f "$READY_FILE" "$ROBOT_NAV_RUNTIME_ROOT/p2p_move_base.pid" "${CHILD_PID_FILES[@]}"
 prepare_livox_config
 
 record_process_pid() {
   local pid_file="$1"
-  local process_pattern="$2"
-  local pid=""
+  local process_arg="$2"
+  local pids=""
+  local count=0
 
-  pid="$(pgrep -f -- "$process_pattern" 2>/dev/null | tail -n 1 || true)"
-  if [ -z "$pid" ]; then
+  pids="$(find_process_pids_by_pattern "$process_arg")"
+  count="$(printf '%s\n' "$pids" | awk 'NF { count++ } END { print count + 0 }')"
+  if [ "$count" -ne 1 ]; then
+    if [ "$count" -gt 1 ]; then
+      log_error "导航节点存在重复实例：arg=$process_arg pids=$(printf '%s' "$pids" | tr '\n' ' ')"
+    fi
     return 1
   fi
-  printf '%s\n' "$pid" > "$pid_file"
+  printf '%s\n' "$pids" > "$pid_file"
 }
 
 record_navigation_children() {
   local missing=0
 
-  record_process_pid "$LIVOX_PID_FILE" "/livox_ros_driver2/livox_ros_driver2_node" || missing=$((missing + 1))
-  record_process_pid "$RELOCATION_PID_FILE" "/nav_lio/relocation_node" || missing=$((missing + 1))
-  record_process_pid "$GLOBAL_PLANNER_PID_FILE" "/nav_planner/global_planner_node" || missing=$((missing + 1))
-  record_process_pid "$NAV_STATUS_MONITOR_PID_FILE" "/nav_planner/waypoint_progress_monitor.py" || missing=$((missing + 1))
+  record_process_pid "$LIVOX_PID_FILE" "$ROBOT_NAV_WS/install/livox_ros_driver2/lib/livox_ros_driver2/livox_ros_driver2_node" || missing=$((missing + 1))
+  record_process_pid "$RELOCATION_PID_FILE" "$ROBOT_NAV_WS/install/nav_lio/lib/nav_lio/relocation_node" || missing=$((missing + 1))
+  record_process_pid "$GLOBAL_PLANNER_PID_FILE" "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/global_planner_node" || missing=$((missing + 1))
+  record_process_pid "$NAV_STATUS_MONITOR_PID_FILE" "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/waypoint_progress_monitor.py" || missing=$((missing + 1))
 
   if [ "$NAV_ENABLE_SCAN_PLANNER" = "true" ] || [ "$NAV_ENABLE_SCAN_PLANNER" = "1" ]; then
-    record_process_pid "$SCAN_PLANNER_PID_FILE" "/scan_planner/scan_planner_node" || missing=$((missing + 1))
+    record_process_pid "$SCAN_PLANNER_PID_FILE" "$ROBOT_NAV_WS/install/scan_planner/lib/scan_planner/scan_planner_node" || missing=$((missing + 1))
   fi
   if [ "$NAV_ENABLE_SCAN_CONTROLLER" = "true" ] || [ "$NAV_ENABLE_SCAN_CONTROLLER" = "1" ]; then
-    record_process_pid "$SCAN_CONTROLLER_PID_FILE" "/scan_planner/closed_loop_controller" || missing=$((missing + 1))
+    record_process_pid "$SCAN_CONTROLLER_PID_FILE" "$ROBOT_NAV_WS/install/scan_planner/lib/scan_planner/closed_loop_controller" || missing=$((missing + 1))
   fi
   if { [ "$NAV_ENABLE_SCAN_PLANNER" = "true" ] || [ "$NAV_ENABLE_SCAN_PLANNER" = "1" ]; } \
     || { [ "$NAV_ENABLE_SCAN_CONTROLLER" = "true" ] || [ "$NAV_ENABLE_SCAN_CONTROLLER" = "1" ]; }; then
-    record_process_pid "$SCAN_TF_POSE_PID_FILE" "/nav_bringup/scan_tf_pose_publisher.py" || missing=$((missing + 1))
+    record_process_pid "$SCAN_TF_POSE_PID_FILE" "$ROBOT_NAV_WS/install/nav_bringup/lib/nav_bringup/scan_tf_pose_publisher.py" || missing=$((missing + 1))
   fi
   if [ "$NAV_ENABLE_DYNAMIC_AVOIDANCE" = "true" ] || [ "$NAV_ENABLE_DYNAMIC_AVOIDANCE" = "1" ]; then
-    record_process_pid "$DYNAMIC_AVOIDANCE_PID_FILE" "/nav_planner/dynamic_avoidance_monitor.py" || missing=$((missing + 1))
+    record_process_pid "$DYNAMIC_AVOIDANCE_PID_FILE" "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/dynamic_avoidance_monitor.py" || missing=$((missing + 1))
   fi
 
   [ "$missing" -eq 0 ]
@@ -172,6 +181,8 @@ cleanup() {
     stop_pid_file "$PID_FILE" "导航定位链路" 10 "ros2 launch nav_bringup navigation.launch.py"
     wait "$LAUNCH_PID" 2>/dev/null || true
   fi
+
+  stop_navigation_runtime_residuals 5 || true
 
   rm -f "$PID_FILE" "$ADAPTER_PID_FILE" "$READY_FILE" "${CHILD_PID_FILES[@]}"
   write_json_file "$STATUS_FILE" "{\"running\":false,\"scene_dir\":\"$SCENE_DIR\",\"exit_code\":$status}"
@@ -223,7 +234,7 @@ launch_args=(
   "enable_robot_control:=$NAV_ENABLE_ROBOT_CONTROL"
   "robot_model:=$NAV_ROBOT_MODEL"
   "robot_cmd_vel_topic:=$NAV_ROBOT_CMD_VEL_TOPIC"
-  "robot_max_linear_x:=0.15"
+  "robot_max_linear_x:=0.25"
   "robot_max_linear_y:=0.08"
   "robot_max_angular_z:=0.30"
   "rviz:=false"
@@ -278,7 +289,8 @@ while kill -0 "$LAUNCH_PID" 2>/dev/null && [ "$ready_waited" -lt "$NAV_READY_TIM
 done
 
 if kill -0 "$LAUNCH_PID" 2>/dev/null \
-  && record_navigation_children; then
+  && record_navigation_children \
+  && assert_single_navigation_runtime; then
   write_json_file "$READY_FILE" "{\"ready\":true,\"stage\":\"awaiting_initialpose\",\"run_id\":\"$RUN_ID\",\"scene_dir\":\"$SCENE_DIR\",\"map_pcd\":\"$MAP_PCD\",\"ground_pcd\":\"$GROUND_PCD\",\"planground_pcd\":\"$PLANGROUND_PCD\",\"pid\":$LAUNCH_PID,\"control_chain\":\"scan_planner_cmd_vel_safe\"}"
   write_json_file "$STATUS_FILE" "{\"running\":true,\"scene_dir\":\"$SCENE_DIR\",\"pid\":$LAUNCH_PID,\"stage\":\"awaiting_initialpose\"}"
   log_info "导航定位进程已启动，正在等待 initialpose：PID=$LAUNCH_PID"
