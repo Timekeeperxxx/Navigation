@@ -19,11 +19,20 @@ class _Logger:
         pass
 
 
+class _CapturePublisher:
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
+
+
 class _NavigatorHarness:
     load_waypoints = WaypointNavigator.load_waypoints
     reload_waypoints = WaypointNavigator.reload_waypoints
     nav_start_callback = WaypointNavigator.nav_start_callback
     waypoint_reached_callback = WaypointNavigator.waypoint_reached_callback
+    publish_waypoint_context = WaypointNavigator.publish_waypoint_context
 
     def __init__(self, task_file: Path):
         self.waypoints_file = str(task_file)
@@ -36,6 +45,7 @@ class _NavigatorHarness:
         self.retry_timer = None
         self.publish_count = 0
         self.task_statuses = []
+        self.waypoint_context_pub = _CapturePublisher()
         self._logger = _Logger()
 
     def get_logger(self):
@@ -43,6 +53,11 @@ class _NavigatorHarness:
 
     def publish_current_waypoint(self):
         self.publish_count += 1
+        if self.navigating and self.current_index < len(self.waypoints):
+            self.publish_waypoint_context(
+                active=True,
+                waypoint_index=self.current_index,
+            )
 
     def publish_task_status(
         self,
@@ -146,6 +161,12 @@ def test_intermediate_waypoint_keeps_task_running(tmp_path):
     assert navigator.publish_count == 2
     assert navigator.task_statuses[-1]["status"] == "moving"
     assert navigator.task_statuses[-1]["task_complete"] is False
+    first_context = json.loads(navigator.waypoint_context_pub.messages[0].data)
+    next_context = json.loads(navigator.waypoint_context_pub.messages[-1].data)
+    assert first_context["waypoint_index"] == 0
+    assert first_context["is_final"] is False
+    assert next_context["waypoint_index"] == 1
+    assert next_context["is_final"] is True
 
 
 def test_final_waypoint_publishes_task_complete(tmp_path):
@@ -160,3 +181,5 @@ def test_final_waypoint_publishes_task_complete(tmp_path):
     assert navigator.current_index == 1
     assert navigator.task_statuses[-1]["status"] == "reached"
     assert navigator.task_statuses[-1]["task_complete"] is True
+    context = json.loads(navigator.waypoint_context_pub.messages[-1].data)
+    assert context["active"] is False

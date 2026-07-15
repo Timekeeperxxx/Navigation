@@ -130,6 +130,7 @@ def generate_launch_description():
                 "clicked_point_topic": "/clicked_point",
                 "nav_start_topic": waypoint_navigator_start_topic,
                 "waypoint_reached_topic": "/waypoint_reached",
+                "waypoint_context_topic": "/nav/task_waypoint_context",
             }
         ],
         condition=IfCondition(enable_waypoint_navigator),
@@ -149,6 +150,7 @@ def generate_launch_description():
                 "waypoint_reached_topic": "/waypoint_reached",
                 "status_topic": "/nav/waypoint_progress",
                 "nav_status_topic": "/nav_status",
+                "waypoint_context_topic": "/nav/task_waypoint_context",
                 "goal_yaw_topic": "goal_yaw",
                 "nav_start_topic": "/nav_start",
                 "nav_stop_topic": "/nav_stop",

@@ -27,6 +27,7 @@ class WaypointProgressMonitor(Node):
         self.declare_parameter("waypoint_reached_topic", "/waypoint_reached")
         self.declare_parameter("status_topic", "/nav/waypoint_progress")
         self.declare_parameter("nav_status_topic", "/nav_status")
+        self.declare_parameter("waypoint_context_topic", "/nav/task_waypoint_context")
         self.declare_parameter("goal_yaw_topic", "goal_yaw")
         self.declare_parameter("nav_start_topic", "/nav_start")
         self.declare_parameter("nav_stop_topic", "/nav_stop")
@@ -52,6 +53,8 @@ class WaypointProgressMonitor(Node):
         self.active_goal_time = self.get_clock().now()
         self.last_status = "idle"
         self.navigation_enabled = False
+        self.task_waypoint_context = None
+        self.active_task_waypoint_context = None
 
         self.reached_pub = self.create_publisher(
             Bool, self.get_parameter("waypoint_reached_topic").value, 10
@@ -99,6 +102,12 @@ class WaypointProgressMonitor(Node):
             self._on_nav_stop,
             10,
         )
+        self.create_subscription(
+            String,
+            self.get_parameter("waypoint_context_topic").value,
+            self._on_waypoint_context,
+            10,
+        )
 
         period = max(float(self.get_parameter("check_period_sec").value), 0.05)
         self.create_timer(period, self._check_progress)
@@ -136,6 +145,7 @@ class WaypointProgressMonitor(Node):
         self.pending_goal_yaw = None
         self.active_goal_time = self.get_clock().now()
         self.last_status = "running"
+        self._bind_task_context_to_active_goal()
         self.get_logger().info(
             f"开始监测目标({source})：frame={goal.header.frame_id}, "
             f"x={goal.point.x:.3f}, y={goal.point.y:.3f}, z={goal.point.z:.3f}"
@@ -149,6 +159,8 @@ class WaypointProgressMonitor(Node):
         self.active_goal = None
         self.active_goal_yaw = None
         self.pending_goal_yaw = None
+        self.task_waypoint_context = None
+        self.active_task_waypoint_context = None
         self.last_status = "cancelled"
         self._publish_status("cancelled")
         self._publish_nav_status("canceled", "导航已取消")
@@ -161,6 +173,8 @@ class WaypointProgressMonitor(Node):
             self.active_goal = None
             self.active_goal_yaw = None
             self.pending_goal_yaw = None
+            self.task_waypoint_context = None
+            self.active_task_waypoint_context = None
             self.last_status = "cancelled"
             self._publish_nav_status("canceled", "导航启动信号已关闭")
 
@@ -171,9 +185,45 @@ class WaypointProgressMonitor(Node):
         self.active_goal = None
         self.active_goal_yaw = None
         self.pending_goal_yaw = None
+        self.task_waypoint_context = None
+        self.active_task_waypoint_context = None
         self.last_status = "estop"
         self._publish_status("estop")
         self._publish_nav_status("estop", "收到导航急停")
+
+    def _on_waypoint_context(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except (TypeError, ValueError) as exc:
+            self.get_logger().warn(f"忽略无效任务航点上下文: {exc}")
+            return
+        if not isinstance(payload, dict) or not payload.get("active"):
+            self.task_waypoint_context = None
+            self.active_task_waypoint_context = None
+            return
+        self.task_waypoint_context = payload
+        self._bind_task_context_to_active_goal()
+
+    def _bind_task_context_to_active_goal(self) -> None:
+        self.active_task_waypoint_context = None
+        context = self.task_waypoint_context
+        if self.active_goal is None or not isinstance(context, dict):
+            return
+        goal_context = context.get("goal")
+        if not isinstance(goal_context, dict):
+            return
+        try:
+            dx = self.active_goal.point.x - float(goal_context["x"])
+            dy = self.active_goal.point.y - float(goal_context["y"])
+            dz = self.active_goal.point.z - float(goal_context["z"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if math.hypot(dx, dy) <= 0.02 and abs(dz) <= 0.05:
+            self.active_task_waypoint_context = context
+
+    def _goal_requires_yaw(self) -> bool:
+        context = self.active_task_waypoint_context
+        return not (isinstance(context, dict) and context.get("is_final") is False)
 
     def _check_progress(self) -> None:
         if self.active_goal is None:
@@ -224,26 +274,49 @@ class WaypointProgressMonitor(Node):
             if self.active_goal_yaw is not None
             else 0.0
         )
+        require_yaw = self._goal_requires_yaw()
 
         if (
             dist_xy <= self.reach_tolerance_xy
             and dist_z <= self.reach_tolerance_z
-            and yaw_error <= self.reach_tolerance_yaw
+            and (not require_yaw or yaw_error <= self.reach_tolerance_yaw)
         ):
+            context = self.active_task_waypoint_context
+            waypoint_suffix = ""
+            if isinstance(context, dict):
+                waypoint_suffix = (
+                    f", task_waypoint_index={context.get('waypoint_index')}, "
+                    f"task_waypoint_count={context.get('waypoint_count')}, "
+                    f"require_yaw={require_yaw}"
+                )
             self.get_logger().info(
                 f"航点已到达：dist_xy={dist_xy:.3f}, dist_z={dist_z:.3f}"
+                f"{waypoint_suffix}"
             )
             self._publish_reached(True)
             self.active_goal = None
             self.active_goal_yaw = None
             self.pending_goal_yaw = None
+            self.active_task_waypoint_context = None
             self.last_status = "reached"
-            self._publish_status("reached", dist_xy=dist_xy, dist_z=dist_z, yaw_error=yaw_error)
+            self._publish_status(
+                "reached",
+                dist_xy=dist_xy,
+                dist_z=dist_z,
+                yaw_error=yaw_error,
+                require_yaw=require_yaw,
+            )
             self._publish_nav_status("reached", "已到达目标", distance_to_goal=dist_xy)
             return
 
         self.last_status = "running"
-        self._publish_status("running", dist_xy=dist_xy, dist_z=dist_z, yaw_error=yaw_error)
+        self._publish_status(
+            "running",
+            dist_xy=dist_xy,
+            dist_z=dist_z,
+            yaw_error=yaw_error,
+            require_yaw=require_yaw,
+        )
         self._publish_nav_status("moving", "导航中", distance_to_goal=dist_xy)
 
     def _publish_reached(self, reached: bool) -> None:
@@ -268,8 +341,13 @@ class WaypointProgressMonitor(Node):
             }
             if self.active_goal_yaw is not None:
                 payload["goal"]["yaw"] = self.active_goal_yaw
-            if self.active_goal_yaw is not None:
-                payload["goal"]["yaw"] = self.active_goal_yaw
+        context = self.active_task_waypoint_context
+        if isinstance(context, dict):
+            payload["task_waypoint"] = {
+                "index": context.get("waypoint_index"),
+                "count": context.get("waypoint_count"),
+                "is_final": context.get("is_final"),
+            }
         payload.update(extra)
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False)

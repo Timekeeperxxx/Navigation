@@ -18,6 +18,7 @@ class WaypointNavigator(Node):
         self.declare_parameter('nav_start_topic', '/nav_task_start')
         self.declare_parameter('waypoint_reached_topic', '/waypoint_reached')
         self.declare_parameter('nav_status_topic', '/nav_status')
+        self.declare_parameter('waypoint_context_topic', '/nav/task_waypoint_context')
 
         self.waypoints_file = self.resolve_waypoints_file(self.get_parameter('waypoints_file').value)
         self.frame_id = self.get_parameter('frame_id').value
@@ -46,6 +47,11 @@ class WaypointNavigator(Node):
         self.nav_status_pub = self.create_publisher(
             String,
             self.get_parameter('nav_status_topic').value,
+            10,
+        )
+        self.waypoint_context_pub = self.create_publisher(
+            String,
+            self.get_parameter('waypoint_context_topic').value,
             10,
         )
 
@@ -173,6 +179,7 @@ class WaypointNavigator(Node):
         if msg.data:
             if not self.reload_waypoints():
                 self.navigating = False
+                self.publish_waypoint_context(active=False)
                 self.get_logger().error('接收到任务开始信号，但当前任务没有有效航点，拒绝启动')
                 self.publish_task_status(
                     'failed',
@@ -189,6 +196,7 @@ class WaypointNavigator(Node):
             self.publish_task_status('moving', '任务已开始', task_complete=False)
             self.publish_current_waypoint()
         else:
+            self.publish_waypoint_context(active=False)
             if self.navigating:
                 self.get_logger().info('接收到停止导航信号 (false), stopping navigation')
                 self.navigating = False
@@ -214,6 +222,7 @@ class WaypointNavigator(Node):
         if self.current_index >= len(self.waypoints):
             self.get_logger().info('所有航点已访问完毕，导航完成！')
             self.navigating = False
+            self.publish_waypoint_context(active=False)
             self.publish_task_status(
                 'reached',
                 '所有任务航点已完成',
@@ -231,6 +240,11 @@ class WaypointNavigator(Node):
         point_msg.point.z = wp['z']
         yaw_msg = Float64()
         yaw_msg.data = wp['yaw']
+        # Publish task context before the point.  The monitor also binds a
+        # late-arriving context to the active point, so DDS delivery order
+        # across the two topics cannot make an intermediate point require the
+        # final heading by mistake.
+        self.publish_waypoint_context(active=True, waypoint_index=self.current_index)
         self.yaw_pub.publish(yaw_msg)
         self.clicked_pub.publish(point_msg)
 
@@ -255,6 +269,7 @@ class WaypointNavigator(Node):
             if self.current_index >= len(self.waypoints):
                 self.get_logger().info('所有航点已访问完毕，导航完成！')
                 self.navigating = False
+                self.publish_waypoint_context(active=False)
                 self.publish_task_status(
                     'reached',
                     '所有任务航点已完成',
@@ -290,6 +305,35 @@ class WaypointNavigator(Node):
             self.navigating = False
             return
         self.publish_current_waypoint()
+
+    def publish_waypoint_context(self, *, active, waypoint_index=None):
+        """Tell the progress monitor whether the active goal is task-final."""
+        payload = {
+            'active': bool(active),
+            'task_id': self.task_id,
+            'task_name': self.task_name,
+            'waypoint_index': waypoint_index,
+            'waypoint_count': len(self.waypoints),
+        }
+        if (
+            active
+            and waypoint_index is not None
+            and 0 <= waypoint_index < len(self.waypoints)
+        ):
+            waypoint = self.waypoints[waypoint_index]
+            payload.update({
+                'is_final': waypoint_index == len(self.waypoints) - 1,
+                'goal': {
+                    'frame_id': waypoint.get('frame_id', self.frame_id),
+                    'x': waypoint['x'],
+                    'y': waypoint['y'],
+                    'z': waypoint['z'],
+                    'yaw': waypoint.get('yaw', 0.0),
+                },
+            })
+        self.waypoint_context_pub.publish(
+            String(data=json.dumps(payload, ensure_ascii=False))
+        )
 
     def publish_task_status(
         self,
