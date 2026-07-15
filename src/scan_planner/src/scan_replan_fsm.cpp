@@ -628,6 +628,9 @@ namespace scan_planner
 
     case GEN_NEW_TRAJ:
     {
+      if (finishReferencePathIfGoalReached("GEN_NEW_TRAJ"))
+        break;
+
       setStartStateFromOdomOrCurrentTraj();
 
       // Eigen::Vector3d rot_x = odom_orient_.toRotationMatrix().block(0, 0, 3, 1);
@@ -658,6 +661,9 @@ namespace scan_planner
 
     case REPLAN_TRAJ:
     {
+      if (finishReferencePathIfGoalReached("REPLAN_TRAJ"))
+        break;
+
       if (planFromCurrentTraj())
       {
         replan_fail_count_ = 0;
@@ -732,11 +738,8 @@ namespace scan_planner
             return;
           }
 
-          ROS_INFO("[reference path] Final XY goal reached: distance=%.3fm tolerance=%.3fm.",
-                   final_goal_distance, final_goal_tolerance_);
-          active_waypoints_.clear();
-          reference_progress_segment_ = 0;
-          reference_progress_ratio_ = 0.0;
+          finishReferencePathIfGoalReached("EXEC_TRAJ");
+          return;
         }
 
         if (isWaypointSequenceMode())
@@ -809,6 +812,28 @@ namespace scan_planner
       flag_escape_emergency_ = true;
       changeFSMExecState(EMERGENCY_STOP, "finishProcess");
     }
+  }
+
+  bool SCANReplanFSM::finishReferencePathIfGoalReached(const char *source)
+  {
+    if (navi_mode_ != NAVI_MODE::REFERENCE_PATH || active_waypoints_.empty())
+      return false;
+
+    const double final_goal_distance =
+        (active_waypoints_.back() - odom_pos_).head<2>().norm();
+    if (final_goal_distance > final_goal_tolerance_)
+      return false;
+
+    ROS_INFO("[reference path] Final XY goal reached in %s: distance=%.3fm tolerance=%.3fm; wait for the next target.",
+             source, final_goal_distance, final_goal_tolerance_);
+    active_waypoints_.clear();
+    reference_progress_segment_ = 0;
+    reference_progress_ratio_ = 0.0;
+    have_target_ = false;
+    have_new_target_ = false;
+    replan_fail_count_ = 0;
+    changeFSMExecState(WAIT_TARGET, source);
+    return true;
   }
 
   bool SCANReplanFSM::planFromCurrentTraj()

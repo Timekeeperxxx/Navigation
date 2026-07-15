@@ -146,6 +146,7 @@ namespace scan_planner
     bool getReferencePathLocalTarget();
     void getLocalTarget();
     void finishProcess();
+    bool finishReferencePathIfGoalReached(const char *source);
     void publishSelfInflationMarker();
     Eigen::Vector3d getPlanningStartPosition() const;
     double getOdomYaw() const;
