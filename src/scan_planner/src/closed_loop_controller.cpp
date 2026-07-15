@@ -57,6 +57,7 @@ double kp_yaw;
 double max_vx;
 double max_vy;
 double max_vyaw;
+double min_translation_speed;
 double finish_dist;
 double final_yaw_tolerance;
 bool enable_final_yaw;
@@ -106,6 +107,8 @@ bool loadParams()
   ok &= loadRequiredParam("max_vx", max_vx);
   ok &= loadRequiredParam("max_vy", max_vy);
   ok &= loadRequiredParam("max_vyaw", max_vyaw);
+  min_translation_speed = std::max(
+      0.0, getParamWithDefault<double>("min_translation_speed", 0.0));
   ok &= loadRequiredParam("finish_dist", finish_dist);
   enable_final_yaw = getParamWithDefault<bool>("enable_final_yaw", true);
   final_yaw_tolerance = getParamWithDefault<double>("final_yaw_tolerance", 0.15);
@@ -115,6 +118,20 @@ bool loadParams()
     RCLCPP_WARN(node->get_logger(), "[closed_loop_controller] cap max_vyaw %.3f to %.3f rad/s.",
                 max_vyaw, kMaxVYawLimit);
     max_vyaw = kMaxVYawLimit;
+  }
+  if (ok) {
+    const double max_translation_speed = std::hypot(max_vx, max_vy);
+    if (min_translation_speed > max_translation_speed) {
+      RCLCPP_WARN(
+          node->get_logger(),
+          "[closed_loop_controller] cap min_translation_speed %.3f to planar limit %.3f m/s.",
+          min_translation_speed, max_translation_speed);
+      min_translation_speed = max_translation_speed;
+    }
+    RCLCPP_INFO(
+        node->get_logger(),
+        "[closed_loop_controller] translation speed range: min=%.3f max_x=%.3f max_y=%.3f m/s.",
+        min_translation_speed, max_vx, max_vy);
   }
   return ok;
 }
@@ -320,6 +337,13 @@ void cmdCallback()
   Eigen::Vector2d pos_err(pos_des(0) - odom_pos(0), pos_des(1) - odom_pos(1));
   Eigen::Vector2d vel_ff(vel_des(0), vel_des(1));
   Eigen::Vector2d vel_world = clampNorm(vel_ff + kp_pos * pos_err, std::max(max_vx, max_vy));
+  const double planar_speed = vel_world.norm();
+  if (
+      pos_err.norm() >= finish_dist &&
+      planar_speed > 1e-6 &&
+      planar_speed < min_translation_speed) {
+    vel_world *= min_translation_speed / planar_speed;
+  }
 
   const double c = std::cos(odom_yaw);
   const double s = std::sin(odom_yaw);

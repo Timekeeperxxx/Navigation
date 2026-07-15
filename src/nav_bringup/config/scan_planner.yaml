@@ -19,7 +19,7 @@ scan_planner_node:
     "fsm/start_height_offset": 0.30
     # A completed local lookahead is not the final destination.  Only let the
     # SCAN FSM wait for a new target after the body reaches this XY radius.
-    "fsm/final_goal_tolerance": 0.12
+    "fsm/final_goal_tolerance": 0.10
     "fsm/emergency_time_": 1.0
     "fsm/fail_safe": true
     "fsm/max_replan_fail_count": 1000
@@ -106,6 +106,10 @@ closed_loop_controller:
     max_vx: 0.25
     max_vy: 0.08
     max_vyaw: 0.30
-    finish_dist: 0.12
+    # Unitree B2 ignores very small Move() commands even when the SDK returns
+    # success. Keep the pre-safety command above its effective walking floor;
+    # dynamic avoidance remains downstream and can still scale or stop it.
+    min_translation_speed: 0.15
+    finish_dist: 0.10
     enable_final_yaw: true
     final_yaw_tolerance: 0.10
