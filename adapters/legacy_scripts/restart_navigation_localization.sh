@@ -32,11 +32,13 @@ SCAN_CONTROLLER_PID_FILE="$ROBOT_NAV_RUNTIME_ROOT/scan_controller.pid"
 SCAN_TF_POSE_PID_FILE="$ROBOT_NAV_RUNTIME_ROOT/scan_tf_pose.pid"
 DYNAMIC_AVOIDANCE_PID_FILE="$ROBOT_NAV_RUNTIME_ROOT/dynamic_avoidance.pid"
 NAV_STATUS_MONITOR_PID_FILE="$ROBOT_NAV_RUNTIME_ROOT/nav_status_monitor.pid"
+WAYPOINT_NAVIGATOR_PID_FILE="$ROBOT_NAV_RUNTIME_ROOT/waypoint_navigator.pid"
 NAV_ENABLE_SCAN_PLANNER="${NAV_ENABLE_SCAN_PLANNER:-true}"
 NAV_ENABLE_SCAN_CONTROLLER="${NAV_ENABLE_SCAN_CONTROLLER:-true}"
 NAV_ENABLE_PATH_FOLLOWER="${NAV_ENABLE_PATH_FOLLOWER:-false}"
 NAV_ENABLE_DYNAMIC_AVOIDANCE="${NAV_ENABLE_DYNAMIC_AVOIDANCE:-true}"
 NAV_ENABLE_ROBOT_CONTROL="${NAV_ENABLE_ROBOT_CONTROL:-false}"
+NAV_ENABLE_WAYPOINT_NAVIGATOR="${NAV_ENABLE_WAYPOINT_NAVIGATOR:-true}"
 NAV_ROBOT_MODEL="${NAV_ROBOT_MODEL:-b2}"
 NAV_ROBOT_CMD_VEL_TOPIC="${NAV_ROBOT_CMD_VEL_TOPIC:-/unitree/b2/cmd_vel}"
 NAV_GO2_CONNECTION_METHOD="${NAV_GO2_CONNECTION_METHOD:-LocalSTA}"
@@ -44,6 +46,7 @@ NAV_GO2_IP="${NAV_GO2_IP:-}"
 NAV_GO2_SERIAL_NUMBER="${NAV_GO2_SERIAL_NUMBER:-}"
 NAV_GO2_AES_128_KEY="${NAV_GO2_AES_128_KEY:-}"
 NAV_READY_TIMEOUT_SECONDS="${NAV_READY_TIMEOUT_SECONDS:-540}"
+NAV_TASK_RUNTIME_FILE="${NAV_TASK_RUNTIME_FILE:-$ROBOT_NAV_RUNTIME_ROOT/current_task.json}"
 RUN_ID="$(date +%s)-$$"
 RUN_LOG_MARKER="[Navigation][run:$RUN_ID] launch"
 
@@ -86,6 +89,7 @@ CHILD_PID_FILES=(
   "$SCAN_TF_POSE_PID_FILE"
   "$DYNAMIC_AVOIDANCE_PID_FILE"
   "$NAV_STATUS_MONITOR_PID_FILE"
+  "$WAYPOINT_NAVIGATOR_PID_FILE"
 )
 
 source_navigation_env
@@ -134,6 +138,9 @@ record_navigation_children() {
   record_process_pid "$RELOCATION_PID_FILE" "$ROBOT_NAV_WS/install/nav_lio/lib/nav_lio/relocation_node" || missing=$((missing + 1))
   record_process_pid "$GLOBAL_PLANNER_PID_FILE" "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/global_planner_node" || missing=$((missing + 1))
   record_process_pid "$NAV_STATUS_MONITOR_PID_FILE" "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/waypoint_progress_monitor.py" || missing=$((missing + 1))
+  if [ "$NAV_ENABLE_WAYPOINT_NAVIGATOR" = "true" ] || [ "$NAV_ENABLE_WAYPOINT_NAVIGATOR" = "1" ]; then
+    record_process_pid "$WAYPOINT_NAVIGATOR_PID_FILE" "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/waypoint_navigator_from_json.py" || missing=$((missing + 1))
+  fi
 
   if [ "$NAV_ENABLE_SCAN_PLANNER" = "true" ] || [ "$NAV_ENABLE_SCAN_PLANNER" = "1" ]; then
     record_process_pid "$SCAN_PLANNER_PID_FILE" "$ROBOT_NAV_WS/install/scan_planner/lib/scan_planner/scan_planner_node" || missing=$((missing + 1))
@@ -197,6 +204,7 @@ log_info "ground.pcd：$GROUND_PCD"
 log_info "Livox 雷达 IP：$LIVOX_LIDAR_IP"
 log_info "Livox 配置文件：$LIVOX_CONFIG_PATH"
 log_info "导航控制链：SCAN planner=$NAV_ENABLE_SCAN_PLANNER controller=$NAV_ENABLE_SCAN_CONTROLLER path_follower=$NAV_ENABLE_PATH_FOLLOWER"
+log_info "任务执行器：waypoint_navigator=$NAV_ENABLE_WAYPOINT_NAVIGATOR task_file=$NAV_TASK_RUNTIME_FILE topic=/nav_task_start"
 log_info "安全链：dynamic_avoidance=$NAV_ENABLE_DYNAMIC_AVOIDANCE Navigation底盘直控=$NAV_ENABLE_ROBOT_CONTROL"
 if [ "$NAV_ROBOT_MODEL" = "go2_webrtc" ]; then
   log_info "底盘适配：model=$NAV_ROBOT_MODEL cmd_vel=$NAV_ROBOT_CMD_VEL_TOPIC go2_method=$NAV_GO2_CONNECTION_METHOD go2_ip=${NAV_GO2_IP:-未设置}"
@@ -231,6 +239,9 @@ launch_args=(
   "enable_path_follower:=$NAV_ENABLE_PATH_FOLLOWER"
   "enable_dynamic_avoidance:=$NAV_ENABLE_DYNAMIC_AVOIDANCE"
   "enable_waypoint_monitor:=true"
+  "enable_waypoint_navigator:=$NAV_ENABLE_WAYPOINT_NAVIGATOR"
+  "waypoint_navigator_start_topic:=/nav_task_start"
+  "waypoints_file:=$NAV_TASK_RUNTIME_FILE"
   "enable_robot_control:=$NAV_ENABLE_ROBOT_CONTROL"
   "robot_model:=$NAV_ROBOT_MODEL"
   "robot_cmd_vel_topic:=$NAV_ROBOT_CMD_VEL_TOPIC"

@@ -382,6 +382,7 @@ navigation_runtime_process_patterns() {
     "$ROBOT_NAV_WS/install/nav_bringup/lib/nav_bringup/scan_tf_pose_publisher.py" \
     "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/global_planner_node" \
     "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/waypoint_progress_monitor.py" \
+    "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/waypoint_navigator_from_json.py" \
     "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/dynamic_avoidance_monitor.py" \
     "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/nav_path_follower.py" \
     "$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/local_obstacle_simulator.py" \
@@ -494,6 +495,10 @@ assert_single_navigation_runtime() {
   fi
   if [ "$NAV_ENABLE_SCAN_CONTROLLER" = "true" ] || [ "$NAV_ENABLE_SCAN_CONTROLLER" = "1" ]; then
     checks+=("$ROBOT_NAV_WS/install/scan_planner/lib/scan_planner/closed_loop_controller|SCAN controller")
+  fi
+  if [ "${NAV_ENABLE_WAYPOINT_NAVIGATOR:-false}" = "true" ] \
+    || [ "${NAV_ENABLE_WAYPOINT_NAVIGATOR:-false}" = "1" ]; then
+    checks+=("$ROBOT_NAV_WS/install/nav_planner/lib/nav_planner/waypoint_navigator_from_json.py|任务航点执行器")
   fi
 
   for item in "${checks[@]}"; do

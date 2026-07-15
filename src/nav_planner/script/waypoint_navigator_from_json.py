@@ -15,26 +15,24 @@ class WaypointNavigator(Node):
         self.declare_parameter('waypoints_file', '')
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('clicked_point_topic', '/clicked_point')
-        self.declare_parameter('nav_start_topic', '/nav_start')
+        self.declare_parameter('nav_start_topic', '/nav_task_start')
         self.declare_parameter('waypoint_reached_topic', '/waypoint_reached')
 
-        waypoints_file = self.resolve_waypoints_file(self.get_parameter('waypoints_file').value)
+        self.waypoints_file = self.resolve_waypoints_file(self.get_parameter('waypoints_file').value)
         self.frame_id = self.get_parameter('frame_id').value
         clicked_point_topic = self.get_parameter('clicked_point_topic').value
         nav_start_topic = self.get_parameter('nav_start_topic').value
         waypoint_reached_topic = self.get_parameter('waypoint_reached_topic').value
 
-        self.waypoints = self.load_waypoints(waypoints_file)
+        self.waypoints = []
         self.current_index = 0
         self.navigating = False
         self.retry_timer = None
 
-        if not self.waypoints:
-            self.get_logger().error(f'No waypoints loaded from {waypoints_file}')
-        else:
-            self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints from {waypoints_file}')
-            for i, wp in enumerate(self.waypoints):
-                self.get_logger().info(f'  [{i}] {wp["name"]}: ({wp["x"]:.3f}, {wp["y"]:.3f}, {wp["z"]:.3f}), yaw={wp["yaw"]:.3f}')
+        # The backend rewrites current_task.json for every task execution.  An
+        # empty/missing file during localization startup is valid; task start
+        # reloads it before publishing the first goal.
+        self.reload_waypoints()
 
         self.clicked_pub = self.create_publisher(PointStamped, clicked_point_topic, 10)
 
@@ -141,10 +139,32 @@ class WaypointNavigator(Node):
 
         return waypoints
 
+    def reload_waypoints(self):
+        waypoints = self.load_waypoints(self.waypoints_file)
+        self.waypoints = waypoints
+        if not waypoints:
+            self.get_logger().warning(f'No waypoints loaded from {self.waypoints_file}')
+            return False
+
+        self.get_logger().info(f'Loaded {len(waypoints)} waypoints from {self.waypoints_file}')
+        for i, wp in enumerate(waypoints):
+            self.get_logger().info(
+                f'  [{i}] {wp["name"]}: ({wp["x"]:.3f}, {wp["y"]:.3f}, '
+                f'{wp["z"]:.3f}), yaw={wp["yaw"]:.3f}'
+            )
+        return True
+
     def nav_start_callback(self, msg):
         """处理巡检开始/停止信号。"""
         if msg.data:
-            self.get_logger().info('接收到开始导航信号(true)，从头开始导航')
+            if not self.reload_waypoints():
+                self.navigating = False
+                self.get_logger().error('接收到任务开始信号，但当前任务没有有效航点，拒绝启动')
+                return
+            if self.retry_timer is not None:
+                self.retry_timer.cancel()
+                self.retry_timer = None
+            self.get_logger().info('接收到任务开始信号(true)，从头开始导航')
             self.navigating = True
             self.current_index = 0
             self.publish_current_waypoint()
@@ -179,11 +199,10 @@ class WaypointNavigator(Node):
         point_msg.point.x = wp['x']
         point_msg.point.y = wp['y']
         point_msg.point.z = wp['z']
-        self.clicked_pub.publish(point_msg)
-
         yaw_msg = Float64()
         yaw_msg.data = wp['yaw']
         self.yaw_pub.publish(yaw_msg)
+        self.clicked_pub.publish(point_msg)
 
         self.get_logger().info(
             f'发布航点 [{self.current_index}/{len(self.waypoints)-1}] '

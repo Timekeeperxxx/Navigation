@@ -179,6 +179,10 @@ if(BUILD_TESTING)
     test_waypoint_progress_monitor
     test/test_waypoint_progress_monitor.py
   )
+  ament_add_pytest_test(
+    test_waypoint_navigator
+    test/test_waypoint_navigator.py
+  )
 endif()
 
 ament_export_include_directories(include)

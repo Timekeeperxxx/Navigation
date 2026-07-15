@@ -23,6 +23,7 @@ def generate_launch_description():
     enable_polygon_loader = LaunchConfiguration("enable_polygon_loader")
     enable_dwa_client = LaunchConfiguration("enable_dwa_client")
     enable_waypoint_navigator = LaunchConfiguration("enable_waypoint_navigator")
+    waypoint_navigator_start_topic = LaunchConfiguration("waypoint_navigator_start_topic")
     enable_waypoint_monitor = LaunchConfiguration("enable_waypoint_monitor")
     enable_dynamic_avoidance = LaunchConfiguration("enable_dynamic_avoidance")
     enable_path_follower = LaunchConfiguration("enable_path_follower")
@@ -125,6 +126,7 @@ def generate_launch_description():
             "enable_polygon_loader": enable_polygon_loader,
             "enable_dwa_client": enable_dwa_client,
             "enable_waypoint_navigator": enable_waypoint_navigator,
+            "waypoint_navigator_start_topic": waypoint_navigator_start_topic,
             "enable_waypoint_monitor": enable_waypoint_monitor,
             "enable_dynamic_avoidance": enable_dynamic_avoidance,
             "enable_path_follower": enable_path_follower,
@@ -235,6 +237,7 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_polygon_loader", default_value="false"),
         DeclareLaunchArgument("enable_dwa_client", default_value="false"),
         DeclareLaunchArgument("enable_waypoint_navigator", default_value="false"),
+        DeclareLaunchArgument("waypoint_navigator_start_topic", default_value="/nav_task_start"),
         DeclareLaunchArgument("enable_waypoint_monitor", default_value="false"),
         DeclareLaunchArgument("enable_dynamic_avoidance", default_value="true"),
         DeclareLaunchArgument("enable_path_follower", default_value="false"),
