@@ -5,7 +5,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from pathlib import Path
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float64
+from std_msgs.msg import Bool, Float64, String
 from geometry_msgs.msg import PointStamped
 
 class WaypointNavigator(Node):
@@ -17,6 +17,7 @@ class WaypointNavigator(Node):
         self.declare_parameter('clicked_point_topic', '/clicked_point')
         self.declare_parameter('nav_start_topic', '/nav_task_start')
         self.declare_parameter('waypoint_reached_topic', '/waypoint_reached')
+        self.declare_parameter('nav_status_topic', '/nav_status')
 
         self.waypoints_file = self.resolve_waypoints_file(self.get_parameter('waypoints_file').value)
         self.frame_id = self.get_parameter('frame_id').value
@@ -25,6 +26,8 @@ class WaypointNavigator(Node):
         waypoint_reached_topic = self.get_parameter('waypoint_reached_topic').value
 
         self.waypoints = []
+        self.task_id = None
+        self.task_name = None
         self.current_index = 0
         self.navigating = False
         self.retry_timer = None
@@ -39,6 +42,12 @@ class WaypointNavigator(Node):
         self.yaw_pub = self.create_publisher(Float64, 'goal_yaw', 10)
 
         self.cancel_pub = self.create_publisher(Bool, '/cancel_navigation', 10)
+
+        self.nav_status_pub = self.create_publisher(
+            String,
+            self.get_parameter('nav_status_topic').value,
+            10,
+        )
 
         self.nav_sub = self.create_subscription(
             Bool,
@@ -66,6 +75,8 @@ class WaypointNavigator(Node):
 
     def load_waypoints(self, filepath):
         """Load waypoints from JSON file and return list of dicts with x, y, z, name."""
+        self.task_id = None
+        self.task_name = None
         if not filepath:
             self.get_logger().error('未配置 waypoints_file')
             return []
@@ -80,6 +91,8 @@ class WaypointNavigator(Node):
 
         # 支持 waypoints、steps、items 和 workflows.json 这几类任务格式。
         if isinstance(data, dict):
+            self.task_id = data.get('task_id') or data.get('id')
+            self.task_name = data.get('task_name') or data.get('name')
             # 新格式: 顶层 frame_id + waypoints 数组 (waypoints.json)
             if 'waypoints' in data:
                 top_frame_id = data.get('frame_id', self.frame_id)
@@ -99,6 +112,7 @@ class WaypointNavigator(Node):
                     if step.get('type') == 'navigate_waypoint':
                         waypoints.append({
                             'name': step.get('waypoint_name', step.get('waypointName', 'unknown')),
+                            'waypoint_id': step.get('waypoint_id', step.get('waypointId')),
                             'x': step['x'],
                             'y': step['y'],
                             'z': step['z'],
@@ -160,6 +174,11 @@ class WaypointNavigator(Node):
             if not self.reload_waypoints():
                 self.navigating = False
                 self.get_logger().error('接收到任务开始信号，但当前任务没有有效航点，拒绝启动')
+                self.publish_task_status(
+                    'failed',
+                    '任务没有有效航点，无法启动',
+                    task_complete=True,
+                )
                 return
             if self.retry_timer is not None:
                 self.retry_timer.cancel()
@@ -167,6 +186,7 @@ class WaypointNavigator(Node):
             self.get_logger().info('接收到任务开始信号(true)，从头开始导航')
             self.navigating = True
             self.current_index = 0
+            self.publish_task_status('moving', '任务已开始', task_complete=False)
             self.publish_current_waypoint()
         else:
             if self.navigating:
@@ -176,6 +196,11 @@ class WaypointNavigator(Node):
                 cancel_msg.data = True
                 self.cancel_pub.publish(cancel_msg)
                 self.get_logger().info('已发送取消导航信号到 /cancel_navigation')
+                self.publish_task_status(
+                    'canceled',
+                    '任务导航已停止',
+                    task_complete=True,
+                )
             else:
                 self.get_logger().info('Navigation stop signal received (false), but not navigating')
 
@@ -189,6 +214,11 @@ class WaypointNavigator(Node):
         if self.current_index >= len(self.waypoints):
             self.get_logger().info('所有航点已访问完毕，导航完成！')
             self.navigating = False
+            self.publish_task_status(
+                'reached',
+                '所有任务航点已完成',
+                task_complete=True,
+            )
             return
 
         wp = self.waypoints[self.current_index]
@@ -220,7 +250,25 @@ class WaypointNavigator(Node):
             self.get_logger().info(
                 f'已到达航点 [{self.current_index}] "{wp_name}" (SUCCESS)'
             )
+            completed_index = self.current_index
             self.current_index += 1
+            if self.current_index >= len(self.waypoints):
+                self.get_logger().info('所有航点已访问完毕，导航完成！')
+                self.navigating = False
+                self.publish_task_status(
+                    'reached',
+                    '所有任务航点已完成',
+                    task_complete=True,
+                    waypoint_index=completed_index,
+                )
+                return
+
+            self.publish_task_status(
+                'moving',
+                '当前航点已到达，正在前往下一个航点',
+                task_complete=False,
+                waypoint_index=completed_index,
+            )
             self.publish_current_waypoint()
         else:
             self.get_logger().warn(
@@ -242,6 +290,32 @@ class WaypointNavigator(Node):
             self.navigating = False
             return
         self.publish_current_waypoint()
+
+    def publish_task_status(
+        self,
+        status,
+        message,
+        *,
+        task_complete,
+        waypoint_index=None,
+    ):
+        payload = {
+            'status': status,
+            'message': message,
+            'task_id': self.task_id,
+            'target_name': self.task_name,
+            'task_complete': bool(task_complete),
+            'waypoint_index': waypoint_index,
+            'waypoint_count': len(self.waypoints),
+            'timestamp': self.get_clock().now().nanoseconds / 1e9,
+        }
+        if waypoint_index is not None and 0 <= waypoint_index < len(self.waypoints):
+            waypoint = self.waypoints[waypoint_index]
+            payload['waypoint_id'] = waypoint.get('waypoint_id')
+            payload['waypoint_name'] = waypoint.get('name')
+        self.nav_status_pub.publish(
+            String(data=json.dumps(payload, ensure_ascii=False))
+        )
 
 
 def main(args=None):

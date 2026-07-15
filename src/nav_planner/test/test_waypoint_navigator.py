@@ -23,15 +23,19 @@ class _NavigatorHarness:
     load_waypoints = WaypointNavigator.load_waypoints
     reload_waypoints = WaypointNavigator.reload_waypoints
     nav_start_callback = WaypointNavigator.nav_start_callback
+    waypoint_reached_callback = WaypointNavigator.waypoint_reached_callback
 
     def __init__(self, task_file: Path):
         self.waypoints_file = str(task_file)
         self.frame_id = "map"
         self.waypoints = []
+        self.task_id = None
+        self.task_name = None
         self.current_index = 9
         self.navigating = False
         self.retry_timer = None
         self.publish_count = 0
+        self.task_statuses = []
         self._logger = _Logger()
 
     def get_logger(self):
@@ -39,6 +43,23 @@ class _NavigatorHarness:
 
     def publish_current_waypoint(self):
         self.publish_count += 1
+
+    def publish_task_status(
+        self,
+        status,
+        message,
+        *,
+        task_complete,
+        waypoint_index=None,
+    ):
+        self.task_statuses.append(
+            {
+                "status": status,
+                "message": message,
+                "task_complete": task_complete,
+                "waypoint_index": waypoint_index,
+            }
+        )
 
 
 class _BoolMessage:
@@ -50,6 +71,8 @@ def _write_task(path: Path, name: str, x: float) -> None:
     path.write_text(
         json.dumps(
             {
+                "task_id": "task-1",
+                "task_name": "巡检任务",
                 "frame_id": "map",
                 "steps": [
                     {
@@ -92,3 +115,48 @@ def test_nav_start_rejects_missing_runtime_task(tmp_path):
 
     assert navigator.navigating is False
     assert navigator.publish_count == 0
+    assert navigator.task_statuses[-1]["status"] == "failed"
+    assert navigator.task_statuses[-1]["task_complete"] is True
+
+
+def test_intermediate_waypoint_keeps_task_running(tmp_path):
+    task_file = tmp_path / "current_task.json"
+    _write_task(task_file, "first", 1.0)
+    payload = json.loads(task_file.read_text(encoding="utf-8"))
+    payload["steps"].append(
+        {
+            "type": "navigate_waypoint",
+            "waypoint_id": "wp-2",
+            "waypoint_name": "second",
+            "x": 8.0,
+            "y": 2.0,
+            "z": 0.3,
+            "yaw": 0.4,
+            "frame_id": "map",
+        }
+    )
+    task_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    navigator = _NavigatorHarness(task_file)
+    navigator.nav_start_callback(_BoolMessage(True))
+    navigator.waypoint_reached_callback(_BoolMessage(True))
+
+    assert navigator.navigating is True
+    assert navigator.current_index == 1
+    assert navigator.publish_count == 2
+    assert navigator.task_statuses[-1]["status"] == "moving"
+    assert navigator.task_statuses[-1]["task_complete"] is False
+
+
+def test_final_waypoint_publishes_task_complete(tmp_path):
+    task_file = tmp_path / "current_task.json"
+    _write_task(task_file, "only", 1.0)
+    navigator = _NavigatorHarness(task_file)
+    navigator.nav_start_callback(_BoolMessage(True))
+
+    navigator.waypoint_reached_callback(_BoolMessage(True))
+
+    assert navigator.navigating is False
+    assert navigator.current_index == 1
+    assert navigator.task_statuses[-1]["status"] == "reached"
+    assert navigator.task_statuses[-1]["task_complete"] is True
