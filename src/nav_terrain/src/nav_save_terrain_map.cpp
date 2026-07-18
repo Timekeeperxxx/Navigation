@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <thread>
 #include <map>
+#include <tuple>
 #include <utility>
 #include <filesystem>
 #include <vector>
@@ -215,6 +216,11 @@ public:
     return ground_local_layer_filter_on_shutdown_;
   }
 
+  bool hasSuccessfulExplicitSave() const
+  {
+    return explicit_save_succeeded_.load();
+  }
+
   bool ensureSaveDirectory()
   {
     if (save_directory_.empty()) {
@@ -236,13 +242,33 @@ public:
   template<typename CloudT>
   bool savePcdBinary(const std::string & filename, const CloudT & cloud)
   {
-    try {
-      if (pcl::io::savePCDFileBinary(filename, cloud) == 0) {
-        return true;
-      }
-      RCLCPP_ERROR(this->get_logger(), "保存 PCD 文件失败: %s", filename.c_str());
+    if (cloud.empty()) {
+      RCLCPP_ERROR(this->get_logger(), "拒绝保存空 PCD: %s", filename.c_str());
       return false;
+    }
+
+    const std::string temporary_filename = filename + ".tmp";
+    try {
+      std::error_code ec;
+      std::filesystem::remove(temporary_filename, ec);
+      ec.clear();
+      if (pcl::io::savePCDFileBinary(temporary_filename, cloud) != 0) {
+        RCLCPP_ERROR(this->get_logger(), "保存 PCD 临时文件失败: %s", temporary_filename.c_str());
+        return false;
+      }
+
+      std::filesystem::rename(temporary_filename, filename, ec);
+      if (ec) {
+        std::filesystem::remove(temporary_filename);
+        RCLCPP_ERROR(
+          this->get_logger(), "提交 PCD 文件失败: %s: %s",
+          filename.c_str(), ec.message().c_str());
+        return false;
+      }
+      return true;
     } catch (const std::exception & e) {
+      std::error_code ec;
+      std::filesystem::remove(temporary_filename, ec);
       RCLCPP_ERROR(
         this->get_logger(), "保存 PCD 文件失败: %s: %s",
         filename.c_str(), e.what());
@@ -297,7 +323,9 @@ public:
         }
       }
 
-      if (!accumulated_ground_cloud_->empty()) {
+      if (explicit_ground_save_succeeded_.load()) {
+        RCLCPP_INFO(this->get_logger(), "ground 已由显式保存成功写盘，退出时跳过重复保存。");
+      } else if (!accumulated_ground_cloud_->empty()) {
         pcl::PointCloud<pcl::PointXYZI> ground_to_save;
         if (filter_ground) {
           filterGroundCloudForSave(*accumulated_ground_cloud_, ground_to_save);
@@ -355,7 +383,9 @@ public:
         }
       }
 
-      if (!ground_cloud.empty()) {
+      if (explicit_ground_save_succeeded_.load()) {
+        RCLCPP_INFO(this->get_logger(), "ground 已由显式保存成功写盘，退出时跳过重复保存。");
+      } else if (!ground_cloud.empty()) {
         pcl::PointCloud<pcl::PointXYZI> ground_to_save;
         if (filter_ground) {
           filterGroundCloudForSave(ground_cloud, ground_to_save);
@@ -455,62 +485,102 @@ public:
     pcl::PointCloud<pcl::PointXYZI> current = src;
     std::size_t total_removed_count = 0;
     for (int iteration = 0; iteration < ground_local_layer_filter_iterations_; iteration++) {
-      std::map<std::pair<int64_t, int64_t>, std::vector<std::size_t>> xy_bins;
-      for (std::size_t i = 0; i < current.points.size(); i++) {
-        const auto & point = current.points[i];
-        const int64_t bx = static_cast<int64_t>(std::floor(point.x / ground_local_layer_xy_bin_size_));
-        const int64_t by = static_cast<int64_t>(std::floor(point.y / ground_local_layer_xy_bin_size_));
-        xy_bins[std::make_pair(bx, by)].push_back(i);
+      // 按 XY/Z 层聚合后再计算邻域统计，避免对每个点遍历半径内的所有点。
+      // 默认参数下，一个 0.5m XY 网格只保留少量 0.15m 高度层，百万点地图
+      // 的过滤复杂度由近似 O(N * 邻域点数) 降为 O(N + 层数 * 邻域网格数)。
+      const float vertical_bin_size = std::max(
+        0.05f, std::min(ground_z_layer_size_, ground_local_layer_z_tolerance_));
+      using LayerKey = std::tuple<int64_t, int64_t, int64_t>;
+      struct LayerAggregate
+      {
+        std::size_t count = 0;
+        double z_sum = 0.0;
+      };
+
+      std::map<LayerKey, LayerAggregate> layer_aggregates;
+      for (const auto & point : current.points) {
+        const auto key = LayerKey{
+          static_cast<int64_t>(std::floor(point.x / ground_local_layer_xy_bin_size_)),
+          static_cast<int64_t>(std::floor(point.y / ground_local_layer_xy_bin_size_)),
+          static_cast<int64_t>(std::floor(point.z / vertical_bin_size))};
+        auto & aggregate = layer_aggregates[key];
+        aggregate.count++;
+        aggregate.z_sum += point.z;
+      }
+
+      struct LayerSummary
+      {
+        LayerKey key;
+        float mean_z;
+        std::size_t count;
+      };
+      std::map<std::pair<int64_t, int64_t>, std::vector<LayerSummary>> xy_layers;
+      for (const auto & entry : layer_aggregates) {
+        const auto bx = std::get<0>(entry.first);
+        const auto by = std::get<1>(entry.first);
+        const auto mean_z = static_cast<float>(entry.second.z_sum / entry.second.count);
+        xy_layers[std::make_pair(bx, by)].push_back(
+          LayerSummary{entry.first, mean_z, entry.second.count});
       }
 
       const int bin_radius = static_cast<int>(
         std::ceil(ground_local_layer_radius_ / ground_local_layer_xy_bin_size_));
-      const float radius2 = ground_local_layer_radius_ * ground_local_layer_radius_;
-      std::size_t removed_count = 0;
-      pcl::PointCloud<pcl::PointXYZI> next;
-      next.reserve(current.points.size());
+      const float bin_margin = ground_local_layer_xy_bin_size_ * std::sqrt(2.0f);
+      const float aggregate_radius = ground_local_layer_radius_ + bin_margin;
+      const float aggregate_radius2 = aggregate_radius * aggregate_radius;
+      std::map<LayerKey, bool> remove_layer;
 
-      for (const auto & point : current.points) {
-        const int64_t bx = static_cast<int64_t>(std::floor(point.x / ground_local_layer_xy_bin_size_));
-        const int64_t by = static_cast<int64_t>(std::floor(point.y / ground_local_layer_xy_bin_size_));
-        int same_layer_count = 0;
-        int lower_layer_count = 0;
+      for (const auto & entry : layer_aggregates) {
+        const auto bx = std::get<0>(entry.first);
+        const auto by = std::get<1>(entry.first);
+        const float point_z = static_cast<float>(entry.second.z_sum / entry.second.count);
+        std::size_t same_layer_count = 0;
+        std::size_t lower_layer_count = 0;
 
         for (int dx = -bin_radius; dx <= bin_radius; dx++) {
           for (int dy = -bin_radius; dy <= bin_radius; dy++) {
-            auto it = xy_bins.find(std::make_pair(bx + dx, by + dy));
-            if (it == xy_bins.end()) {
+            const float grid_dx = static_cast<float>(dx) * ground_local_layer_xy_bin_size_;
+            const float grid_dy = static_cast<float>(dy) * ground_local_layer_xy_bin_size_;
+            if (grid_dx * grid_dx + grid_dy * grid_dy > aggregate_radius2) {
               continue;
             }
 
-            for (const auto index : it->second) {
-              const auto & neighbor = current.points[index];
-              const float diff_x = neighbor.x - point.x;
-              const float diff_y = neighbor.y - point.y;
-              if (diff_x * diff_x + diff_y * diff_y > radius2) {
-                continue;
-              }
-
-              const float dz = point.z - neighbor.z;
+            const auto layers_it = xy_layers.find(std::make_pair(bx + dx, by + dy));
+            if (layers_it == xy_layers.end()) {
+              continue;
+            }
+            for (const auto & neighbor : layers_it->second) {
+              const float dz = point_z - neighbor.mean_z;
               if (std::fabs(dz) <= ground_local_layer_z_tolerance_) {
-                same_layer_count++;
+                same_layer_count += neighbor.count;
               }
               if (
                 dz >= ground_local_layer_min_height_ &&
                 dz <= ground_local_layer_max_height_) {
-                lower_layer_count++;
+                lower_layer_count += neighbor.count;
               }
             }
           }
         }
 
         const bool has_strong_lower_layer =
-          lower_layer_count >= ground_local_layer_min_lower_points_;
+          lower_layer_count >= static_cast<std::size_t>(ground_local_layer_min_lower_points_);
         const bool weak_current_layer =
           static_cast<float>(same_layer_count) <
           static_cast<float>(lower_layer_count) * ground_local_layer_min_support_ratio_;
+        remove_layer[entry.first] = has_strong_lower_layer && weak_current_layer;
+      }
 
-        if (has_strong_lower_layer && weak_current_layer) {
+      std::size_t removed_count = 0;
+      pcl::PointCloud<pcl::PointXYZI> next;
+      next.reserve(current.points.size());
+
+      for (const auto & point : current.points) {
+        const auto key = LayerKey{
+          static_cast<int64_t>(std::floor(point.x / ground_local_layer_xy_bin_size_)),
+          static_cast<int64_t>(std::floor(point.y / ground_local_layer_xy_bin_size_)),
+          static_cast<int64_t>(std::floor(point.z / vertical_bin_size))};
+        if (remove_layer[key]) {
           removed_count++;
           continue;
         }
@@ -648,6 +718,7 @@ private:
       }
 
       bool has_error = false;
+      bool ground_saved = explicit_ground_save_succeeded_.load();
       std::string saved_files;
 
       if (save_map_cloud_ && !accumulated_map_cloud_->empty()) {
@@ -662,11 +733,15 @@ private:
         }
       }
 
-      if (!accumulated_ground_cloud_->empty()) {
+      if (ground_saved) {
+        RCLCPP_INFO(this->get_logger(), "ground 已保存，本次服务调用跳过重复写盘。");
+      } else if (!accumulated_ground_cloud_->empty()) {
         pcl::PointCloud<pcl::PointXYZI> ground_to_save;
         filterGroundCloudForSave(*accumulated_ground_cloud_, ground_to_save);
         std::string ground_filename = base_filename + "_ground.pcd";
         if (savePcdBinary(ground_filename, ground_to_save)) {
+          ground_saved = true;
+          explicit_ground_save_succeeded_.store(true);
           saved_files += ground_filename + " ";
           RCLCPP_INFO(this->get_logger(), "Saved ground cloud to %s (points: %zu)",
                        ground_filename.c_str(), ground_to_save.size());
@@ -689,8 +764,8 @@ private:
         }
       }
 
-      success = !has_error;
-      message = success ? ("Saved: " + saved_files) : "Failed to write some PCD files.";
+      success = !has_error && ground_saved;
+      message = success ? ("Saved: " + saved_files) : "Ground PCD was not saved.";
     } else {
       // Save latest cloud split by intensity
       if (!latest_cloud_) {
@@ -708,6 +783,7 @@ private:
       splitCloudByIntensityAndZRange(full_cloud, map_cloud, ground_cloud);
 
       bool has_error = false;
+      bool ground_saved = explicit_ground_save_succeeded_.load();
       std::string saved_files;
 
       if (save_map_cloud_ && !map_cloud.empty()) {
@@ -722,11 +798,15 @@ private:
         }
       }
 
-      if (!ground_cloud.empty()) {
+      if (ground_saved) {
+        RCLCPP_INFO(this->get_logger(), "ground 已保存，本次服务调用跳过重复写盘。");
+      } else if (!ground_cloud.empty()) {
         pcl::PointCloud<pcl::PointXYZI> ground_to_save;
         filterGroundCloudForSave(ground_cloud, ground_to_save);
         std::string ground_filename = base_filename + "_ground.pcd";
         if (savePcdBinary(ground_filename, ground_to_save)) {
+          ground_saved = true;
+          explicit_ground_save_succeeded_.store(true);
           saved_files += ground_filename + " ";
           RCLCPP_INFO(this->get_logger(), "Saved ground cloud to %s (points: %zu)",
                        ground_filename.c_str(), ground_to_save.size());
@@ -736,10 +816,11 @@ private:
         }
       }
 
-      success = !has_error;
-      message = success ? ("Saved: " + saved_files) : "Failed to write some PCD files.";
+      success = !has_error && ground_saved;
+      message = success ? ("Saved: " + saved_files) : "Ground PCD was not saved.";
     }
 
+    explicit_save_succeeded_.store(success);
     response->success = success;
     response->message = message;
   }
@@ -779,6 +860,9 @@ private:
 
   // 标记 main() 中是否已经保存过地图，避免析构函数重复保存
   bool saved_in_main_ = false;
+  // ground 一旦显式保存成功，后续服务重试和退出兜底都不得再次写入。
+  std::atomic<bool> explicit_ground_save_succeeded_{false};
+  std::atomic<bool> explicit_save_succeeded_{false};
 };
 
 int main(int argc, char **argv)
@@ -800,7 +884,11 @@ int main(int argc, char **argv)
 
   // 不在 rclcpp::on_shutdown() 回调里写盘；该回调可能和订阅回调抢锁。
   // 在主线程退出 spin 循环后保存一次，Ctrl-C 场景默认跳过耗时地面层过滤。
-  node->saveMapToFile(node->filterGroundOnShutdown());
+  if (!node->hasSuccessfulExplicitSave()) {
+    node->saveMapToFile(node->filterGroundOnShutdown());
+  } else {
+    RCLCPP_INFO(node->get_logger(), "显式 terrain 保存已成功，退出时跳过重复写盘。");
+  }
   node->markSavedInMain();
   node->clearAccumulatedClouds();
 

@@ -552,7 +552,8 @@ int main(int argc, char ** argv)
     nh->create_subscription<nav_msgs::msg::Odometry>("/lio/odom", 5, odometryHandler);
 
   auto subLaserCloud =
-    nh->create_subscription<sensor_msgs::msg::PointCloud2>("/lio/cloud_world", 5, laserCloudHandler);
+    nh->create_subscription<sensor_msgs::msg::PointCloud2>(
+      "/lio/cloud_world", rclcpp::SensorDataQoS().keep_last(1), laserCloudHandler);
 
   auto subJoystick = nh->create_subscription<sensor_msgs::msg::Joy>("joy", 5, joystickHandler);
 
