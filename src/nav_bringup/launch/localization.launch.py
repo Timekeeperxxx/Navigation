@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 from launch import LaunchDescription
@@ -5,7 +6,90 @@ from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def _static_tf_from_lidar_mount(context, *args, **kwargs):
+    """Publish the exact inverse of T_base_footprint_lidar."""
+    del args, kwargs
+    names = (
+        "lidar_mount_x_m",
+        "lidar_mount_y_m",
+        "lidar_mount_z_m",
+        "lidar_mount_roll_deg",
+        "lidar_mount_pitch_deg",
+        "lidar_mount_yaw_deg",
+    )
+    values = {
+        name: float(LaunchConfiguration(name).perform(context))
+        for name in names
+    }
+    if not all(math.isfinite(value) for value in values.values()):
+        raise RuntimeError("雷达安装标定包含非有限数值")
+
+    x = values["lidar_mount_x_m"]
+    y = values["lidar_mount_y_m"]
+    z = values["lidar_mount_z_m"]
+    roll = math.radians(values["lidar_mount_roll_deg"])
+    pitch = math.radians(values["lidar_mount_pitch_deg"])
+    yaw = math.radians(values["lidar_mount_yaw_deg"])
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    r00 = cy * cp
+    r01 = cy * sp * sr - sy * cr
+    r02 = cy * sp * cr + sy * sr
+    r10 = sy * cp
+    r11 = sy * sp * sr + cy * cr
+    r12 = sy * sp * cr - cy * sr
+    r20 = -sp
+    r21 = cp * sr
+    r22 = cp * cr
+    inverse_translation = (
+        -(r00 * x + r10 * y + r20 * z),
+        -(r01 * x + r11 * y + r21 * z),
+        -(r02 * x + r12 * y + r22 * z),
+    )
+
+    half_roll, half_pitch, half_yaw = roll / 2.0, pitch / 2.0, yaw / 2.0
+    chr_, shr = math.cos(half_roll), math.sin(half_roll)
+    chp, shp = math.cos(half_pitch), math.sin(half_pitch)
+    chy, shy = math.cos(half_yaw), math.sin(half_yaw)
+    qx = shr * chp * chy - chr_ * shp * shy
+    qy = chr_ * shp * chy + shr * chp * shy
+    qz = chr_ * chp * shy - shr * shp * chy
+    qw = chr_ * chp * chy + shr * shp * shy
+    inverse_quaternion = (-qx, -qy, -qz, qw)
+
+    return [
+        LogInfo(
+            msg=(
+                "Lidar mount calibration (base_footprint->base_link): "
+                f"xyz=[{x:.4f},{y:.4f},{z:.4f}]m "
+                f"rpy=[{values['lidar_mount_roll_deg']:.3f},"
+                f"{values['lidar_mount_pitch_deg']:.3f},"
+                f"{values['lidar_mount_yaw_deg']:.3f}]deg"
+            )
+        ),
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="static_tf_base_link_to_base_footprint",
+            arguments=[
+                "--x", format(inverse_translation[0], ".12g"),
+                "--y", format(inverse_translation[1], ".12g"),
+                "--z", format(inverse_translation[2], ".12g"),
+                "--qx", format(inverse_quaternion[0], ".12g"),
+                "--qy", format(inverse_quaternion[1], ".12g"),
+                "--qz", format(inverse_quaternion[2], ".12g"),
+                "--qw", format(inverse_quaternion[3], ".12g"),
+                "--frame-id", "base_link",
+                "--child-frame-id", "base_footprint",
+            ],
+            output="screen",
+        ),
+    ]
 
 
 def _latest_file(scene_dir: Path, patterns: list[str]) -> str:
@@ -55,6 +139,12 @@ def generate_launch_description():
     rviz = LaunchConfiguration("rviz")
     host_ip = LaunchConfiguration("host_ip")
     livox_config_path = LaunchConfiguration("livox_config_path")
+    lidar_mount_x_m = LaunchConfiguration("lidar_mount_x_m")
+    lidar_mount_y_m = LaunchConfiguration("lidar_mount_y_m")
+    lidar_mount_z_m = LaunchConfiguration("lidar_mount_z_m")
+    lidar_mount_roll_deg = LaunchConfiguration("lidar_mount_roll_deg")
+    lidar_mount_pitch_deg = LaunchConfiguration("lidar_mount_pitch_deg")
+    lidar_mount_yaw_deg = LaunchConfiguration("lidar_mount_yaw_deg")
 
     livox_node = Node(
         package="livox_ros_driver2",
@@ -90,18 +180,16 @@ def generate_launch_description():
             {
                 "lio.map.save_map_dir": nav_lio_map_dir,
                 "lio.map.map_name": map_name,
+                "lio.extrinsic.odom_robo_override": True,
+                "lio.extrinsic.odom_robo_x_m": ParameterValue(lidar_mount_x_m, value_type=float),
+                "lio.extrinsic.odom_robo_y_m": ParameterValue(lidar_mount_y_m, value_type=float),
+                "lio.extrinsic.odom_robo_z_m": ParameterValue(lidar_mount_z_m, value_type=float),
+                "lio.extrinsic.odom_robo_roll_deg": ParameterValue(lidar_mount_roll_deg, value_type=float),
+                "lio.extrinsic.odom_robo_pitch_deg": ParameterValue(lidar_mount_pitch_deg, value_type=float),
+                "lio.extrinsic.odom_robo_yaw_deg": ParameterValue(lidar_mount_yaw_deg, value_type=float),
             },
         ],
         arguments=["--ros-args", "--log-level", "info"],
-        condition=IfCondition(launch_relocation),
-    )
-
-    static_tf_node = Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        name="static_tf_base_link_to_base_footprint",
-        arguments=["0", "0", "-0.90", "0", "-0.34", "0", "base_link", "base_footprint"],
-        output="screen",
         condition=IfCondition(launch_relocation),
     )
 
@@ -130,6 +218,12 @@ def generate_launch_description():
         DeclareLaunchArgument("launch_relocation", default_value="true"),
         DeclareLaunchArgument("lidar_ip", default_value="192.168.123.179"),
         DeclareLaunchArgument("host_ip", default_value=""),
+        DeclareLaunchArgument("lidar_mount_x_m", default_value="0.0"),
+        DeclareLaunchArgument("lidar_mount_y_m", default_value="0.0"),
+        DeclareLaunchArgument("lidar_mount_z_m", default_value="0.90"),
+        DeclareLaunchArgument("lidar_mount_roll_deg", default_value="0.0"),
+        DeclareLaunchArgument("lidar_mount_pitch_deg", default_value="19.48"),
+        DeclareLaunchArgument("lidar_mount_yaw_deg", default_value="0.0"),
         DeclareLaunchArgument(
             "livox_config_path",
             default_value=PathJoinSubstitution([
@@ -139,7 +233,10 @@ def generate_launch_description():
             ]),
         ),
         livox_node,
-        static_tf_node,
+        OpaqueFunction(
+            function=_static_tf_from_lidar_mount,
+            condition=IfCondition(launch_relocation),
+        ),
         relocation_node,
         OpaqueFunction(function=_ground_pcd_setup, condition=IfCondition(rviz)),
         rviz_node,

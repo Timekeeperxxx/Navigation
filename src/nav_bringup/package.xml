@@ -11,18 +11,20 @@
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <depend>livox_ros_driver2</depend>
+  <depend>pcl_conversions</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
   <exec_depend>nav_terrain</exec_depend>
   <exec_depend>nav_planner</exec_depend>
   <exec_depend>scan_planner</exec_depend>
   <exec_depend>nav_lio</exec_depend>
   <exec_depend>nav_robot_control</exec_depend>
   <exec_depend>pcl_ros</exec_depend>
-  <exec_depend>rclcpp</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>visualization_msgs</exec_depend>

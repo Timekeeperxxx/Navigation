@@ -45,7 +45,8 @@ NAV_GO2_CONNECTION_METHOD="${NAV_GO2_CONNECTION_METHOD:-LocalSTA}"
 NAV_GO2_IP="${NAV_GO2_IP:-}"
 NAV_GO2_SERIAL_NUMBER="${NAV_GO2_SERIAL_NUMBER:-}"
 NAV_GO2_AES_128_KEY="${NAV_GO2_AES_128_KEY:-}"
-NAV_READY_TIMEOUT_SECONDS="${NAV_READY_TIMEOUT_SECONDS:-540}"
+NAV_READY_TIMEOUT_SECONDS="${NAV_READY_TIMEOUT_SECONDS:-120}"
+NAV_LIVOX_DATA_TIMEOUT_SECONDS="${NAV_LIVOX_DATA_TIMEOUT_SECONDS:-8}"
 NAV_TASK_RUNTIME_FILE="${NAV_TASK_RUNTIME_FILE:-$ROBOT_NAV_RUNTIME_ROOT/current_task.json}"
 RUN_ID="$(date +%s)-$$"
 RUN_LOG_MARKER="[Navigation][run:$RUN_ID] launch"
@@ -76,6 +77,7 @@ validate_navigation_pcd_input "$GROUND_PCD" "ground.pcd"
 if [ -n "$PLANGROUND_PCD" ]; then
   validate_navigation_pcd_input "$PLANGROUND_PCD" "footprint_fill.pcd"
 fi
+validate_navigation_pcd_memory_budget "$MAP_PCD" "$GROUND_PCD" "$PLANGROUND_PCD"
 
 NAV_LIO_MAP_DIR="$(super_lio_relative_map_dir "$MAP_PCD")"
 MAP_NAME="$(basename "$MAP_PCD")"
@@ -180,6 +182,39 @@ run_log_has() {
   ' "$LOG_FILE" 2>/dev/null
 }
 
+current_run_log_has_regex() {
+  local regex="$1"
+  awk -v marker="$RUN_LOG_MARKER" -v regex="$regex" '
+    index($0, marker) { in_current_run = 1; next }
+    in_current_run && $0 ~ regex { matched = 1 }
+    END { exit matched ? 0 : 1 }
+  ' "$LOG_FILE" 2>/dev/null
+}
+
+navigation_failure_message() {
+  if run_log_has "InvalidParameterTypeException"; then
+    printf '%s\n' "重定位启动失败：ROS 参数类型不匹配"
+  elif current_run_log_has_regex "relocation_node-[0-9]+.*process has died"; then
+    printf '%s\n' "重定位进程异常退出"
+  elif current_run_log_has_regex "livox_ros_driver2_node-[0-9]+.*process has died"; then
+    printf '%s\n' "Livox 雷达驱动异常退出"
+  elif current_run_log_has_regex "global_planner_node-[0-9]+.*process has died"; then
+    printf '%s\n' "global_planner 进程异常退出"
+  elif current_run_log_has_regex "(scan_planner_node|closed_loop_controller|scan_tf_pose_publisher)-[0-9]+.*process has died"; then
+    printf '%s\n' "SCAN 导航控制链进程异常退出"
+  elif current_run_log_has_regex "(dynamic_avoidance_monitor|waypoint_progress_monitor|waypoint_navigator_from_json)-[0-9]+.*process has died"; then
+    printf '%s\n' "导航安全监控或任务执行进程异常退出"
+  else
+    return 1
+  fi
+}
+
+wait_for_livox_data() {
+  timeout "${NAV_LIVOX_DATA_TIMEOUT_SECONDS}s" \
+    ros2 topic echo /livox/lidar --once --qos-profile sensor_data --field timebase \
+    >/dev/null 2>&1
+}
+
 cleanup() {
   local status=$?
   trap - INT TERM EXIT
@@ -203,6 +238,7 @@ log_info "map.pcd：$MAP_PCD"
 log_info "ground.pcd：$GROUND_PCD"
 log_info "Livox 雷达 IP：$LIVOX_LIDAR_IP"
 log_info "Livox 配置文件：$LIVOX_CONFIG_PATH"
+log_info "雷达安装标定(base_footprint->lidar)：xyz=[$NAV_LIDAR_MOUNT_X_M,$NAV_LIDAR_MOUNT_Y_M,$NAV_LIDAR_MOUNT_Z_M]m rpy=[$NAV_LIDAR_MOUNT_ROLL_DEG,$NAV_LIDAR_MOUNT_PITCH_DEG,$NAV_LIDAR_MOUNT_YAW_DEG]deg"
 log_info "导航控制链：SCAN planner=$NAV_ENABLE_SCAN_PLANNER controller=$NAV_ENABLE_SCAN_CONTROLLER path_follower=$NAV_ENABLE_PATH_FOLLOWER"
 log_info "任务执行器：waypoint_navigator=$NAV_ENABLE_WAYPOINT_NAVIGATOR task_file=$NAV_TASK_RUNTIME_FILE topic=/nav_task_start"
 log_info "安全链：dynamic_avoidance=$NAV_ENABLE_DYNAMIC_AVOIDANCE Navigation底盘直控=$NAV_ENABLE_ROBOT_CONTROL"
@@ -233,6 +269,12 @@ launch_args=(
   "launch_livox:=true"
   "lidar_ip:=$LIVOX_LIDAR_IP"
   "livox_config_path:=$LIVOX_CONFIG_PATH"
+  "lidar_mount_x_m:=$NAV_LIDAR_MOUNT_X_M"
+  "lidar_mount_y_m:=$NAV_LIDAR_MOUNT_Y_M"
+  "lidar_mount_z_m:=$NAV_LIDAR_MOUNT_Z_M"
+  "lidar_mount_roll_deg:=$NAV_LIDAR_MOUNT_ROLL_DEG"
+  "lidar_mount_pitch_deg:=$NAV_LIDAR_MOUNT_PITCH_DEG"
+  "lidar_mount_yaw_deg:=$NAV_LIDAR_MOUNT_YAW_DEG"
   "enable_scan_planner:=$NAV_ENABLE_SCAN_PLANNER"
   "enable_scan_controller:=$NAV_ENABLE_SCAN_CONTROLLER"
   "enable_scan_tf_pose:=true"
@@ -292,6 +334,10 @@ printf '%s\n' "$LAUNCH_PID" > "$PID_FILE"
 
 ready_waited=0
 while kill -0 "$LAUNCH_PID" 2>/dev/null && [ "$ready_waited" -lt "$NAV_READY_TIMEOUT_SECONDS" ]; do
+  if failure_message="$(navigation_failure_message)"; then
+    log_error "$failure_message，请查看日志：$LOG_FILE"
+    exit 1
+  fi
   if record_navigation_children; then
     break
   fi
@@ -302,6 +348,10 @@ done
 if kill -0 "$LAUNCH_PID" 2>/dev/null \
   && record_navigation_children \
   && assert_single_navigation_runtime; then
+  if ! wait_for_livox_data; then
+    log_error "雷达无有效数据：${NAV_LIVOX_DATA_TIMEOUT_SECONDS} 秒内未收到 /livox/lidar 点云，请检查 Livox MID360 供电、网线和 IP 配置"
+    exit 1
+  fi
   write_json_file "$READY_FILE" "{\"ready\":true,\"stage\":\"awaiting_initialpose\",\"run_id\":\"$RUN_ID\",\"scene_dir\":\"$SCENE_DIR\",\"map_pcd\":\"$MAP_PCD\",\"ground_pcd\":\"$GROUND_PCD\",\"planground_pcd\":\"$PLANGROUND_PCD\",\"pid\":$LAUNCH_PID,\"control_chain\":\"scan_planner_cmd_vel_safe\"}"
   write_json_file "$STATUS_FILE" "{\"running\":true,\"scene_dir\":\"$SCENE_DIR\",\"pid\":$LAUNCH_PID,\"stage\":\"awaiting_initialpose\"}"
   log_info "导航定位进程已启动，正在等待 initialpose：PID=$LAUNCH_PID"
@@ -314,6 +364,10 @@ fi
 # global planner 静态图和 map -> base_footprint 都依赖用户发送 initialpose。
 # ready 文件先解除前端重启等待；标点完成后再升级为完整导航就绪状态。
 while kill -0 "$LAUNCH_PID" 2>/dev/null; do
+  if failure_message="$(navigation_failure_message)"; then
+    log_error "$failure_message，请查看日志：$LOG_FILE"
+    exit 1
+  fi
   if record_navigation_children && global_planner_map_ready && scan_body_pose_ready; then
     write_json_file "$READY_FILE" "{\"ready\":true,\"stage\":\"running\",\"run_id\":\"$RUN_ID\",\"scene_dir\":\"$SCENE_DIR\",\"map_pcd\":\"$MAP_PCD\",\"ground_pcd\":\"$GROUND_PCD\",\"planground_pcd\":\"$PLANGROUND_PCD\",\"pid\":$LAUNCH_PID,\"control_chain\":\"scan_planner_cmd_vel_safe\"}"
     write_json_file "$STATUS_FILE" "{\"running\":true,\"scene_dir\":\"$SCENE_DIR\",\"pid\":$LAUNCH_PID,\"stage\":\"running\"}"
