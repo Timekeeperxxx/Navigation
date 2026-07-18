@@ -47,6 +47,12 @@ namespace LI2Sup{
   double g_imu_ng;
   double g_imu_nba;
   double g_imu_nbg;
+  int g_imu_init_samples = 400;
+  double g_imu_init_max_gyro_norm = 0.05;
+  double g_imu_init_max_gyro_stddev = 0.03;
+  double g_imu_init_max_accel_stddev_ratio = 0.05;
+  double g_max_imu_integration_dt = 0.05;
+  double g_scan_boundary_tolerance = 0.001;
 
   SE3 g_lidar_imu;
   SE3 g_odom_robo;
@@ -63,6 +69,23 @@ namespace LI2Sup{
   bool g_kf_estimate_gravity = false;
   double g_kf_quit_eps;
 
+  bool g_level_constraint_enable = true;
+  double g_level_gravity_window_sec = 1.0;
+  double g_level_max_accel_norm_ratio = 0.12;
+  double g_level_max_point_range = 18.0;
+  double g_level_min_down_distance = 0.05;
+  double g_level_max_down_distance = 3.0;
+  int g_level_ransac_iterations = 96;
+  double g_level_plane_distance_threshold = 0.06;
+  int g_level_min_plane_inliers = 40;
+  double g_level_min_plane_inlier_ratio = 0.12;
+  double g_level_max_plane_gravity_angle_deg = 3.0;
+  double g_level_max_attitude_innovation_deg = 6.0;
+  // Statistical uncertainty of one aggregated RANSAC/PCA plane normal, not
+  // the noise of an individual point. Scene37 shows this puts the absolute
+  // level observation in the same information range as scan matching.
+  double g_level_attitude_stddev_deg = 0.015;
+
   /// submap 
   double g_submap_resolution;
   int    g_submap_capacity;
@@ -76,6 +99,12 @@ namespace LI2Sup{
   bool g_visual_dense = false;
   int  g_pub_step;
   float g_map_preview_ds_size = 0.2f;
+  int g_map_preview_publish_interval = 20;
+  int g_map_preview_max_points = 150000;
+
+  int g_min_effective_points = 20;
+  double g_max_frame_translation = 2.0;
+  double g_max_frame_rotation_deg = 45.0;
 
   /// for planner
   bool g_planner_enable;

@@ -4,9 +4,11 @@
 #define SUPER_LIO_H_
 
 #include <queue>
+#include <deque>
 #include <vector>
 #include <iostream>
 #include <cassert>
+#include <cstdint>
 #include <filesystem>
 #include <limits>
 
@@ -45,12 +47,25 @@ protected:
   void stateProcess();
   virtual bool kf_init();
   virtual bool map_init();
-  void Propagation_Undistort();
+  bool Propagation_Undistort();
   void DownSample();
   void Observe();
+  void updateGravityReference();
+  struct LevelPlaneObservation {
+    bool valid = false;
+    BASIC::V3 normal_body = BASIC::V3::UnitZ();
+    int candidate_count = 0;
+    int inlier_count = 0;
+    double inlier_ratio = 0.0;
+    double rms = 0.0;
+    double gravity_angle_deg = 0.0;
+    double innovation_deg = 0.0;
+  };
+  LevelPlaneObservation estimateLevelPlane() const;
   virtual void UpdateMap();
   virtual void Output();
   void caceData();
+  void updateMapPreview(double timestamp);
   void ProcessCaceMap();
   void maybeCacheLoopKeyFrame(const BASIC::SE3& pose, double timestamp);
   void saveLoopClosedMap();
@@ -77,9 +92,35 @@ protected:
   BASIC::CloudPtr scan_undistort_full_;
   BASIC::CloudPtr ds_undistort_;
   BASIC::CloudPtr point_map_, world_pc_, ds_world_;
+  BASIC::CloudPtr map_preview_, map_preview_pending_;
+  int map_preview_scan_count_ = 0;
+  float map_preview_effective_leaf_size_ = 0.0f;
   int frame_num_ = 0;
   BASIC::SE3 sys_init_pose_;
   BASIC::SE3 last_pose_;
+  bool has_last_accepted_pose_ = false;
+  SysState last_accepted_state_;
+  ESKF::COV last_accepted_covariance_ = ESKF::COV::Identity();
+  bool has_last_accepted_state_ = false;
+  bool observation_valid_ = true;
+  std::uint64_t rejected_undistortion_count_ = 0;
+  std::chrono::steady_clock::time_point last_undistortion_warning_time_{};
+  std::size_t effective_match_count_ = 0;
+  int consecutive_invalid_observations_ = 0;
+  std::deque<IMUData> imu_init_window_;
+  std::chrono::steady_clock::time_point last_imu_motion_warning_time_{};
+  struct GravityDirectionSample {
+    double timestamp = 0.0;
+    BASIC::V3 up_world = BASIC::V3::UnitZ();
+  };
+  std::deque<GravityDirectionSample> gravity_direction_window_;
+  BASIC::V3 gravity_reference_world_ = BASIC::V3::UnitZ();
+  double imu_reference_accel_norm_ = 0.0;
+  double last_gravity_sample_time_ = -1.0;
+  bool gravity_reference_valid_ = false;
+  std::uint64_t level_constraint_accepted_count_ = 0;
+  std::uint64_t level_constraint_rejected_count_ = 0;
+  std::chrono::steady_clock::time_point last_level_constraint_log_time_{};
 
   std::size_t effect_knn_num_ = 0;
   BASIC::VV3 points_world_v3_, points_body_v3_;

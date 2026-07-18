@@ -1,4 +1,5 @@
 #include "lio/ESKF.h"
+#include "basic/logs.h"
 
 using namespace BASIC;
 
@@ -139,7 +140,9 @@ bool ESKF::Predict(const IMUData& imu, DynamicState& state_imu, DynamicState& st
 
   double dt = imu.secs - forward_time_;
 
-  if(dt < 0 || dt > 0.2){
+  if (!std::isfinite(dt) || dt <= 0.0 || dt > g_max_imu_integration_dt) {
+    forward_time_ = imu.secs;
+    forward_last_imu_ = imu;
     return false;
   }
 
@@ -200,6 +203,20 @@ bool ESKF::Predict(const IMUData& imu) {
     current_time_ = current_obs_time_;
   }else{
     dt = imu.secs - last_imu_time_;
+  }
+
+  if (!std::isfinite(dt) || dt <= 0.0 || dt > g_max_imu_integration_dt) {
+    rejected_imu_gap_count_++;
+    if (rejected_imu_gap_count_ == 1 || rejected_imu_gap_count_ % 20 == 0) {
+      LOG(WARNING) << YELLOW
+                   << " ---> [SuperLIO]: skip unsafe IMU integration gap. dt="
+                   << dt << "s limit=" << g_max_imu_integration_dt
+                   << "s rejected=" << rejected_imu_gap_count_ << RESET;
+    }
+    last_imu_time_ = imu.secs;
+    current_time_ = imu.secs;
+    last_imu_ = imu;
+    return false;
   }
 
   V3 acc = 0.5 * (imu.acc + last_imu_.acc);
@@ -302,7 +319,11 @@ bool ESKF::UpdateObserve(ESKF::ObsFunc obs) {
   }
 
   // update P
-  COV temp_cov = COV::Identity();
+  // H only observes the six pose error states.  The remaining velocity,
+  // bias, and gravity blocks must stay zero here; using Identity() invents
+  // measurements for unobserved states and collapses their covariance on
+  // every LiDAR update, preventing the filter from tracking IMU bias drift.
+  COV temp_cov = COV::Zero();
   temp_cov.block<6,6>(0,0) = HTVH;
   P_ = (COV::Identity() - Qk * temp_cov) * Pk;
 

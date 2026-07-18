@@ -25,13 +25,20 @@
     lio.sensor.enable_downsample: true
     lio.sensor.voxel_fliter_size: 0.5
     lio.sensor.lidar_time_offset: 0.0
-    lio.sensor.use_query_time_undistort: false
+    lio.sensor.use_query_time_undistort: true
     lio.sensor.gravity_norm: 9.7946
     lio.sensor.imu_type: 1
     lio.sensor.imu_na: 0.03
     lio.sensor.imu_ng: 0.03
     lio.sensor.imu_nba: 0.0003
     lio.sensor.imu_nbg: 0.0003
+    lio.sensor.imu_init_samples: 400
+    lio.sensor.imu_init_max_gyro_norm: 0.05
+    lio.sensor.imu_init_max_gyro_stddev: 0.03
+    lio.sensor.imu_init_max_accel_stddev_ratio: 0.05
+    lio.sensor.max_imu_integration_dt: 0.05
+    # Livox frame boundaries normally jitter/overlap by about 0.2-0.3 ms.
+    lio.sensor.scan_boundary_tolerance: 0.001
 
     lio.extrinsic.lidar_imu: [-0.011, -0.02329, 0.04412, 
                               1.0, 0.0, 0.0, 
@@ -48,8 +55,27 @@
     lio.kf.kf_type: 0
     lio.kf.kf_max_iterations: 6
     lio.kf.kf_align_gravity: true
-    lio.kf.estimate_gravity: true
+    # Startup alignment remains enabled; only runtime direction estimation is locked.
+    lio.kf.estimate_gravity: false
     lio.kf.kf_quit_eps: 0.001
+
+    # Keep roll/pitch tied to the physical vertical using only a local plane
+    # that agrees with a one-second IMU gravity average. This does not constrain
+    # Z, so stairs and real floor-height changes remain observable.
+    lio.kf.level_constraint.enable: true
+    lio.kf.level_constraint.gravity_window_sec: 1.0
+    lio.kf.level_constraint.max_accel_norm_ratio: 0.12
+    lio.kf.level_constraint.max_point_range: 18.0
+    lio.kf.level_constraint.min_down_distance: 0.05
+    lio.kf.level_constraint.max_down_distance: 3.0
+    lio.kf.level_constraint.ransac_iterations: 96
+    lio.kf.level_constraint.plane_distance_threshold: 0.06
+    lio.kf.level_constraint.min_plane_inliers: 40
+    lio.kf.level_constraint.min_plane_inlier_ratio: 0.12
+    lio.kf.level_constraint.max_plane_gravity_angle_deg: 3.0
+    lio.kf.level_constraint.max_attitude_innovation_deg: 6.0
+    # Aggregate plane-normal uncertainty (not single-point angular noise).
+    lio.kf.level_constraint.attitude_stddev_deg: 0.015
 
     lio.output.robot: true
     lio.output.plan_env_world: false
@@ -60,5 +86,11 @@
     lio.output.dense: true
     lio.output.pub_step: 1
     lio.output.map_preview_ds_size: 0.2
+    lio.output.map_preview_publish_interval: 20
+    lio.output.map_preview_max_points: 150000
+
+    lio.safety.min_effective_points: 20
+    lio.safety.max_frame_translation: 2.0
+    lio.safety.max_frame_rotation_deg: 45.0
 
     lio.eva.timer: true

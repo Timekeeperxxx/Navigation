@@ -10,6 +10,9 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <numeric>
+#include <random>
+#include <sstream>
 
 
 using namespace BASIC;
@@ -18,6 +21,7 @@ namespace LI2Sup{
 
 inline bool save_pcd_binary_safe(const std::string& filename, const PointCloudType& cloud)
 {
+  const auto temporary_filename = filename + ".tmp";
   try {
     const auto parent = std::filesystem::path(filename).parent_path();
     if (!parent.empty()) {
@@ -30,12 +34,25 @@ inline bool save_pcd_binary_safe(const std::string& filename, const PointCloudTy
       }
     }
 
-    if (pcl::io::savePCDFileBinary(filename, cloud) != 0) {
-      LOG(ERROR) << RED << " ---> 保存 PCD 文件失败: " << filename << RESET;
+    std::error_code ec;
+    std::filesystem::remove(temporary_filename, ec);
+    ec.clear();
+    if (pcl::io::savePCDFileBinary(temporary_filename, cloud) != 0) {
+      LOG(ERROR) << RED << " ---> 保存 PCD 临时文件失败: " << temporary_filename << RESET;
+      return false;
+    }
+
+    std::filesystem::rename(temporary_filename, filename, ec);
+    if (ec) {
+      std::filesystem::remove(temporary_filename);
+      LOG(ERROR) << RED << " ---> 提交 PCD 文件失败: "
+                 << filename << " error: " << ec.message() << RESET;
       return false;
     }
     return true;
   } catch (const std::exception& e) {
+    std::error_code ec;
+    std::filesystem::remove(temporary_filename, ec);
     LOG(ERROR) << RED << " ---> 保存 PCD 文件失败: "
                << filename << " error: " << e.what() << RESET;
     return false;
@@ -226,6 +243,9 @@ void SuperLIO::init(){
 
   if(g_save_map){
     point_map_.reset(new PointCloudType());
+    map_preview_.reset(new PointCloudType());
+    map_preview_pending_.reset(new PointCloudType());
+    map_preview_effective_leaf_size_ = std::max(g_map_preview_ds_size, 0.01f);
   }
   
   points_world_v3_.reserve(21000);
@@ -267,18 +287,55 @@ void SuperLIO::process(){
 
 
 bool SuperLIO::kf_init(){
-  static int imu_cout = 0;
-  static V3 mean_gyro = V3::Zero();
-  static V3 mean_acce = V3::Zero();
-
   for(auto& imu: measures_.imu){
-    imu_cout ++;
-    mean_gyro += (imu.gyr - mean_gyro) / imu_cout;
-    mean_acce += (imu.acc - mean_acce) / imu_cout;
+    imu_init_window_.push_back(imu);
+    while (imu_init_window_.size() > static_cast<std::size_t>(g_imu_init_samples)) {
+      imu_init_window_.pop_front();
+    }
   }
 
-  /// 100 Hz for 1 second.
-  if(imu_cout < 100){
+  if (imu_init_window_.size() < static_cast<std::size_t>(g_imu_init_samples)) {
+    return false;
+  }
+
+  V3 mean_gyro = V3::Zero();
+  V3 mean_acce = V3::Zero();
+  for (const auto& imu : imu_init_window_) {
+    mean_gyro += imu.gyr;
+    mean_acce += imu.acc;
+  }
+  const scalar sample_count = static_cast<scalar>(imu_init_window_.size());
+  mean_gyro /= sample_count;
+  mean_acce /= sample_count;
+
+  V3 gyro_variance = V3::Zero();
+  V3 accel_variance = V3::Zero();
+  for (const auto& imu : imu_init_window_) {
+    gyro_variance += (imu.gyr - mean_gyro).cwiseAbs2();
+    accel_variance += (imu.acc - mean_acce).cwiseAbs2();
+  }
+  const scalar variance_denominator = std::max<scalar>(sample_count - 1.0, 1.0);
+  const V3 gyro_stddev = (gyro_variance / variance_denominator).cwiseSqrt();
+  const V3 accel_stddev = (accel_variance / variance_denominator).cwiseSqrt();
+  const double accel_mean_norm = mean_acce.norm();
+  const double accel_stddev_ratio =
+      accel_mean_norm > 1e-6 ? accel_stddev.maxCoeff() / accel_mean_norm
+                             : std::numeric_limits<double>::infinity();
+  const bool stationary =
+      mean_gyro.norm() <= g_imu_init_max_gyro_norm &&
+      gyro_stddev.maxCoeff() <= g_imu_init_max_gyro_stddev &&
+      accel_stddev_ratio <= g_imu_init_max_accel_stddev_ratio;
+  if (!stationary) {
+    const auto now = std::chrono::steady_clock::now();
+    if (last_imu_motion_warning_time_ == std::chrono::steady_clock::time_point{} ||
+        now - last_imu_motion_warning_time_ > std::chrono::seconds(1)) {
+      last_imu_motion_warning_time_ = now;
+      LOG(WARNING) << YELLOW
+                   << " ---> [SuperLIO]: waiting for stationary IMU initialization. "
+                   << "gyro_mean_norm=" << mean_gyro.norm()
+                   << " gyro_stddev=" << gyro_stddev.transpose()
+                   << " accel_stddev_ratio=" << accel_stddev_ratio << RESET;
+    }
     return false;
   }
 
@@ -304,13 +361,24 @@ bool SuperLIO::kf_init(){
   options.estimate_gravity_ = g_kf_estimate_gravity;
 
   float imu_scale = g_gravity_norm / mean_acce.norm();
-  kf_->SetInitialConditions(options, V3::Zero(), V3::Zero(), imu_scale, ref_gravity);
+  kf_->SetInitialConditions(options, mean_gyro, V3::Zero(), imu_scale, ref_gravity);
   auto state = kf_->GetSysState();
   state.R = SO3(rot);
   state.p = g_odom_robo.t_;        // By default, the robot frame is used as the reference origin.
   state.timestamp = measures_.imu.back().secs;
   kf_->SetX(state);
   sys_init_pose_ = kf_->GetSE3();
+  imu_reference_accel_norm_ = mean_acce.norm();
+  gravity_direction_window_.clear();
+  gravity_reference_world_ = V3::UnitZ();
+  gravity_reference_valid_ = false;
+  last_gravity_sample_time_ = -1.0;
+  LOG(INFO) << GREEN << " ---> [SuperLIO]: IMU initialized with "
+            << imu_init_window_.size() << " stationary samples, gyro_bias="
+            << mean_gyro.transpose() << " gyro_stddev=" << gyro_stddev.transpose()
+            << " accel_mean=" << mean_acce.transpose()
+            << " accel_stddev_ratio=" << accel_stddev_ratio << RESET;
+  imu_init_window_.clear();
   return true;
 }
 
@@ -339,6 +407,11 @@ bool SuperLIO::map_init(){
 
   // 20 Hz for 1.0 seconds. Integral coverage area > 70%
   if(frame_num_ > 3){
+    last_pose_ = kf_->GetSE3();
+    has_last_accepted_pose_ = true;
+    last_accepted_state_ = kf_->GetSysState();
+    last_accepted_covariance_ = kf_->GetCov();
+    has_last_accepted_state_ = true;
     g_flg_map_init = false;
     return true;
   }
@@ -349,23 +422,36 @@ bool SuperLIO::map_init(){
 void SuperLIO::stateProcess(){
   frame_num_++;
   if(g_time_eva){
-    time_record_.Evaluate([this](){Propagation_Undistort();}, "[Undistort]");
+    bool undistortion_valid = false;
+    time_record_.Evaluate(
+      [this, &undistortion_valid](){
+        undistortion_valid = Propagation_Undistort();
+      }, "[Undistort]");
+    if (!undistortion_valid) {
+      observation_valid_ = false;
+      return;
+    }
     time_record_.Evaluate([this]() { DownSample(); }, "[DownSample]");
     time_record_.Evaluate([this]() { Observe(); }, "[Observe]");
     time_record_.Evaluate([this]() { UpdateMap(); }, "[UpdateMap]");
+    time_record_.Evaluate([this]() { Output(); }, "[Output]");
+    time_record_.Evaluate([this]() { caceData(); }, "[CacheData]");
   }else{
-    Propagation_Undistort();
+    if (!Propagation_Undistort()) {
+      observation_valid_ = false;
+      return;
+    }
     DownSample();
     Observe();
     UpdateMap();
+    Output();
+    caceData();
   }
-  Output();
-  caceData();
 }
 
 
 void SuperLIO::caceData(){
-  if(!g_save_map) return;
+  if(!g_save_map || !observation_valid_) return;
   auto state = kf_->GetNavState();
   Eigen::Matrix4f transformation = Eigen::Matrix4f::Identity();
   transformation.block<3, 3>(0, 0) = state.R.R_.cast<float>();
@@ -383,17 +469,7 @@ void SuperLIO::caceData(){
     scan_wait_num++;
     maybeCacheLoopKeyFrame(SE3(state.R.R_, state.p), state.timestamp);
 
-    static int accumulated_map_pub_count = 0;
-    accumulated_map_pub_count++;
-    if(accumulated_map_pub_count >= 10){
-      CloudPtr map_preview(new PointCloudType());
-      make_map_pcd_cloud(
-        point_map_, *map_preview, g_map_preview_ds_size, "preview", true);
-      if (!map_preview->empty()) {
-        data_wrapper_->pub_map_accumulated(map_preview, state.timestamp);
-      }
-      accumulated_map_pub_count = 0;
-    }
+    updateMapPreview(state.timestamp);
   }
 
   if(g_pcd_save_interval < 0) {
@@ -419,6 +495,70 @@ void SuperLIO::caceData(){
     save_pcd_binary_safe(map_name, *point_map_);
     point_map_->clear();
     scan_wait_num = 0;
+  }
+}
+
+
+void SuperLIO::updateMapPreview(const double timestamp){
+  if (!map_preview_ || !map_preview_pending_ || !world_pc_ || world_pc_->empty()) {
+    return;
+  }
+
+  *map_preview_pending_ += *world_pc_;
+  map_preview_scan_count_++;
+  if (map_preview_scan_count_ < g_map_preview_publish_interval) {
+    return;
+  }
+  map_preview_scan_count_ = 0;
+
+  CloudPtr merged(new PointCloudType());
+  merged->reserve(map_preview_->size() + map_preview_pending_->size());
+  *merged += *map_preview_;
+  *merged += *map_preview_pending_;
+  map_preview_pending_->clear();
+
+  CloudPtr filtered(new PointCloudType());
+  auto leaf_size = std::max(map_preview_effective_leaf_size_, 0.01f);
+  const auto max_points = static_cast<std::size_t>(g_map_preview_max_points);
+
+  if (g_if_filter) {
+    for (int attempt = 0; attempt < 6; ++attempt) {
+      make_map_pcd_cloud(merged, *filtered, leaf_size, "bounded preview", true);
+      if (filtered->size() <= max_points) {
+        break;
+      }
+      const double ratio = static_cast<double>(filtered->size()) /
+                           static_cast<double>(max_points);
+      leaf_size *= static_cast<float>(std::max(1.25, std::sqrt(ratio) * 1.05));
+    }
+  } else {
+    *filtered = *merged;
+  }
+
+  if (filtered->size() > max_points) {
+    CloudPtr limited(new PointCloudType());
+    limited->reserve(max_points);
+    const std::size_t stride =
+      std::max<std::size_t>(1, (filtered->size() + max_points - 1) / max_points);
+    for (std::size_t index = 0;
+         index < filtered->size() && limited->size() < max_points;
+         index += stride) {
+      limited->push_back(filtered->points[index]);
+    }
+    normalize_cloud_layout(*limited);
+    filtered = limited;
+  }
+
+  if (leaf_size > map_preview_effective_leaf_size_ + 1e-6f) {
+    LOG(INFO) << GREEN << " ---> [SuperLIO]: bounded map preview leaf increased from "
+              << map_preview_effective_leaf_size_ << " to " << leaf_size
+              << ", points=" << filtered->size() << RESET;
+  }
+  map_preview_effective_leaf_size_ = leaf_size;
+  map_preview_ = filtered;
+
+  if (!map_preview_->empty()) {
+    data_wrapper_->pub_map_accumulated(map_preview_, timestamp);
   }
 }
 
@@ -641,7 +781,51 @@ inline double get_cpu_time_seconds() {
 }
 
 
-void SuperLIO::Propagation_Undistort(){
+bool SuperLIO::Propagation_Undistort(){
+  auto reject_undistortion = [this](const std::string& reason) {
+    ++rejected_undistortion_count_;
+    const auto now = std::chrono::steady_clock::now();
+    if (last_undistortion_warning_time_ == std::chrono::steady_clock::time_point{} ||
+        now - last_undistortion_warning_time_ > std::chrono::seconds(1)) {
+      last_undistortion_warning_time_ = now;
+      LOG(WARNING) << YELLOW
+                   << " ---> [SuperLIO]: reject LiDAR undistortion. " << reason
+                   << " rejected=" << rejected_undistortion_count_ << RESET;
+    }
+    scan_undistort_full_->clear();
+    ds_undistort_->clear();
+    return false;
+  };
+
+  auto& raw_pc = measures_.lidar.pc;
+  if (!raw_pc || raw_pc->empty()) {
+    return reject_undistortion("empty point cloud");
+  }
+
+  constexpr double time_epsilon = 1e-6;
+  const double coverage_tolerance =
+      std::max(g_scan_boundary_tolerance, time_epsilon);
+  double minimum_query_time = std::numeric_limits<double>::infinity();
+  double maximum_query_time = -std::numeric_limits<double>::infinity();
+  for (const auto& point : raw_pc->points) {
+    if (!std::isfinite(point.offset_time) || point.offset_time < 0.0) {
+      return reject_undistortion("invalid point offset time");
+    }
+    const double query_time = measures_.lidar.start_time + point.offset_time;
+    minimum_query_time = std::min(minimum_query_time, query_time);
+    maximum_query_time = std::max(maximum_query_time, query_time);
+  }
+
+  if (minimum_query_time < measures_.lidar.start_time - time_epsilon ||
+      maximum_query_time > measures_.lidar.end_time + time_epsilon) {
+    std::ostringstream reason;
+    reason << "point time outside scan range: point=["
+           << minimum_query_time << ", " << maximum_query_time
+           << "] scan=[" << measures_.lidar.start_time
+           << ", " << measures_.lidar.end_time << "]";
+    return reject_undistortion(reason.str());
+  }
+
   propagate_states_.clear();
   propagate_states_.emplace_back(kf_->GetDynamicState());
   kf_->SetObsTime(measures_.lidar.end_time);
@@ -650,13 +834,28 @@ void SuperLIO::Propagation_Undistort(){
     propagate_states_.emplace_back(kf_->GetDynamicState());
   }
 
+  // Keep a short gravity-direction average for validating local plane normals.
+  // It is deliberately not used as a direct attitude correction: walking
+  // acceleration can tilt an accelerometer-only estimate by several degrees.
+  updateGravityReference();
+
   static const M3 TLI_R = g_lidar_imu.R_;
   static const V3 TLI_t = g_lidar_imu.t_;
   const SE3 T_end = kf_->GetSE3();
   const M3  R_inv = T_end.R_.transpose();
   const V3  T_end_t = T_end.t_;
   const double start_time = measures_.lidar.start_time;
-  auto& raw_pc = measures_.lidar.pc;
+
+  if (propagate_states_.size() < 2 ||
+      propagate_states_.front().time > minimum_query_time + coverage_tolerance ||
+      propagate_states_.back().time < maximum_query_time - coverage_tolerance) {
+    std::ostringstream reason;
+    reason << "state coverage incomplete: state=["
+           << propagate_states_.front().time << ", "
+           << propagate_states_.back().time << "] point=["
+           << minimum_query_time << ", " << maximum_query_time << "]";
+    return reject_undistortion(reason.str());
+  }
 
   std::size_t ptsize = raw_pc->points.size();
   scan_undistort_full_->resize(ptsize); 
@@ -664,53 +863,31 @@ void SuperLIO::Propagation_Undistort(){
   tbb::parallel_for(
   tbb::blocked_range<size_t>(0, ptsize),
   [&](const tbb::blocked_range<size_t>& r) {
-    M3 R_h, R_t; V3 p_h, v_h, acc_t, w_t;
-    auto copy_raw_point = [&](const auto& pt, auto& pt_full) {
-      V3 raw(pt.x, pt.y, pt.z);
-      V3 eigen_point = TLI_R * raw + TLI_t;
-      pt_full.x = eigen_point[0];
-      pt_full.y = eigen_point[1];
-      pt_full.z = eigen_point[2];
-    };
+    M3 R_h, R_t; V3 p_h, v_h, acc_t;
     for (size_t idx = r.begin(); idx < r.end(); ++idx) {  
       auto& pt_full = scan_undistort_full_->points[idx];
       const auto& pt = raw_pc->points[idx];
       pt_full.intensity = pt.intensity;
       double query_time = start_time + pt.offset_time;
 
-      if (propagate_states_.size() < 2 ||
-          query_time <= propagate_states_.front().time ||
-          query_time > propagate_states_.back().time) {
-        copy_raw_point(pt, pt_full);
-        continue;
+      auto match_iter_n = std::upper_bound(
+        propagate_states_.begin(), propagate_states_.end(), query_time,
+        [](double time, const DynamicState& state) { return time < state.time; });
+      if (match_iter_n == propagate_states_.begin()) {
+        match_iter_n = std::next(propagate_states_.begin());
+      } else if (match_iter_n == propagate_states_.end()) {
+        match_iter_n = std::prev(propagate_states_.end());
       }
-      auto match_iter = propagate_states_.end();
-      for (auto iter = propagate_states_.begin();
-           std::next(iter) != propagate_states_.end(); ++iter) {
-        auto next_iter = std::next(iter);
-        if (iter->time < query_time && next_iter->time >= query_time) {
-          match_iter = iter;
-          break;
-        }
-      }
-      if (match_iter == propagate_states_.end()) {
-        copy_raw_point(pt, pt_full);
-        continue;
-      }
-      auto match_iter_n = std::next(match_iter);
+      auto match_iter = std::prev(match_iter_n);
       double imu_dt = match_iter_n->time - match_iter->time;
-      if (imu_dt <= 1e-9) {
-        copy_raw_point(pt, pt_full);
-        continue;
-      }
-      double query_dt = query_time - match_iter->time;
-      double s = query_dt / imu_dt;
+      const double query_dt = std::clamp(
+        query_time - match_iter->time, 0.0, std::max(imu_dt, 0.0));
+      const double s = imu_dt > 1e-9 ? query_dt / imu_dt : 0.0;
       R_h = match_iter->R;
       R_t = match_iter_n->R;
       p_h = match_iter->p;
       v_h = match_iter->v;
       acc_t = match_iter_n->a;
-      w_t = match_iter_n->w;
       M3 R_i = Quat(R_h).slerp(s, Quat(R_t)).toRotationMatrix();
       const double trans_dt = g_use_query_time_undistort ? query_dt : imu_dt;
       V3 t_ei(p_h + v_h * trans_dt + 0.5 * acc_t * trans_dt * trans_dt - T_end_t);
@@ -721,12 +898,260 @@ void SuperLIO::Propagation_Undistort(){
       pt_full.z = eigen_point[2];
     }
   });
+  return true;
 }
 
 
 void SuperLIO::DownSample(){
   voxel_grid_fliter_.setInputCloud(scan_undistort_full_);
   voxel_grid_fliter_.filter(ds_undistort_);
+}
+
+
+void SuperLIO::updateGravityReference(){
+  if (!g_level_constraint_enable || imu_reference_accel_norm_ <= 1e-6 ||
+      measures_.imu.empty() || propagate_states_.size() < 2) {
+    gravity_reference_valid_ = false;
+    return;
+  }
+
+  const std::size_t sample_count = std::min(
+      measures_.imu.size(), propagate_states_.size() - 1);
+  for (std::size_t i = 0; i < sample_count; ++i) {
+    const auto& imu = measures_.imu[i];
+    if (imu.secs <= last_gravity_sample_time_ + 1e-9) {
+      continue;
+    }
+    last_gravity_sample_time_ = imu.secs;
+
+    const double accel_norm = imu.acc.norm();
+    if (!std::isfinite(accel_norm) || accel_norm <= 1e-6) {
+      continue;
+    }
+    const double norm_error = std::abs(
+        accel_norm / imu_reference_accel_norm_ - 1.0);
+    if (norm_error > g_level_max_accel_norm_ratio) {
+      continue;
+    }
+
+    V3 up_world = propagate_states_[i + 1].R * (imu.acc / accel_norm);
+    const scalar up_norm = up_world.norm();
+    if (!up_world.allFinite() || up_norm <= 1e-6) {
+      continue;
+    }
+    gravity_direction_window_.push_back(
+        GravityDirectionSample{imu.secs, up_world / up_norm});
+  }
+
+  const double newest_time = measures_.imu.back().secs;
+  while (!gravity_direction_window_.empty() &&
+         newest_time - gravity_direction_window_.front().timestamp >
+             g_level_gravity_window_sec) {
+    gravity_direction_window_.pop_front();
+  }
+
+  const double minimum_duration = std::min(
+      0.5, 0.5 * g_level_gravity_window_sec);
+  if (gravity_direction_window_.size() < 20 ||
+      gravity_direction_window_.back().timestamp -
+              gravity_direction_window_.front().timestamp < minimum_duration) {
+    gravity_reference_valid_ = false;
+    return;
+  }
+
+  V3 mean_up = V3::Zero();
+  for (const auto& sample : gravity_direction_window_) {
+    mean_up += sample.up_world;
+  }
+  const scalar mean_norm = mean_up.norm();
+  gravity_reference_valid_ = mean_up.allFinite() && mean_norm > 1e-6;
+  if (gravity_reference_valid_) {
+    gravity_reference_world_ = mean_up / mean_norm;
+  }
+}
+
+
+SuperLIO::LevelPlaneObservation SuperLIO::estimateLevelPlane() const {
+  LevelPlaneObservation observation;
+  if (!g_level_constraint_enable || !gravity_reference_valid_ ||
+      !ds_undistort_ || ds_undistort_->empty()) {
+    return observation;
+  }
+
+  const SE3 predicted_pose = kf_->GetSE3();
+  V3 up_body = predicted_pose.R_.transpose() * gravity_reference_world_;
+  const scalar up_body_norm = up_body.norm();
+  if (!up_body.allFinite() || up_body_norm <= 1e-6) {
+    return observation;
+  }
+  up_body /= up_body_norm;
+
+  std::vector<V3> candidates;
+  candidates.reserve(ds_undistort_->size());
+  const double max_range_squared =
+      g_level_max_point_range * g_level_max_point_range;
+  for (const auto& point : ds_undistort_->points) {
+    const V3 p(point.x, point.y, point.z);
+    if (!p.allFinite()) {
+      continue;
+    }
+    const double range_squared = p.squaredNorm();
+    if (range_squared < 0.25 || range_squared > max_range_squared) {
+      continue;
+    }
+    const double down_projection = -up_body.dot(p);
+    if (down_projection < g_level_min_down_distance ||
+        down_projection > g_level_max_down_distance) {
+      continue;
+    }
+    candidates.push_back(p);
+  }
+
+  observation.candidate_count = static_cast<int>(candidates.size());
+  const int required_inliers = std::max(
+      g_level_min_plane_inliers,
+      static_cast<int>(std::ceil(
+          g_level_min_plane_inlier_ratio * candidates.size())));
+  if (static_cast<int>(candidates.size()) < required_inliers ||
+      candidates.size() < 3) {
+    return observation;
+  }
+
+  // The RANSAC seed is frame-derived, making bag replays deterministic while
+  // avoiding a geometry bias from repeatedly choosing the same point triples.
+  std::mt19937 generator(
+      static_cast<std::uint32_t>(frame_num_) * 2654435761u + 0x9e3779b9u);
+  std::uniform_int_distribution<std::size_t> sample_index(
+      0, candidates.size() - 1);
+  const double candidate_angle_deg = std::max(
+      10.0, 2.0 * g_level_max_plane_gravity_angle_deg);
+  const double candidate_cosine = std::cos(
+      candidate_angle_deg * M_PI / 180.0);
+
+  int best_count = 0;
+  V3 best_normal = V3::UnitZ();
+  double best_offset = 0.0;
+  for (int iteration = 0; iteration < g_level_ransac_iterations; ++iteration) {
+    const std::size_t i0 = sample_index(generator);
+    const std::size_t i1 = sample_index(generator);
+    const std::size_t i2 = sample_index(generator);
+    if (i0 == i1 || i0 == i2 || i1 == i2) {
+      continue;
+    }
+
+    V3 normal = (candidates[i1] - candidates[i0]).cross(
+        candidates[i2] - candidates[i0]);
+    const scalar normal_norm = normal.norm();
+    if (!normal.allFinite() || normal_norm <= 1e-5) {
+      continue;
+    }
+    normal /= normal_norm;
+    if (normal.dot(up_body) < 0.0) {
+      normal = -normal;
+    }
+    if (normal.dot(up_body) < candidate_cosine) {
+      continue;
+    }
+
+    const double offset = -normal.dot(candidates[i0]);
+    int inlier_count = 0;
+    for (const auto& candidate : candidates) {
+      if (std::abs(normal.dot(candidate) + offset) <=
+          g_level_plane_distance_threshold) {
+        ++inlier_count;
+      }
+    }
+    if (inlier_count > best_count) {
+      best_count = inlier_count;
+      best_normal = normal;
+      best_offset = offset;
+    }
+  }
+
+  if (best_count < required_inliers) {
+    return observation;
+  }
+
+  V3 centroid = V3::Zero();
+  std::vector<const V3*> inliers;
+  inliers.reserve(best_count);
+  for (const auto& candidate : candidates) {
+    if (std::abs(best_normal.dot(candidate) + best_offset) <=
+        g_level_plane_distance_threshold) {
+      inliers.push_back(&candidate);
+      centroid += candidate;
+    }
+  }
+  if (static_cast<int>(inliers.size()) < required_inliers) {
+    return observation;
+  }
+  centroid /= static_cast<scalar>(inliers.size());
+
+  M3 covariance = M3::Zero();
+  for (const V3* point : inliers) {
+    const V3 centered = *point - centroid;
+    covariance.noalias() += centered * centered.transpose();
+  }
+  covariance /= static_cast<scalar>(inliers.size());
+  Eigen::SelfAdjointEigenSolver<M3> eigen_solver(covariance);
+  if (eigen_solver.info() != Eigen::Success) {
+    return observation;
+  }
+  const V3 eigenvalues = eigen_solver.eigenvalues();
+  if (!eigenvalues.allFinite() || eigenvalues[1] < 0.04) {
+    return observation;
+  }
+
+  V3 refined_normal = eigen_solver.eigenvectors().col(0);
+  if (refined_normal.dot(up_body) < 0.0) {
+    refined_normal = -refined_normal;
+  }
+  const double refined_offset = -refined_normal.dot(centroid);
+  double squared_error_sum = 0.0;
+  int refined_inlier_count = 0;
+  for (const auto& candidate : candidates) {
+    const double error = refined_normal.dot(candidate) + refined_offset;
+    if (std::abs(error) <= g_level_plane_distance_threshold) {
+      squared_error_sum += error * error;
+      ++refined_inlier_count;
+    }
+  }
+  if (refined_inlier_count < required_inliers) {
+    return observation;
+  }
+
+  const double rms = std::sqrt(
+      squared_error_sum / static_cast<double>(refined_inlier_count));
+  if (!std::isfinite(rms) ||
+      rms > 0.8 * g_level_plane_distance_threshold) {
+    return observation;
+  }
+
+  const auto angle_deg = [](const V3& a, const V3& b) {
+    return std::acos(std::clamp(
+        static_cast<double>(a.dot(b)), -1.0, 1.0)) * 180.0 / M_PI;
+  };
+  const double gravity_angle_deg = angle_deg(refined_normal, up_body);
+  if (gravity_angle_deg > g_level_max_plane_gravity_angle_deg) {
+    return observation;
+  }
+
+  V3 plane_up_world = predicted_pose.R_ * refined_normal;
+  plane_up_world.normalize();
+  const double innovation_deg = angle_deg(plane_up_world, V3::UnitZ());
+  if (innovation_deg > g_level_max_attitude_innovation_deg) {
+    return observation;
+  }
+
+  observation.valid = true;
+  observation.normal_body = refined_normal;
+  observation.inlier_count = refined_inlier_count;
+  observation.inlier_ratio = static_cast<double>(refined_inlier_count) /
+      static_cast<double>(candidates.size());
+  observation.rms = rms;
+  observation.gravity_angle_deg = gravity_angle_deg;
+  observation.innovation_deg = innovation_deg;
+  return observation;
 }
 
 
@@ -738,6 +1163,52 @@ struct ThreadACC{
 
 
 void SuperLIO::Observe(){
+  // The iterated observation mutates the nominal state in place. Preserve the
+  // IMU-predicted state so a bad scan match cannot poison subsequent frames.
+  const SysState predicted_state = kf_->GetSysState();
+  const ESKF::COV predicted_covariance = kf_->GetCov();
+  const LevelPlaneObservation level_observation = estimateLevelPlane();
+  if (level_observation.valid) {
+    ++level_constraint_accepted_count_;
+  } else {
+    ++level_constraint_rejected_count_;
+  }
+
+  const double inlier_confidence = level_observation.valid
+      ? std::clamp(
+          static_cast<double>(level_observation.inlier_count) /
+              static_cast<double>(2 * g_level_min_plane_inliers),
+          0.25, 1.0)
+      : 0.0;
+  const double ratio_confidence = level_observation.valid
+      ? std::clamp(
+          level_observation.inlier_ratio /
+              (2.0 * g_level_min_plane_inlier_ratio),
+          0.25, 1.0)
+      : 0.0;
+  const double rms_confidence = level_observation.valid
+      ? std::clamp(
+          1.0 - level_observation.rms /
+              g_level_plane_distance_threshold,
+          0.25, 1.0)
+      : 0.0;
+  const double gravity_confidence = level_observation.valid
+      ? std::clamp(
+          1.0 - level_observation.gravity_angle_deg /
+              g_level_max_plane_gravity_angle_deg,
+          0.25, 1.0)
+      : 0.0;
+  const double level_confidence = level_observation.valid
+      ? std::clamp(
+          0.25 * (inlier_confidence + ratio_confidence +
+                  rms_confidence + gravity_confidence),
+          0.25, 1.0)
+      : 0.0;
+  const double level_sigma_rad =
+      g_level_attitude_stddev_deg * M_PI / 180.0;
+  const double level_information = level_observation.valid
+      ? level_confidence / (level_sigma_rad * level_sigma_rad)
+      : 0.0;
   size_t ptsize = ds_undistort_->size();
   
   static std::vector<float> _lengths;
@@ -767,6 +1238,7 @@ void SuperLIO::Observe(){
 
   ivox_->reset_max_group();
   int iter_num = 0;
+  V3d lidar_rotation_information_eigenvalues = V3d::Zero();
 
   kf_->UpdateObserve([&, this](const ESKF::KFState &kf_state, M6 &HTVH, V6 &HTVr) {
     const SE3 pose = kf_state.pose;
@@ -824,6 +1296,30 @@ void SuperLIO::Observe(){
       sum_HTVH += local_acc.HTVH;
       sum_HTVr += local_acc.HTVr;
     }
+
+    Eigen::SelfAdjointEigenSolver<M3d> lidar_information_solver(
+        sum_HTVH.block<3, 3>(0, 0));
+    if (lidar_information_solver.info() == Eigen::Success) {
+      lidar_rotation_information_eigenvalues =
+          lidar_information_solver.eigenvalues();
+    }
+
+    if (level_observation.valid) {
+      // z = world up, h(R) = R * n_body. For the right-multiplicative ESKF
+      // attitude error, dh/d(delta_theta) = -R * hat(n_body). The Jacobian is
+      // rank two, so this adds roll/pitch information without observing yaw,
+      // position, or height.
+      const V3d normal_body = level_observation.normal_body.cast<double>();
+      const M3d rotation = pose.R_.cast<double>();
+      const V3d predicted_up = rotation * normal_body;
+      const V3d residual = V3d::UnitZ() - predicted_up;
+      const M3d H = -rotation *
+          SO3::hat(level_observation.normal_body).cast<double>();
+      sum_HTVH.block<3, 3>(0, 0).noalias() +=
+          level_information * H.transpose() * H;
+      sum_HTVr.head<3>().noalias() +=
+          level_information * H.transpose() * residual;
+    }
     HTVH = sum_HTVH.cast<scalar>();
     HTVr = sum_HTVr.cast<scalar>();
 
@@ -843,14 +1339,130 @@ void SuperLIO::Observe(){
     iter_num++;
   });
 
+  effective_match_count_ = 0;
+  for (std::size_t i = 0; i < effect_knn_num_; ++i) {
+    const int index = effect_knn_idxs_[i];
+    if (index >= 0 && static_cast<std::size_t>(index) < effect_mask_.size() &&
+        effect_mask_[index]) {
+      effective_match_count_++;
+    }
+  }
+
+  const auto level_log_time = std::chrono::steady_clock::now();
+  if (last_level_constraint_log_time_ ==
+          std::chrono::steady_clock::time_point{} ||
+      level_log_time - last_level_constraint_log_time_ >
+          std::chrono::seconds(5)) {
+    last_level_constraint_log_time_ = level_log_time;
+    const SE3 diagnostic_pose = kf_->GetSE3();
+    double post_update_innovation_deg = 0.0;
+    if (level_observation.valid) {
+      V3 post_update_plane_up =
+          diagnostic_pose.R_ * level_observation.normal_body;
+      post_update_plane_up.normalize();
+      post_update_innovation_deg = std::acos(std::clamp(
+          static_cast<double>(post_update_plane_up.dot(V3::UnitZ())),
+          -1.0, 1.0)) * 180.0 / M_PI;
+    }
+    LOG(INFO) << GREEN
+              << " ---> [SuperLIO]: level constraint health. current_valid="
+              << level_observation.valid
+              << " accepted=" << level_constraint_accepted_count_
+              << " rejected=" << level_constraint_rejected_count_
+              << " candidates=" << level_observation.candidate_count
+              << " inliers=" << level_observation.inlier_count
+              << " ratio=" << level_observation.inlier_ratio
+              << " rms=" << level_observation.rms
+              << " plane_gravity_angle="
+              << level_observation.gravity_angle_deg
+              << "deg attitude_innovation="
+              << level_observation.innovation_deg
+              << "deg post_update_innovation="
+              << post_update_innovation_deg
+              << "deg information=" << level_information
+              << " lidar_rotation_information_eigenvalues="
+              << lidar_rotation_information_eigenvalues.transpose()
+              << " position=" << diagnostic_pose.t_.transpose() << RESET;
+  }
+
+  const SE3 current_pose = kf_->GetSE3();
+  const SE3 predicted_pose = predicted_state.GetSE3();
+  const bool pose_finite = current_pose.t_.allFinite() && current_pose.R_.allFinite();
+  double frame_translation = 0.0;
+  double frame_rotation_deg = 0.0;
+  double predicted_translation = 0.0;
+  double predicted_rotation_deg = 0.0;
+  bool prediction_valid =
+      predicted_pose.t_.allFinite() && predicted_pose.R_.allFinite();
+  bool motion_valid = pose_finite;
+  if (pose_finite && has_last_accepted_pose_) {
+    frame_translation = (current_pose.t_ - last_pose_.t_).norm();
+    const M3 relative_rotation = last_pose_.R_.transpose() * current_pose.R_;
+    frame_rotation_deg = std::abs(
+      Eigen::AngleAxis<scalar>(relative_rotation).angle() * 180.0 / M_PI);
+    motion_valid = frame_translation <= g_max_frame_translation &&
+                   frame_rotation_deg <= g_max_frame_rotation_deg;
+  }
+  if (prediction_valid && has_last_accepted_pose_) {
+    predicted_translation = (predicted_pose.t_ - last_pose_.t_).norm();
+    const M3 predicted_relative_rotation =
+        last_pose_.R_.transpose() * predicted_pose.R_;
+    predicted_rotation_deg = std::abs(
+      Eigen::AngleAxis<scalar>(predicted_relative_rotation).angle() * 180.0 / M_PI);
+    prediction_valid =
+        predicted_translation <= g_max_frame_translation &&
+        predicted_rotation_deg <= g_max_frame_rotation_deg;
+  }
+
+  observation_valid_ =
+    effective_match_count_ >= static_cast<std::size_t>(g_min_effective_points) &&
+    motion_valid;
+  if (!observation_valid_) {
+    const char* rollback_mode = "imu_prediction";
+    if (prediction_valid || !has_last_accepted_state_) {
+      kf_->SetX(predicted_state);
+      kf_->SetCov(predicted_covariance);
+    } else {
+      SysState recovered_state = last_accepted_state_;
+      recovered_state.timestamp = predicted_state.timestamp;
+      recovered_state.v.setZero();
+      kf_->SetX(recovered_state);
+      kf_->SetCov(last_accepted_covariance_);
+      rollback_mode = "last_accepted_state";
+    }
+    consecutive_invalid_observations_++;
+    if (consecutive_invalid_observations_ == 1 ||
+        consecutive_invalid_observations_ % 10 == 0) {
+      LOG(WARNING) << YELLOW
+                   << " ---> [SuperLIO]: reject unsafe map update. effective_matches="
+                   << effective_match_count_ << " min=" << g_min_effective_points
+                   << " frame_translation=" << frame_translation
+                   << "m frame_rotation=" << frame_rotation_deg
+                   << "deg predicted_translation=" << predicted_translation
+                   << "m predicted_rotation=" << predicted_rotation_deg
+                   << "deg finite=" << pose_finite
+                   << " state_rollback=" << rollback_mode
+                   << " consecutive=" << consecutive_invalid_observations_ << RESET;
+    }
+  } else if (consecutive_invalid_observations_ > 0) {
+    LOG(INFO) << GREEN << " ---> [SuperLIO]: observation recovered after "
+              << consecutive_invalid_observations_ << " rejected frames." << RESET;
+    consecutive_invalid_observations_ = 0;
+  }
+
   frame_num_++;
 }
 
 void SuperLIO::UpdateMap() {
+  if (!observation_valid_) return;
   const size_t ptsize = ds_undistort_->size();
   if (ptsize == 0) return;
   
   last_pose_ = kf_->GetSE3();
+  has_last_accepted_pose_ = true;
+  last_accepted_state_ = kf_->GetSysState();
+  last_accepted_covariance_ = kf_->GetCov();
+  has_last_accepted_state_ = true;
   points_world_v3_.resize(ptsize);
   
   const auto R = last_pose_.R_;
@@ -869,6 +1481,8 @@ void SuperLIO::UpdateMap() {
 void SuperLIO::Output(){
   auto state = kf_->GetNavState();
   data_wrapper_->pub_odom(state);  
+
+  if (!observation_valid_) return;
 
   Eigen::Matrix4f transformation = Eigen::Matrix4f::Identity();
   transformation.block<3, 3>(0, 0) = state.R.R_.cast<float>();

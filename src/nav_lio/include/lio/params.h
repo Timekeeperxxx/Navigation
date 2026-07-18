@@ -64,6 +64,12 @@ namespace LI2Sup{
   extern double g_imu_ng;
   extern double g_imu_nba;
   extern double g_imu_nbg;
+  extern int g_imu_init_samples;
+  extern double g_imu_init_max_gyro_norm;
+  extern double g_imu_init_max_gyro_stddev;
+  extern double g_imu_init_max_accel_stddev_ratio;
+  extern double g_max_imu_integration_dt;
+  extern double g_scan_boundary_tolerance;
 
   extern BASIC::SE3 g_lidar_imu;      // lidar in imu frame
   extern BASIC::SE3 g_odom_robo;      // lidar in robot frame
@@ -80,6 +86,22 @@ namespace LI2Sup{
   extern bool g_kf_estimate_gravity;
   extern double g_kf_quit_eps;
 
+  /// Absolute roll/pitch reference from a gravity-consistent local plane.
+  /// This observes attitude only; it never clamps position or vertical speed.
+  extern bool g_level_constraint_enable;
+  extern double g_level_gravity_window_sec;
+  extern double g_level_max_accel_norm_ratio;
+  extern double g_level_max_point_range;
+  extern double g_level_min_down_distance;
+  extern double g_level_max_down_distance;
+  extern int g_level_ransac_iterations;
+  extern double g_level_plane_distance_threshold;
+  extern int g_level_min_plane_inliers;
+  extern double g_level_min_plane_inlier_ratio;
+  extern double g_level_max_plane_gravity_angle_deg;
+  extern double g_level_max_attitude_innovation_deg;
+  extern double g_level_attitude_stddev_deg;
+
   /// submaps
   extern double g_submap_resolution;
   extern int    g_submap_capacity;
@@ -93,6 +115,13 @@ namespace LI2Sup{
   extern bool g_visual_dense;
   extern int  g_pub_step;
   extern float g_map_preview_ds_size;
+  extern int g_map_preview_publish_interval;
+  extern int g_map_preview_max_points;
+
+  /// mapping safety
+  extern int g_min_effective_points;
+  extern double g_max_frame_translation;
+  extern double g_max_frame_rotation_deg;
 
   /// for planner
   extern bool g_planner_enable;

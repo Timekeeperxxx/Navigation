@@ -55,8 +55,8 @@ def generate_launch_description():
     )
     declare_estimate_gravity_arg = DeclareLaunchArgument(
         'estimate_gravity',
-        default_value='true',
-        description='是否让 ESKF 在运行中估计 gravity 方向'
+        default_value='false',
+        description='是否让 ESKF 在运行中估计 gravity 方向；地面建图默认锁定为 false'
     )
     declare_use_query_time_undistort_arg = DeclareLaunchArgument(
         'use_query_time_undistort',

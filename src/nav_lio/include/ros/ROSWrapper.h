@@ -7,6 +7,10 @@
 #include <deque>
 #include <vector>
 #include <execution>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <mutex>
 
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
@@ -17,6 +21,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -54,15 +59,21 @@ public:
   ~ROSWrapper(){};
   using Ptr = std::shared_ptr<ROSWrapper>;
   bool sync_measure(MeasureGroup&);
+  bool isMappingPaused() const { return mapping_paused_.load(); }
 
   void setESKF(ESKF::Ptr& eskf) { eskf_ = eskf;}
 
   void clear(){
+    std::lock_guard<std::mutex> lock(sensor_buffer_mutex_);
     lidar_buffer_.clear();
     imu_buffer_.clear();
     lidar_pushed_ = false;
     last_timestamp_imu_ = -1.0;
     last_timestamp_lidar_ = -1.0;
+    sync_window_completed_count_ = 0;
+    sync_window_dropped_count_ = 0;
+    sync_health_unhealthy_ = false;
+    sync_health_window_start_ = {};
   }
 
   void pub_odom(const NavState&);
@@ -85,7 +96,14 @@ public:
     return cb_sensor_;
   }
 
+  rclcpp::CallbackGroup::SharedPtr getProcessingCallbackGroup() {
+    return cb_processing_;
+  }
+
 private:
+  void pauseMapping(
+    const std_srvs::srv::Trigger::Request::SharedPtr request,
+    std_srvs::srv::Trigger::Response::SharedPtr response);
   void imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg);
   void livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg);
   void stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
@@ -95,15 +113,36 @@ private:
 
 private:
   rclcpp::CallbackGroup::SharedPtr cb_sensor_;
+  rclcpp::CallbackGroup::SharedPtr cb_processing_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr pause_mapping_service_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_lidar_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_lidar_std_;
 
   std::deque<IMUData>   imu_buffer_;
   std::deque<LidarData> lidar_buffer_;
+  std::mutex sensor_buffer_mutex_;
   bool lidar_pushed_ = false;
   double last_timestamp_imu_ = -1.0;
   double last_timestamp_lidar_ = -1.0;
+  std::atomic<bool> mapping_paused_{false};
+  std::chrono::steady_clock::time_point last_lidar_arrival_time_{};
+  double last_lidar_source_time_ = -1.0;
+  std::chrono::steady_clock::time_point last_imu_lag_warning_time_{};
+  std::chrono::steady_clock::time_point last_lag_warning_time_{};
+  std::chrono::steady_clock::time_point last_missing_imu_warning_time_{};
+  std::chrono::steady_clock::time_point last_clock_domain_warning_time_{};
+  std::uint64_t lidar_without_imu_count_ = 0;
+  std::uint64_t lidar_missing_imu_start_count_ = 0;
+  std::uint64_t lidar_imu_gap_count_ = 0;
+  std::uint64_t lidar_invalid_time_count_ = 0;
+  std::uint64_t rejected_imu_clock_count_ = 0;
+  std::uint64_t rejected_lidar_clock_count_ = 0;
+  std::uint64_t pruned_imu_buffer_count_ = 0;
+  std::uint64_t sync_window_completed_count_ = 0;
+  std::uint64_t sync_window_dropped_count_ = 0;
+  bool sync_health_unhealthy_ = false;
+  std::chrono::steady_clock::time_point sync_health_window_start_{};
 
   ESKF::Ptr eskf_{nullptr};
 

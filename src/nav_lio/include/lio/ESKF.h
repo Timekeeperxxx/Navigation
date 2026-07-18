@@ -130,6 +130,7 @@ private:
   BASIC::SO3 fw_R_;
   BASIC::V3 fw_p_ = BASIC::V3::Zero();
   BASIC::V3 fw_v_ = BASIC::V3::Zero();
+  std::uint64_t rejected_imu_gap_count_ = 0;
 };
 
 

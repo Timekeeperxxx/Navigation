@@ -2,6 +2,7 @@
 #define TIMER_H_
 
 #include <glog/logging.h>
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <map>
@@ -29,6 +30,10 @@ class Timer {
         std::chrono::duration_cast<std::chrono::duration<double>>(t2 - t1)
             .count() *
         1000;
+    if (time_used > 100.0) {
+      LOG(WARNING) << "> [ " << func_name << " ] slow stage: " << time_used
+                   << " ms";
+    }
     if (records_.find(func_name) != records_.end()) {
       records_[func_name].time_usage_in_ms_.emplace_back(time_used);
     } else {
@@ -39,12 +44,19 @@ class Timer {
   void PrintAll() {
     LOG(INFO) << ">>> ===== Printing run time =====";
     for (const auto& r : records_) {
-      double time_temp = std::accumulate(r.second.time_usage_in_ms_.begin(),
-                                        r.second.time_usage_in_ms_.end(),
-                                        0.0) /
-                        double(r.second.time_usage_in_ms_.size());
-      LOG(INFO) << "> [ " << r.first << " ] average time usage: " << time_temp
-                << " ms , called times: " << r.second.time_usage_in_ms_.size();
+      const auto& samples = r.second.time_usage_in_ms_;
+      const double average = std::accumulate(samples.begin(), samples.end(), 0.0) /
+                             static_cast<double>(samples.size());
+      const double maximum = *std::max_element(samples.begin(), samples.end());
+      auto sorted_samples = samples;
+      std::sort(sorted_samples.begin(), sorted_samples.end());
+      const std::size_t p99_index = std::min(
+          sorted_samples.size() - 1,
+          static_cast<std::size_t>(0.99 * static_cast<double>(sorted_samples.size())));
+      LOG(INFO) << "> [ " << r.first << " ] average time usage: " << average
+                << " ms , p99: " << sorted_samples[p99_index]
+                << " ms , max: " << maximum
+                << " ms , called times: " << samples.size();
     }
   }
 
