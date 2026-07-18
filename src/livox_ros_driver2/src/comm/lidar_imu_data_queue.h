@@ -61,17 +61,23 @@ typedef struct {
 
 class LidarImuDataQueue {
  public:
-  void Push(ImuData* imu_data);
+  // Returns the cumulative drop count when this push had to discard the
+  // oldest sample, otherwise returns zero. Keeping this queue bounded is
+  // critical: stale IMU data is worse than a visible sample gap for LIO.
+  uint64_t Push(ImuData* imu_data);
   bool Pop(ImuData& imu_data);
   bool Empty();
   void Clear();
 
  private:
+  // MID360 publishes IMU at about 200 Hz. A 512-sample queue absorbs roughly
+  // 2.5 seconds of temporary Jetson scheduling pressure for negligible memory.
+  static constexpr std::size_t kMaxBufferedSamples = 512;
   std::mutex mutex_;
   std::list<ImuData> imu_data_queue_;
+  uint64_t dropped_samples_ = 0;
 };
 
 } // namespace
 
 #endif // LIVOX_ROS_DRIVER_LIDAR_IMU_DATA_QUEUE_H_
-

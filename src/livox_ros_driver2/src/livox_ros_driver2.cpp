@@ -172,6 +172,15 @@ DriverNode::DriverNode(const rclcpp::NodeOptions & node_options)
     LdsLidar *read_lidar = LdsLidar::GetInstance(publish_freq);
     lddc_ptr_->RegisterLds(static_cast<Lds *>(read_lidar));
 
+    // Start consumers before SDK initialization. MID360 can begin delivering
+    // IMU callbacks while InitLdsLidar is still configuring the device; if the
+    // consumers are created afterwards, about two seconds of IMU samples fill
+    // and overflow the bounded queue on every launch.
+    pointclouddata_poll_thread_ =
+        std::make_shared<std::thread>(&DriverNode::PointCloudDataPollThread, this);
+    imudata_poll_thread_ =
+        std::make_shared<std::thread>(&DriverNode::ImuDataPollThread, this);
+
     if ((read_lidar->InitLdsLidar(user_config_path))) {
       DRIVER_INFO(*this, "Init lds lidar success!");
     } else {
@@ -181,8 +190,6 @@ DriverNode::DriverNode(const rclcpp::NodeOptions & node_options)
     DRIVER_ERROR(*this, "Invalid data src (%d), please check the launch file", data_src);
   }
 
-  pointclouddata_poll_thread_ = std::make_shared<std::thread>(&DriverNode::PointCloudDataPollThread, this);
-  imudata_poll_thread_ = std::make_shared<std::thread>(&DriverNode::ImuDataPollThread, this);
 }
 
 }  // namespace livox_ros
@@ -196,7 +203,6 @@ RCLCPP_COMPONENTS_REGISTER_NODE(livox_ros::DriverNode)
 void DriverNode::PointCloudDataPollThread()
 {
   std::future_status status;
-  std::this_thread::sleep_for(std::chrono::seconds(3));
   do {
     lddc_ptr_->DistributePointCloudData();
     status = future_.wait_for(std::chrono::microseconds(0));
@@ -206,7 +212,6 @@ void DriverNode::PointCloudDataPollThread()
 void DriverNode::ImuDataPollThread()
 {
   std::future_status status;
-  std::this_thread::sleep_for(std::chrono::seconds(3));
   do {
     lddc_ptr_->DistributeImuData();
     status = future_.wait_for(std::chrono::microseconds(0));

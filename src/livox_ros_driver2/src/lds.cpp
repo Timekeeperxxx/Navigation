@@ -75,6 +75,10 @@ void Lds::ResetLds(uint8_t data_src) {
 
 void Lds::RequestExit() {
   request_exit_ = true;
+  // Wake polling threads that may be blocked waiting for the first/next
+  // sensor sample so DriverNode can join them cleanly during shutdown.
+  pcd_semaphore_.Signal();
+  imu_semaphore_.Signal();
 }
 
 bool Lds::IsAllQueueEmpty() {
@@ -114,7 +118,12 @@ void Lds::StorageImuData(ImuData* imu_data) {
 
   LidarDevice *p_lidar = &lidars_[index];
   LidarImuDataQueue* imu_queue = &p_lidar->imu_data;
-  imu_queue->Push(imu_data);
+  const uint64_t dropped_samples = imu_queue->Push(imu_data);
+  if (dropped_samples == 1 ||
+      (dropped_samples > 0 && dropped_samples % 200 == 0)) {
+    printf("Livox IMU publish queue overloaded; dropped %llu stale samples.\n",
+           static_cast<unsigned long long>(dropped_samples));
+  }
   if (!imu_queue->Empty()) {
     if (imu_semaphore_.GetCount() <= 0) {
       imu_semaphore_.Signal();

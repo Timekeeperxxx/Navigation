@@ -26,7 +26,7 @@
 
 namespace livox_ros {
 
-void LidarImuDataQueue::Push(ImuData* imu_data) {
+uint64_t LidarImuDataQueue::Push(ImuData* imu_data) {
   ImuData data;
   data.lidar_type = imu_data->lidar_type;
   data.handle = imu_data->handle;
@@ -41,7 +41,13 @@ void LidarImuDataQueue::Push(ImuData* imu_data) {
   data.acc_z = imu_data->acc_z;
 
   std::lock_guard<std::mutex> lock(mutex_);
+  uint64_t drop_count = 0;
+  if (imu_data_queue_.size() >= kMaxBufferedSamples) {
+    imu_data_queue_.pop_front();
+    drop_count = ++dropped_samples_;
+  }
   imu_data_queue_.push_back(std::move(data));
+  return drop_count;
 }
 
 bool LidarImuDataQueue::Pop(ImuData& imu_data) {

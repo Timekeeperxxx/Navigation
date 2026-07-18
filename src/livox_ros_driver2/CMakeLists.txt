@@ -245,8 +245,13 @@ else(ROS_EDITION STREQUAL "ROS2")
     LIBRARY_NAME ${PROJECT_NAME}
   )
 
-  ## make sure the livox_lidar_sdk_shared library is installed
-  find_library(LIVOX_LIDAR_SDK_LIBRARY liblivox_lidar_sdk_shared.so /usr/local/lib REQUIRED)
+  ## Link the Livox SDK archive into this driver instead of loading its shared
+  ## library. SDK2 bundles an old header-only spdlog while ROS 2 loads the
+  ## system spdlog shared library. With the SDK shared object, ELF symbol
+  ## interposition can route the SDK logger destructor to the incompatible
+  ## system implementation and crash during process exit.
+  find_library(LIVOX_LIDAR_SDK_STATIC_LIBRARY
+    liblivox_lidar_sdk_static.a /usr/local/lib REQUIRED)
 
   ##
   find_path(LIVOX_LIDAR_SDK_INCLUDE_DIR
@@ -314,12 +319,20 @@ else(ROS_EDITION STREQUAL "ROS2")
 
   # link libraries
   target_link_libraries(${PROJECT_NAME}
-    ${LIVOX_LIDAR_SDK_LIBRARY}
+    ${LIVOX_LIDAR_SDK_STATIC_LIBRARY}
     ${LIVOX_INTERFACE_TARGET}   # for custom msgs
     ${PPT_LIBRARY}
     ${Boost_LIBRARY}
     ${PCL_LIBRARIES}
     ${APR_LIBRARIES}
+  )
+
+  # Keep the SDK's bundled spdlog/fmt implementation private and bind SDK
+  # references locally. ROS 2 can then continue using its own system spdlog
+  # without the two incompatible ABIs interposing on each other.
+  target_link_options(${PROJECT_NAME} PRIVATE
+    "LINKER:-Bsymbolic"
+    "LINKER:--exclude-libs,liblivox_lidar_sdk_static.a"
   )
 
   rclcpp_components_register_node(${PROJECT_NAME}
