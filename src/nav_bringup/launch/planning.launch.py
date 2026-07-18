@@ -60,7 +60,7 @@ def generate_launch_description():
 
     pcl_publisher = Node(
         package="nav_bringup",
-        executable="nav_pcd_map_publisher.py",
+        executable="nav_pcd_map_publisher",
         name="pcl_publisher",
         output="screen",
         parameters=[

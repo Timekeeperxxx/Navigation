@@ -43,14 +43,13 @@ scan_planner_node:
     "grid_map/map_sliding_en": true
     "grid_map/map_sliding_thresh": 0.2
     # Replaces the previous Unitree Go2 collision profile backed up separately.
-    # Unitree B2 standing size: 1.098m x 0.450m x 0.645m.
-    # base_footprint is projected below the head-mounted lidar, not at the
-    # geometric body centre.  Bias the pair rearward so their centres are
-    # 0.00m (front) and -0.56m (rear) instead of +0.28m/-0.28m.
+    # Measured from map -> base_footprint along the robot heading, place the
+    # two B2 collision-circle centres about 0.225m and 0.675m behind the TF
+    # origin.  center_offset is their midpoint and offset is half their gap.
     "grid_map/body_height": 0.32
-    "grid_map/double_cylinder_radius": 0.36
-    "grid_map/double_cylinder_offset": 0.28
-    "grid_map/double_cylinder_center_offset": -0.28
+    "grid_map/double_cylinder_radius": 0.25
+    "grid_map/double_cylinder_offset": 0.225
+    "grid_map/double_cylinder_center_offset": -0.45
     "grid_map/obstacles_inflation_z_up": 0.10
     "grid_map/obstacles_inflation_z_down": 0.33
     "grid_map/ground_height": 0.0

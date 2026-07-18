@@ -87,13 +87,14 @@ bash adapters/legacy_scripts/restart_navigation_localization.sh /path/to/scene
 
 [Unitree B2 官方页面](https://www.unitree.com/cn/b2) 公布的站立尺寸约为 `1.098m x 0.450m x 0.645m`。SCAN 使用双圆柱近似水平轮廓：
 
-- `grid_map/double_cylinder_radius: 0.36`
-- `grid_map/double_cylinder_offset: 0.28`
+- `grid_map/double_cylinder_radius: 0.25`
+- `grid_map/double_cylinder_offset: 0.225`
+- `grid_map/double_cylinder_center_offset: -0.45`
 - `grid_map/body_height: 0.32`
 - `grid_map/obstacles_inflation_z_up: 0.10`
 - `grid_map/obstacles_inflation_z_down: 0.33`
 
-两个圆柱中心沿机器人航向位于 `+/-0.28m`，半径为 `0.36m`，可覆盖 B2 官方水平包围矩形。全局规划的 `inscribed_radius` 同步设为 `0.23m`。替换前的 **Unitree Go2** 尺寸参数保存在 `src/nav_bringup/config/robot_size_pre_b2_20260710.yaml`，仅用于恢复 Go2 部署。
+以 `map -> base_footprint` 的 XY 原点为基准，两个圆柱中心沿机器人航向分别位于后方约 `0.225m` 和 `0.675m`，半径为 `0.25m`。全局规划的 `inscribed_radius` 保持为 `0.23m`。替换前的 **Unitree Go2** 尺寸参数保存在 `src/nav_bringup/config/robot_size_pre_b2_20260710.yaml`，仅用于恢复 Go2 部署。
 
 ## 当前边界
 

@@ -19,8 +19,6 @@ pcl_publisher:
     map_down_sample: 0.2
     ground_down_sample: 0.3
     planground_down_sample: 0.1
-    max_input_bytes: 67108864
-    max_input_points: 4000000
 
 perception_3d_global:
   ros__parameters:

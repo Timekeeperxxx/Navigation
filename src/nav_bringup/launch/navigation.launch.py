@@ -85,6 +85,12 @@ def generate_launch_description():
     lidar_ip = LaunchConfiguration("lidar_ip")
     host_ip = LaunchConfiguration("host_ip")
     livox_config_path = LaunchConfiguration("livox_config_path")
+    lidar_mount_x_m = LaunchConfiguration("lidar_mount_x_m")
+    lidar_mount_y_m = LaunchConfiguration("lidar_mount_y_m")
+    lidar_mount_z_m = LaunchConfiguration("lidar_mount_z_m")
+    lidar_mount_roll_deg = LaunchConfiguration("lidar_mount_roll_deg")
+    lidar_mount_pitch_deg = LaunchConfiguration("lidar_mount_pitch_deg")
+    lidar_mount_yaw_deg = LaunchConfiguration("lidar_mount_yaw_deg")
 
     localization_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -105,6 +111,12 @@ def generate_launch_description():
             "lidar_ip": lidar_ip,
             "host_ip": host_ip,
             "livox_config_path": livox_config_path,
+            "lidar_mount_x_m": lidar_mount_x_m,
+            "lidar_mount_y_m": lidar_mount_y_m,
+            "lidar_mount_z_m": lidar_mount_z_m,
+            "lidar_mount_roll_deg": lidar_mount_roll_deg,
+            "lidar_mount_pitch_deg": lidar_mount_pitch_deg,
+            "lidar_mount_yaw_deg": lidar_mount_yaw_deg,
         }.items(),
     )
 
@@ -312,6 +324,12 @@ def generate_launch_description():
         DeclareLaunchArgument("navigation_rviz", default_value=rviz),
         DeclareLaunchArgument("lidar_ip", default_value="192.168.123.179"),
         DeclareLaunchArgument("host_ip", default_value=""),
+        DeclareLaunchArgument("lidar_mount_x_m", default_value="0.0"),
+        DeclareLaunchArgument("lidar_mount_y_m", default_value="0.0"),
+        DeclareLaunchArgument("lidar_mount_z_m", default_value="0.90"),
+        DeclareLaunchArgument("lidar_mount_roll_deg", default_value="0.0"),
+        DeclareLaunchArgument("lidar_mount_pitch_deg", default_value="19.48"),
+        DeclareLaunchArgument("lidar_mount_yaw_deg", default_value="0.0"),
         DeclareLaunchArgument(
             "livox_config_path",
             default_value=PathJoinSubstitution([
