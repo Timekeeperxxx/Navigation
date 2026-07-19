@@ -107,6 +107,7 @@ namespace LI2Sup{
   extern bool g_wall_yaw_constraint_enable;
   extern double g_wall_yaw_max_point_range;
   extern int g_wall_yaw_ransac_iterations;
+  extern int g_wall_yaw_extraction_interval_frames;
   extern double g_wall_yaw_plane_distance_threshold;
   extern int g_wall_yaw_min_plane_inliers;
   extern double g_wall_yaw_min_plane_inlier_ratio;
@@ -115,13 +116,20 @@ namespace LI2Sup{
   extern double g_wall_yaw_min_horizontal_span;
   extern int g_wall_yaw_reference_min_frames;
   extern double g_wall_yaw_reference_max_deviation_deg;
+  extern double g_wall_yaw_reference_radius_m;
+  extern double g_wall_yaw_reference_extension_ratio;
+  extern int g_wall_yaw_max_references;
+  extern double g_wall_yaw_reference_min_yaw_information_ratio;
+  extern double g_wall_yaw_information_weak_ratio;
+  extern double g_wall_yaw_information_strong_ratio;
   extern double g_wall_yaw_max_innovation_deg;
   extern double g_wall_yaw_stddev_deg;
+  extern double g_wall_yaw_max_correction_per_frame_deg;
 
   /// submaps
   extern double g_submap_resolution;
   extern int    g_submap_capacity;
-  
+
   /// output  
   extern bool g_2_robot;
   extern bool g_2_plan_env_world;

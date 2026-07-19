@@ -63,6 +63,7 @@ protected:
   };
   LevelPlaneObservation estimateLevelPlane() const;
   struct WallYawObservation {
+    bool extraction_attempted = false;
     bool valid = false;
     bool plane_valid = false;
     bool reference_valid = false;
@@ -76,8 +77,15 @@ protected:
     double vertical_span = 0.0;
     double horizontal_span = 0.0;
     double innovation_deg = 0.0;
+    double lidar_yaw_information_ratio = 0.0;
+    double observability_gate = 0.0;
+    int reference_index = -1;
   };
-  WallYawObservation estimateWallYaw();
+  WallYawObservation estimateWallYaw() const;
+  void prepareWallYawConstraint(
+      WallYawObservation& observation,
+      const BASIC::SE3& pose,
+      double lidar_yaw_information_ratio);
   virtual void UpdateMap();
   virtual void Output();
   void caceData();
@@ -137,11 +145,23 @@ protected:
   std::uint64_t level_constraint_accepted_count_ = 0;
   std::uint64_t level_constraint_rejected_count_ = 0;
   std::chrono::steady_clock::time_point last_level_constraint_log_time_{};
-  std::deque<double> wall_yaw_reference_samples_;
-  bool wall_yaw_reference_valid_ = false;
-  double wall_yaw_reference_axis_rad_ = 0.0;
+  struct WallYawReferenceSample {
+    double axis_rad = 0.0;
+    BASIC::V3 position = BASIC::V3::Zero();
+    int frame = 0;
+  };
+  struct WallYawReference {
+    double axis_rad = 0.0;
+    BASIC::V3 center = BASIC::V3::Zero();
+    std::uint64_t last_used_frame = 0;
+    std::uint64_t accepted_count = 0;
+  };
+  std::deque<WallYawReferenceSample> wall_yaw_reference_samples_;
+  std::vector<WallYawReference> wall_yaw_references_;
   std::uint64_t wall_yaw_constraint_accepted_count_ = 0;
   std::uint64_t wall_yaw_constraint_rejected_count_ = 0;
+  std::uint64_t wall_yaw_constraint_gated_count_ = 0;
+  std::uint64_t wall_yaw_extraction_skipped_count_ = 0;
 
   std::size_t effect_knn_num_ = 0;
   BASIC::VV3 points_world_v3_, points_body_v3_;

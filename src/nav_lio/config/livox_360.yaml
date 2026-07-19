@@ -77,21 +77,33 @@
     # Aggregate plane-normal uncertainty (not single-point angular noise).
     lio.kf.level_constraint.attitude_stddev_deg: 0.015
 
-    # 使用连续稳定的垂直墙面建立 Manhattan 主方向，只约束世界竖直轴上的 yaw。
-    # 墙面尺寸、方向或创新不可靠时自动拒绝，不修改 XY、Z、roll 或 pitch。
+    # 室内外共用的自适应航向辅助：只在 LiDAR 的 yaw 几何约束较弱、且局部
+    # 竖直墙面长期稳定时参与。不同区域可建立不同方向参考；无墙或结构可靠时
+    # 自动退出，不修改 XY、Z、roll 或 pitch。
     lio.kf.wall_yaw_constraint.enable: true
     lio.kf.wall_yaw_constraint.max_point_range: 20.0
     lio.kf.wall_yaw_constraint.ransac_iterations: 128
+    lio.kf.wall_yaw_constraint.extraction_interval_frames: 3
     lio.kf.wall_yaw_constraint.plane_distance_threshold: 0.08
     lio.kf.wall_yaw_constraint.min_plane_inliers: 40
     lio.kf.wall_yaw_constraint.min_plane_inlier_ratio: 0.05
     lio.kf.wall_yaw_constraint.max_vertical_angle_deg: 8.0
     lio.kf.wall_yaw_constraint.min_vertical_span: 0.8
     lio.kf.wall_yaw_constraint.min_horizontal_span: 1.5
-    lio.kf.wall_yaw_constraint.reference_min_frames: 20
-    lio.kf.wall_yaw_constraint.reference_max_deviation_deg: 2.0
-    lio.kf.wall_yaw_constraint.max_innovation_deg: 5.0
-    lio.kf.wall_yaw_constraint.stddev_deg: 0.1
+    # 墙面只每3帧提取一次；15个稳定样本约等于45个原始点云帧。
+    lio.kf.wall_yaw_constraint.reference_min_frames: 15
+    lio.kf.wall_yaw_constraint.reference_max_deviation_deg: 1.0
+    lio.kf.wall_yaw_constraint.reference_radius_m: 30.0
+    # 沿同一条长走廊走到参考半径的75%时，复制方向并续接一个局部锚点。
+    lio.kf.wall_yaw_constraint.reference_extension_ratio: 0.75
+    lio.kf.wall_yaw_constraint.max_references: 8
+    # yaw 方向信息 / 当前最强旋转方向信息。数值越小表示 yaw 相对越退化。
+    lio.kf.wall_yaw_constraint.reference_min_yaw_information_ratio: 0.45
+    lio.kf.wall_yaw_constraint.yaw_information_weak_ratio: 0.40
+    lio.kf.wall_yaw_constraint.yaw_information_strong_ratio: 0.70
+    lio.kf.wall_yaw_constraint.max_innovation_deg: 2.0
+    lio.kf.wall_yaw_constraint.stddev_deg: 0.3
+    lio.kf.wall_yaw_constraint.max_correction_per_frame_deg: 0.03
 
     lio.output.robot: true
     lio.output.plan_env_world: false

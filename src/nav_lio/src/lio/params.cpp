@@ -88,16 +88,24 @@ namespace LI2Sup{
   bool g_wall_yaw_constraint_enable = false;
   double g_wall_yaw_max_point_range = 20.0;
   int g_wall_yaw_ransac_iterations = 128;
+  int g_wall_yaw_extraction_interval_frames = 3;
   double g_wall_yaw_plane_distance_threshold = 0.08;
   int g_wall_yaw_min_plane_inliers = 40;
   double g_wall_yaw_min_plane_inlier_ratio = 0.05;
   double g_wall_yaw_max_vertical_angle_deg = 8.0;
   double g_wall_yaw_min_vertical_span = 0.8;
   double g_wall_yaw_min_horizontal_span = 1.5;
-  int g_wall_yaw_reference_min_frames = 20;
-  double g_wall_yaw_reference_max_deviation_deg = 2.0;
-  double g_wall_yaw_max_innovation_deg = 5.0;
-  double g_wall_yaw_stddev_deg = 0.1;
+  int g_wall_yaw_reference_min_frames = 15;
+  double g_wall_yaw_reference_max_deviation_deg = 1.0;
+  double g_wall_yaw_reference_radius_m = 30.0;
+  double g_wall_yaw_reference_extension_ratio = 0.75;
+  int g_wall_yaw_max_references = 8;
+  double g_wall_yaw_reference_min_yaw_information_ratio = 0.45;
+  double g_wall_yaw_information_weak_ratio = 0.40;
+  double g_wall_yaw_information_strong_ratio = 0.70;
+  double g_wall_yaw_max_innovation_deg = 2.0;
+  double g_wall_yaw_stddev_deg = 0.3;
+  double g_wall_yaw_max_correction_per_frame_deg = 0.03;
 
   /// submap 
   double g_submap_resolution;

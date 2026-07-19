@@ -390,8 +390,11 @@ bool SuperLIO::kf_init(){
   gravity_reference_valid_ = false;
   last_gravity_sample_time_ = -1.0;
   wall_yaw_reference_samples_.clear();
-  wall_yaw_reference_valid_ = false;
-  wall_yaw_reference_axis_rad_ = 0.0;
+  wall_yaw_references_.clear();
+  wall_yaw_constraint_accepted_count_ = 0;
+  wall_yaw_constraint_rejected_count_ = 0;
+  wall_yaw_constraint_gated_count_ = 0;
+  wall_yaw_extraction_skipped_count_ = 0;
   LOG(INFO) << GREEN << " ---> [SuperLIO]: IMU initialized with "
             << imu_init_window_.size() << " stationary samples, gyro_bias="
             << mean_gyro.transpose() << " gyro_stddev=" << gyro_stddev.transpose()
@@ -1174,13 +1177,16 @@ SuperLIO::LevelPlaneObservation SuperLIO::estimateLevelPlane() const {
 }
 
 
-SuperLIO::WallYawObservation SuperLIO::estimateWallYaw() {
+SuperLIO::WallYawObservation SuperLIO::estimateWallYaw() const {
   WallYawObservation observation;
-  observation.reference_valid = wall_yaw_reference_valid_;
   if (!g_wall_yaw_constraint_enable || !gravity_reference_valid_ ||
       !ds_undistort_ || ds_undistort_->empty()) {
     return observation;
   }
+  if (frame_num_ % g_wall_yaw_extraction_interval_frames != 0) {
+    return observation;
+  }
+  observation.extraction_attempted = true;
 
   const SE3 predicted_pose = kf_->GetSE3();
   V3 up_body = predicted_pose.R_.transpose() * gravity_reference_world_;
@@ -1341,21 +1347,25 @@ SuperLIO::WallYawObservation SuperLIO::estimateWallYaw() {
   }
   horizontal_tangent /= tangent_norm;
 
-  double min_vertical = std::numeric_limits<double>::infinity();
-  double max_vertical = -std::numeric_limits<double>::infinity();
-  double min_horizontal = std::numeric_limits<double>::infinity();
-  double max_horizontal = -std::numeric_limits<double>::infinity();
+  std::vector<double> vertical_coordinates;
+  std::vector<double> horizontal_coordinates;
+  vertical_coordinates.reserve(refined_inliers.size());
+  horizontal_coordinates.reserve(refined_inliers.size());
   for (const V3* point : refined_inliers) {
     const V3 centered = *point - centroid;
-    const double vertical = centered.dot(up_body);
-    const double horizontal = centered.dot(horizontal_tangent);
-    min_vertical = std::min(min_vertical, vertical);
-    max_vertical = std::max(max_vertical, vertical);
-    min_horizontal = std::min(min_horizontal, horizontal);
-    max_horizontal = std::max(max_horizontal, horizontal);
+    vertical_coordinates.push_back(centered.dot(up_body));
+    horizontal_coordinates.push_back(centered.dot(horizontal_tangent));
   }
-  const double vertical_span = max_vertical - min_vertical;
-  const double horizontal_span = max_horizontal - min_horizontal;
+  std::sort(vertical_coordinates.begin(), vertical_coordinates.end());
+  std::sort(horizontal_coordinates.begin(), horizontal_coordinates.end());
+  const std::size_t lower_index = static_cast<std::size_t>(std::floor(
+      0.05 * static_cast<double>(refined_inliers.size() - 1)));
+  const std::size_t upper_index = static_cast<std::size_t>(std::ceil(
+      0.95 * static_cast<double>(refined_inliers.size() - 1)));
+  const double vertical_span =
+      vertical_coordinates[upper_index] - vertical_coordinates[lower_index];
+  const double horizontal_span =
+      horizontal_coordinates[upper_index] - horizontal_coordinates[lower_index];
   if (!std::isfinite(vertical_span) || !std::isfinite(horizontal_span) ||
       vertical_span < g_wall_yaw_min_vertical_span ||
       horizontal_span < g_wall_yaw_min_horizontal_span) {
@@ -1372,77 +1382,246 @@ SuperLIO::WallYawObservation SuperLIO::estimateWallYaw() {
   observation.vertical_span = vertical_span;
   observation.horizontal_span = horizontal_span;
 
-  V3 normal_world = predicted_pose.R_ * refined_normal;
+  return observation;
+}
+
+
+void SuperLIO::prepareWallYawConstraint(
+    WallYawObservation& observation,
+    const SE3& pose,
+    const double lidar_yaw_information_ratio) {
+  observation.lidar_yaw_information_ratio = std::clamp(
+      lidar_yaw_information_ratio, 0.0, 1.0);
+  observation.reference_valid = !wall_yaw_references_.empty();
+
+  const double weak_ratio = g_wall_yaw_information_weak_ratio;
+  const double strong_ratio = g_wall_yaw_information_strong_ratio;
+  if (observation.lidar_yaw_information_ratio <= weak_ratio) {
+    observation.observability_gate = 1.0;
+  } else if (observation.lidar_yaw_information_ratio >= strong_ratio) {
+    observation.observability_gate = 0.0;
+  } else {
+    const double linear_gate =
+        (strong_ratio - observation.lidar_yaw_information_ratio) /
+        (strong_ratio - weak_ratio);
+    // Smoothstep avoids a discontinuous correction when geometry changes.
+    observation.observability_gate =
+        linear_gate * linear_gate * (3.0 - 2.0 * linear_gate);
+  }
+
+  if (!observation.plane_valid) {
+    if (!wall_yaw_reference_samples_.empty() &&
+        frame_num_ - wall_yaw_reference_samples_.back().frame >
+            20 * g_wall_yaw_extraction_interval_frames) {
+      wall_yaw_reference_samples_.clear();
+    }
+    return;
+  }
+
+  V3 normal_world = pose.R_ * observation.normal_body;
   normal_world.z() = 0.0;
   const scalar horizontal_normal_norm = normal_world.norm();
   if (!normal_world.allFinite() || horizontal_normal_norm <= 1e-6) {
-    return observation;
+    return;
   }
   normal_world /= horizontal_normal_norm;
   const double observed_angle = std::atan2(normal_world.y(), normal_world.x());
 
-  if (!wall_yaw_reference_valid_) {
-    if (!wall_yaw_reference_samples_.empty()) {
-      const double candidate_axis =
-          mean_manhattan_axis(wall_yaw_reference_samples_);
-      const double deviation_deg = std::abs(wrap_period_signed(
-          observed_angle - candidate_axis, M_PI_2)) * 180.0 / M_PI;
-      if (deviation_deg > g_wall_yaw_reference_max_deviation_deg) {
-        wall_yaw_reference_samples_.clear();
+  auto target_for_axis = [&](const double axis_rad) {
+    double best_dot = -std::numeric_limits<double>::infinity();
+    V3 best_target = V3::UnitX();
+    for (int axis_index = 0; axis_index < 4; ++axis_index) {
+      const double target_angle = axis_rad + axis_index * M_PI_2;
+      const V3 target(
+          std::cos(target_angle), std::sin(target_angle), 0.0);
+      const double dot = normal_world.dot(target);
+      if (dot > best_dot) {
+        best_dot = dot;
+        best_target = target;
       }
     }
-    wall_yaw_reference_samples_.push_back(observed_angle);
-    while (wall_yaw_reference_samples_.size() >
-           static_cast<std::size_t>(g_wall_yaw_reference_min_frames)) {
-      wall_yaw_reference_samples_.pop_front();
+    return best_target;
+  };
+  auto signed_innovation_to = [&](const V3& target) {
+    return std::atan2(
+        normal_world.x() * target.y() - normal_world.y() * target.x(),
+        std::clamp(static_cast<double>(normal_world.dot(target)), -1.0, 1.0));
+  };
+
+  int best_reference_index = -1;
+  double best_reference_score = std::numeric_limits<double>::infinity();
+  double best_reference_distance = 0.0;
+  V3 best_target = V3::UnitX();
+  double best_innovation_rad = 0.0;
+  for (std::size_t index = 0; index < wall_yaw_references_.size(); ++index) {
+    const auto& reference = wall_yaw_references_[index];
+    const double distance = (pose.t_ - reference.center).norm();
+    if (!std::isfinite(distance) || distance > g_wall_yaw_reference_radius_m) {
+      continue;
     }
-    if (wall_yaw_reference_samples_.size() >=
-        static_cast<std::size_t>(g_wall_yaw_reference_min_frames)) {
-      wall_yaw_reference_axis_rad_ =
-          mean_manhattan_axis(wall_yaw_reference_samples_);
-      wall_yaw_reference_valid_ = true;
+    const V3 target = target_for_axis(reference.axis_rad);
+    const double innovation_rad = signed_innovation_to(target);
+    const double innovation_deg = std::abs(innovation_rad) * 180.0 / M_PI;
+    if (innovation_deg > g_wall_yaw_max_innovation_deg) {
+      continue;
+    }
+    const double score = innovation_deg / g_wall_yaw_max_innovation_deg +
+        0.25 * distance / g_wall_yaw_reference_radius_m;
+    if (score < best_reference_score) {
+      best_reference_score = score;
+      best_reference_index = static_cast<int>(index);
+      best_reference_distance = distance;
+      best_target = target;
+      best_innovation_rad = innovation_rad;
+    }
+  }
+
+  if (best_reference_index >= 0) {
+    auto& reference =
+        wall_yaw_references_[static_cast<std::size_t>(best_reference_index)];
+    reference.last_used_frame = static_cast<std::uint64_t>(frame_num_);
+    ++reference.accepted_count;
+    wall_yaw_reference_samples_.clear();
+    observation.reference_index = best_reference_index;
+    observation.reference_valid = true;
+    observation.target_normal_world = best_target;
+    observation.innovation_deg =
+        std::abs(best_innovation_rad) * 180.0 / M_PI;
+    observation.valid = true;
+
+    // A fixed local radius is safe around turns and independently oriented
+    // buildings, but by itself leaves a long degenerate corridor uncovered
+    // after the robot walks out of the first radius. Once the same wall axis
+    // is observed near the edge, copy the already-verified axis to a new
+    // local anchor. Never derive the copied axis from the weak current pose.
+    const double extension_distance =
+        g_wall_yaw_reference_extension_ratio * g_wall_yaw_reference_radius_m;
+    if (best_reference_distance >= extension_distance) {
+      WallYawReference extension;
+      extension.axis_rad = reference.axis_rad;
+      extension.center = pose.t_;
+      extension.last_used_frame = static_cast<std::uint64_t>(frame_num_);
+      extension.accepted_count = 1;
+
+      if (wall_yaw_references_.size() >=
+          static_cast<std::size_t>(g_wall_yaw_max_references)) {
+        const auto oldest = std::min_element(
+            wall_yaw_references_.begin(), wall_yaw_references_.end(),
+            [](const WallYawReference& lhs, const WallYawReference& rhs) {
+              return lhs.last_used_frame < rhs.last_used_frame;
+            });
+        if (oldest != wall_yaw_references_.end()) {
+          wall_yaw_references_.erase(oldest);
+        }
+      }
+      wall_yaw_references_.push_back(extension);
+      observation.reference_index =
+          static_cast<int>(wall_yaw_references_.size() - 1);
       LOG(INFO) << GREEN
-                << " ---> [SuperLIO]: 垂直墙面航向参考已锁定。axis="
-                << wall_yaw_reference_axis_rad_ * 180.0 / M_PI
-                << "deg samples=" << wall_yaw_reference_samples_.size()
+                << " ---> [SuperLIO]: 续接长走廊墙面航向锚点。index="
+                << observation.reference_index
+                << " axis=" << extension.axis_rad * 180.0 / M_PI
+                << "deg center=" << extension.center.transpose()
+                << " source_distance=" << best_reference_distance
+                << "m total_references=" << wall_yaw_references_.size()
                 << RESET;
     }
+    return;
   }
 
-  observation.reference_valid = wall_yaw_reference_valid_;
-  if (!wall_yaw_reference_valid_) {
-    return observation;
+  // A new local reference may only be learned while normal LiDAR matching has
+  // sufficient yaw information. In a degenerate corridor we use an existing
+  // reference, but never turn the already-drifting pose into a new truth.
+  if (observation.lidar_yaw_information_ratio <
+      g_wall_yaw_reference_min_yaw_information_ratio) {
+    if (!wall_yaw_reference_samples_.empty() &&
+        frame_num_ - wall_yaw_reference_samples_.back().frame >
+            20 * g_wall_yaw_extraction_interval_frames) {
+      wall_yaw_reference_samples_.clear();
+    }
+    return;
   }
 
-  double best_dot = -std::numeric_limits<double>::infinity();
-  V3 target_normal_world = V3::UnitX();
-  for (int axis_index = 0; axis_index < 4; ++axis_index) {
-    const double target_angle =
-        wall_yaw_reference_axis_rad_ + axis_index * M_PI_2;
-    const V3 target(
-        std::cos(target_angle), std::sin(target_angle), 0.0);
-    const double dot = normal_world.dot(target);
-    if (dot > best_dot) {
-      best_dot = dot;
-      target_normal_world = target;
+  if (!wall_yaw_reference_samples_.empty()) {
+    std::deque<double> sample_angles;
+    V3 sample_center = V3::Zero();
+    for (const auto& sample : wall_yaw_reference_samples_) {
+      sample_angles.push_back(sample.axis_rad);
+      sample_center += sample.position;
+    }
+    sample_center /= static_cast<scalar>(wall_yaw_reference_samples_.size());
+    const double candidate_axis = mean_manhattan_axis(sample_angles);
+    const double deviation_deg = std::abs(wrap_period_signed(
+        observed_angle - candidate_axis, M_PI_2)) * 180.0 / M_PI;
+    const double spatial_deviation = (pose.t_ - sample_center).norm();
+    const bool stale =
+        frame_num_ - wall_yaw_reference_samples_.back().frame >
+        20 * g_wall_yaw_extraction_interval_frames;
+    if (stale ||
+        spatial_deviation > 0.5 * g_wall_yaw_reference_radius_m) {
+      wall_yaw_reference_samples_.clear();
+    } else if (deviation_deg >
+               g_wall_yaw_reference_max_deviation_deg) {
+      // The largest plane can briefly switch from a building wall to a
+      // cabinet, escalator side or vehicle. Ignore that observation instead
+      // of letting one outlier erase an otherwise stable local direction.
+      return;
     }
   }
 
-  const double signed_innovation = std::atan2(
-      normal_world.x() * target_normal_world.y() -
-          normal_world.y() * target_normal_world.x(),
-      std::clamp(
-          static_cast<double>(normal_world.dot(target_normal_world)),
-          -1.0, 1.0));
-  observation.innovation_deg =
-      std::abs(signed_innovation) * 180.0 / M_PI;
-  if (observation.innovation_deg > g_wall_yaw_max_innovation_deg) {
-    return observation;
+  wall_yaw_reference_samples_.push_back(
+      WallYawReferenceSample{observed_angle, pose.t_, frame_num_});
+  if (wall_yaw_reference_samples_.size() <
+      static_cast<std::size_t>(g_wall_yaw_reference_min_frames)) {
+    return;
   }
 
-  observation.valid = true;
-  observation.target_normal_world = target_normal_world;
-  return observation;
+  std::deque<double> sample_angles;
+  V3 reference_center = V3::Zero();
+  for (const auto& sample : wall_yaw_reference_samples_) {
+    sample_angles.push_back(sample.axis_rad);
+    reference_center += sample.position;
+  }
+  reference_center /= static_cast<scalar>(wall_yaw_reference_samples_.size());
+  WallYawReference reference;
+  reference.axis_rad = mean_manhattan_axis(sample_angles);
+  reference.center = reference_center;
+  reference.last_used_frame = static_cast<std::uint64_t>(frame_num_);
+  reference.accepted_count = 1;
+
+  if (wall_yaw_references_.size() >=
+      static_cast<std::size_t>(g_wall_yaw_max_references)) {
+    const auto oldest = std::min_element(
+        wall_yaw_references_.begin(), wall_yaw_references_.end(),
+        [](const WallYawReference& lhs, const WallYawReference& rhs) {
+          return lhs.last_used_frame < rhs.last_used_frame;
+        });
+    if (oldest != wall_yaw_references_.end()) {
+      wall_yaw_references_.erase(oldest);
+    }
+  }
+  wall_yaw_references_.push_back(reference);
+  wall_yaw_reference_samples_.clear();
+
+  observation.reference_index =
+      static_cast<int>(wall_yaw_references_.size() - 1);
+  observation.reference_valid = true;
+  observation.target_normal_world = target_for_axis(reference.axis_rad);
+  const double innovation_rad =
+      signed_innovation_to(observation.target_normal_world);
+  observation.innovation_deg = std::abs(innovation_rad) * 180.0 / M_PI;
+  observation.valid =
+      observation.innovation_deg <= g_wall_yaw_max_innovation_deg;
+
+  LOG(INFO) << GREEN
+            << " ---> [SuperLIO]: 新建局部墙面航向参考。index="
+            << observation.reference_index
+            << " axis=" << reference.axis_rad * 180.0 / M_PI
+            << "deg center=" << reference.center.transpose()
+            << " yaw_information_ratio="
+            << observation.lidar_yaw_information_ratio
+            << " total_references=" << wall_yaw_references_.size()
+            << RESET;
 }
 
 
@@ -1458,16 +1637,11 @@ void SuperLIO::Observe(){
   const SysState predicted_state = kf_->GetSysState();
   const ESKF::COV predicted_covariance = kf_->GetCov();
   const LevelPlaneObservation level_observation = estimateLevelPlane();
-  const WallYawObservation wall_yaw_observation = estimateWallYaw();
+  WallYawObservation wall_yaw_observation = estimateWallYaw();
   if (level_observation.valid) {
     ++level_constraint_accepted_count_;
   } else {
     ++level_constraint_rejected_count_;
-  }
-  if (wall_yaw_observation.valid) {
-    ++wall_yaw_constraint_accepted_count_;
-  } else {
-    ++wall_yaw_constraint_rejected_count_;
   }
 
   const double inlier_confidence = level_observation.valid
@@ -1505,31 +1679,31 @@ void SuperLIO::Observe(){
   const double level_information = level_observation.valid
       ? level_confidence / (level_sigma_rad * level_sigma_rad)
       : 0.0;
-  const double wall_inlier_confidence = wall_yaw_observation.valid
+  const double wall_inlier_confidence = wall_yaw_observation.plane_valid
       ? std::clamp(
           static_cast<double>(wall_yaw_observation.inlier_count) /
               static_cast<double>(2 * g_wall_yaw_min_plane_inliers),
           0.25, 1.0)
       : 0.0;
-  const double wall_ratio_confidence = wall_yaw_observation.valid
+  const double wall_ratio_confidence = wall_yaw_observation.plane_valid
       ? std::clamp(
           wall_yaw_observation.inlier_ratio /
               (2.0 * g_wall_yaw_min_plane_inlier_ratio),
           0.25, 1.0)
       : 0.0;
-  const double wall_rms_confidence = wall_yaw_observation.valid
+  const double wall_rms_confidence = wall_yaw_observation.plane_valid
       ? std::clamp(
           1.0 - wall_yaw_observation.rms /
               g_wall_yaw_plane_distance_threshold,
           0.25, 1.0)
       : 0.0;
-  const double wall_vertical_confidence = wall_yaw_observation.valid
+  const double wall_vertical_confidence = wall_yaw_observation.plane_valid
       ? std::clamp(
           1.0 - wall_yaw_observation.vertical_angle_deg /
               g_wall_yaw_max_vertical_angle_deg,
           0.25, 1.0)
       : 0.0;
-  const double wall_span_confidence = wall_yaw_observation.valid
+  const double wall_span_confidence = wall_yaw_observation.plane_valid
       ? 0.5 * (
           std::clamp(
               wall_yaw_observation.vertical_span /
@@ -1540,7 +1714,7 @@ void SuperLIO::Observe(){
                   (2.0 * g_wall_yaw_min_horizontal_span),
               0.25, 1.0))
       : 0.0;
-  const double wall_yaw_confidence = wall_yaw_observation.valid
+  const double wall_yaw_confidence = wall_yaw_observation.plane_valid
       ? std::clamp(
           0.2 * (wall_inlier_confidence + wall_ratio_confidence +
                  wall_rms_confidence + wall_vertical_confidence +
@@ -1549,10 +1723,12 @@ void SuperLIO::Observe(){
       : 0.0;
   const double wall_yaw_sigma_rad =
       g_wall_yaw_stddev_deg * M_PI / 180.0;
-  const double wall_yaw_information = wall_yaw_observation.valid
+  const double wall_yaw_base_information = wall_yaw_observation.plane_valid
       ? wall_yaw_confidence /
           (wall_yaw_sigma_rad * wall_yaw_sigma_rad)
       : 0.0;
+  double wall_yaw_information = 0.0;
+  bool wall_yaw_prepared = false;
   size_t ptsize = ds_undistort_->size();
   
   static std::vector<float> _lengths;
@@ -1648,12 +1824,32 @@ void SuperLIO::Observe(){
           lidar_information_solver.eigenvalues();
     }
 
+    const M3d rotation = pose.R_.cast<double>();
+    V3d yaw_axis_body = rotation.transpose() * V3d::UnitZ();
+    yaw_axis_body.normalize();
+    const M3d lidar_rotation_information =
+        sum_HTVH.block<3, 3>(0, 0);
+    const double lidar_yaw_information = std::max(
+        yaw_axis_body.dot(lidar_rotation_information * yaw_axis_body), 0.0);
+    const double strongest_rotation_information = std::max(
+        lidar_rotation_information_eigenvalues.maxCoeff(), 1e-12);
+    const double lidar_yaw_information_ratio = std::clamp(
+        lidar_yaw_information / strongest_rotation_information, 0.0, 1.0);
+    if (!wall_yaw_prepared) {
+      prepareWallYawConstraint(
+          wall_yaw_observation, pose, lidar_yaw_information_ratio);
+      wall_yaw_prepared = true;
+    }
+    wall_yaw_information = wall_yaw_observation.valid
+        ? wall_yaw_base_information *
+            wall_yaw_observation.observability_gate
+        : 0.0;
+
     if (level_observation.valid) {
       // z 为世界竖直方向，h(R)=R*n_body。右乘姿态误差下
       // dh/d(delta_theta)=-R*hat(n_body)。该雅可比秩为二，只增加
       // roll/pitch 信息，不观测 yaw、位置或高度。
       const V3d normal_body = level_observation.normal_body.cast<double>();
-      const M3d rotation = pose.R_.cast<double>();
       const V3d predicted_up = rotation * normal_body;
       const V3d residual = V3d::UnitZ() - predicted_up;
       const M3d H = -rotation *
@@ -1663,8 +1859,7 @@ void SuperLIO::Observe(){
       sum_HTVr.head<3>().noalias() +=
           level_information * H.transpose() * residual;
     }
-    if (wall_yaw_observation.valid) {
-      const M3d rotation = pose.R_.cast<double>();
+    if (wall_yaw_observation.valid && wall_yaw_information > 0.0) {
       V3d normal_world =
           rotation * wall_yaw_observation.normal_body.cast<double>();
       normal_world.z() = 0.0;
@@ -1673,16 +1868,18 @@ void SuperLIO::Observe(){
         normal_world /= normal_norm;
         const V3d target_normal_world =
             wall_yaw_observation.target_normal_world.cast<double>();
-        const double residual = std::atan2(
+        const double raw_residual = std::atan2(
             normal_world.x() * target_normal_world.y() -
                 normal_world.y() * target_normal_world.x(),
             std::clamp(
                 normal_world.dot(target_normal_world), -1.0, 1.0));
+        const double residual_limit =
+            g_wall_yaw_max_correction_per_frame_deg * M_PI / 180.0;
+        const double residual = std::clamp(
+            raw_residual, -residual_limit, residual_limit);
 
         // 右乘误差中 R^T*z_world 对应绕世界竖直轴的纯旋转。
         // 该 rank-1 观测不会向 XY、Z、roll 或 pitch 注入信息。
-        V3d yaw_axis_body = rotation.transpose() * V3d::UnitZ();
-        yaw_axis_body.normalize();
         sum_HTVH.block<3, 3>(0, 0).noalias() +=
             wall_yaw_information *
             yaw_axis_body * yaw_axis_body.transpose();
@@ -1708,6 +1905,16 @@ void SuperLIO::Observe(){
 
     iter_num++;
   });
+
+  if (!wall_yaw_observation.extraction_attempted) {
+    ++wall_yaw_extraction_skipped_count_;
+  } else if (!wall_yaw_observation.valid) {
+    ++wall_yaw_constraint_rejected_count_;
+  } else if (wall_yaw_observation.observability_gate <= 1e-6) {
+    ++wall_yaw_constraint_gated_count_;
+  } else {
+    ++wall_yaw_constraint_accepted_count_;
+  }
 
   effective_match_count_ = 0;
   for (std::size_t i = 0; i < effect_knn_num_; ++i) {
@@ -1779,7 +1986,11 @@ void SuperLIO::Observe(){
               << " 参考有效=" << wall_yaw_observation.reference_valid
               << " 接受=" << wall_yaw_constraint_accepted_count_
               << " 拒绝=" << wall_yaw_constraint_rejected_count_
+              << " 可观测性门控=" << wall_yaw_constraint_gated_count_
+              << " 降频跳过=" << wall_yaw_extraction_skipped_count_
               << " 参考样本=" << wall_yaw_reference_samples_.size()
+              << " 局部参考=" << wall_yaw_references_.size()
+              << " 当前参考=" << wall_yaw_observation.reference_index
               << " 候选点=" << wall_yaw_observation.candidate_count
               << " 内点=" << wall_yaw_observation.inlier_count
               << " 内点比例=" << wall_yaw_observation.inlier_ratio
@@ -1789,7 +2000,10 @@ void SuperLIO::Observe(){
               << "m 水平跨度=" << wall_yaw_observation.horizontal_span
               << "m 创新=" << wall_yaw_observation.innovation_deg
               << "deg 更新后创新=" << wall_post_update_innovation_deg
-              << "deg 信息量=" << wall_yaw_information << RESET;
+              << "deg yaw相对信息强度="
+              << wall_yaw_observation.lidar_yaw_information_ratio
+              << " 门控权重=" << wall_yaw_observation.observability_gate
+              << " 信息量=" << wall_yaw_information << RESET;
   }
 
   const SE3 current_pose = kf_->GetSE3();

@@ -398,6 +398,14 @@ void LoadParamFromRos(rclcpp::Node& node)
   g_wall_yaw_ransac_iterations = std::clamp(
       g_wall_yaw_ransac_iterations, 16, 512);
 
+  node.declare_parameter<int>(
+      "lio.kf.wall_yaw_constraint.extraction_interval_frames", 3);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.extraction_interval_frames",
+      g_wall_yaw_extraction_interval_frames);
+  g_wall_yaw_extraction_interval_frames = std::clamp(
+      g_wall_yaw_extraction_interval_frames, 1, 30);
+
   node.declare_parameter<double>(
       "lio.kf.wall_yaw_constraint.plane_distance_threshold", 0.08);
   node.get_parameter(
@@ -447,7 +455,7 @@ void LoadParamFromRos(rclcpp::Node& node)
       g_wall_yaw_min_horizontal_span, 0.2, 30.0);
 
   node.declare_parameter<int>(
-      "lio.kf.wall_yaw_constraint.reference_min_frames", 20);
+      "lio.kf.wall_yaw_constraint.reference_min_frames", 15);
   node.get_parameter(
       "lio.kf.wall_yaw_constraint.reference_min_frames",
       g_wall_yaw_reference_min_frames);
@@ -455,7 +463,7 @@ void LoadParamFromRos(rclcpp::Node& node)
       g_wall_yaw_reference_min_frames, 3, 500);
 
   node.declare_parameter<double>(
-      "lio.kf.wall_yaw_constraint.reference_max_deviation_deg", 2.0);
+      "lio.kf.wall_yaw_constraint.reference_max_deviation_deg", 1.0);
   node.get_parameter(
       "lio.kf.wall_yaw_constraint.reference_max_deviation_deg",
       g_wall_yaw_reference_max_deviation_deg);
@@ -463,7 +471,56 @@ void LoadParamFromRos(rclcpp::Node& node)
       g_wall_yaw_reference_max_deviation_deg, 0.2, 15.0);
 
   node.declare_parameter<double>(
-      "lio.kf.wall_yaw_constraint.max_innovation_deg", 5.0);
+      "lio.kf.wall_yaw_constraint.reference_radius_m", 30.0);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.reference_radius_m",
+      g_wall_yaw_reference_radius_m);
+  g_wall_yaw_reference_radius_m = std::clamp(
+      g_wall_yaw_reference_radius_m, 5.0, 200.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.reference_extension_ratio", 0.75);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.reference_extension_ratio",
+      g_wall_yaw_reference_extension_ratio);
+  g_wall_yaw_reference_extension_ratio = std::clamp(
+      g_wall_yaw_reference_extension_ratio, 0.25, 0.95);
+
+  node.declare_parameter<int>(
+      "lio.kf.wall_yaw_constraint.max_references", 8);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.max_references",
+      g_wall_yaw_max_references);
+  g_wall_yaw_max_references = std::clamp(
+      g_wall_yaw_max_references, 1, 64);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.reference_min_yaw_information_ratio", 0.45);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.reference_min_yaw_information_ratio",
+      g_wall_yaw_reference_min_yaw_information_ratio);
+  g_wall_yaw_reference_min_yaw_information_ratio = std::clamp(
+      g_wall_yaw_reference_min_yaw_information_ratio, 0.0, 1.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.yaw_information_weak_ratio", 0.40);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.yaw_information_weak_ratio",
+      g_wall_yaw_information_weak_ratio);
+  g_wall_yaw_information_weak_ratio = std::clamp(
+      g_wall_yaw_information_weak_ratio, 0.0, 1.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.yaw_information_strong_ratio", 0.70);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.yaw_information_strong_ratio",
+      g_wall_yaw_information_strong_ratio);
+  g_wall_yaw_information_strong_ratio = std::clamp(
+      g_wall_yaw_information_strong_ratio,
+      g_wall_yaw_information_weak_ratio + 1e-4, 1.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.max_innovation_deg", 2.0);
   node.get_parameter(
       "lio.kf.wall_yaw_constraint.max_innovation_deg",
       g_wall_yaw_max_innovation_deg);
@@ -471,11 +528,19 @@ void LoadParamFromRos(rclcpp::Node& node)
       g_wall_yaw_max_innovation_deg, 0.2, 30.0);
 
   node.declare_parameter<double>(
-      "lio.kf.wall_yaw_constraint.stddev_deg", 0.1);
+      "lio.kf.wall_yaw_constraint.stddev_deg", 0.3);
   node.get_parameter(
       "lio.kf.wall_yaw_constraint.stddev_deg", g_wall_yaw_stddev_deg);
   g_wall_yaw_stddev_deg = std::clamp(
       g_wall_yaw_stddev_deg, 0.02, 10.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.max_correction_per_frame_deg", 0.03);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.max_correction_per_frame_deg",
+      g_wall_yaw_max_correction_per_frame_deg);
+  g_wall_yaw_max_correction_per_frame_deg = std::clamp(
+      g_wall_yaw_max_correction_per_frame_deg, 0.001, 1.0);
 
   // submaps
   node.declare_parameter<double>("lio.submap.submap_resolution", 0.0);
