@@ -62,6 +62,22 @@ protected:
     double innovation_deg = 0.0;
   };
   LevelPlaneObservation estimateLevelPlane() const;
+  struct WallYawObservation {
+    bool valid = false;
+    bool plane_valid = false;
+    bool reference_valid = false;
+    BASIC::V3 normal_body = BASIC::V3::UnitX();
+    BASIC::V3 target_normal_world = BASIC::V3::UnitX();
+    int candidate_count = 0;
+    int inlier_count = 0;
+    double inlier_ratio = 0.0;
+    double rms = 0.0;
+    double vertical_angle_deg = 0.0;
+    double vertical_span = 0.0;
+    double horizontal_span = 0.0;
+    double innovation_deg = 0.0;
+  };
+  WallYawObservation estimateWallYaw();
   virtual void UpdateMap();
   virtual void Output();
   void caceData();
@@ -121,6 +137,11 @@ protected:
   std::uint64_t level_constraint_accepted_count_ = 0;
   std::uint64_t level_constraint_rejected_count_ = 0;
   std::chrono::steady_clock::time_point last_level_constraint_log_time_{};
+  std::deque<double> wall_yaw_reference_samples_;
+  bool wall_yaw_reference_valid_ = false;
+  double wall_yaw_reference_axis_rad_ = 0.0;
+  std::uint64_t wall_yaw_constraint_accepted_count_ = 0;
+  std::uint64_t wall_yaw_constraint_rejected_count_ = 0;
 
   std::size_t effect_knn_num_ = 0;
   BASIC::VV3 points_world_v3_, points_body_v3_;

@@ -86,8 +86,8 @@ namespace LI2Sup{
   extern bool g_kf_estimate_gravity;
   extern double g_kf_quit_eps;
 
-  /// Absolute roll/pitch reference from a gravity-consistent local plane.
-  /// This observes attitude only; it never clamps position or vertical speed.
+  /// 由重力一致局部平面提供的绝对横滚/俯仰参考。
+  /// 该约束只观测姿态，不限制位置或竖直速度。
   extern bool g_level_constraint_enable;
   extern double g_level_gravity_window_sec;
   extern double g_level_max_accel_norm_ratio;
@@ -101,6 +101,22 @@ namespace LI2Sup{
   extern double g_level_max_plane_gravity_angle_deg;
   extern double g_level_max_attitude_innovation_deg;
   extern double g_level_attitude_stddev_deg;
+
+  /// 由稳定垂直墙面提供的 Manhattan 航向参考。
+  /// 该约束只观测绕世界竖直轴的旋转，不限制位置、横滚或俯仰。
+  extern bool g_wall_yaw_constraint_enable;
+  extern double g_wall_yaw_max_point_range;
+  extern int g_wall_yaw_ransac_iterations;
+  extern double g_wall_yaw_plane_distance_threshold;
+  extern int g_wall_yaw_min_plane_inliers;
+  extern double g_wall_yaw_min_plane_inlier_ratio;
+  extern double g_wall_yaw_max_vertical_angle_deg;
+  extern double g_wall_yaw_min_vertical_span;
+  extern double g_wall_yaw_min_horizontal_span;
+  extern int g_wall_yaw_reference_min_frames;
+  extern double g_wall_yaw_reference_max_deviation_deg;
+  extern double g_wall_yaw_max_innovation_deg;
+  extern double g_wall_yaw_stddev_deg;
 
   /// submaps
   extern double g_submap_resolution;

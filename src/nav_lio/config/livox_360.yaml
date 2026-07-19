@@ -77,6 +77,22 @@
     # Aggregate plane-normal uncertainty (not single-point angular noise).
     lio.kf.level_constraint.attitude_stddev_deg: 0.015
 
+    # 使用连续稳定的垂直墙面建立 Manhattan 主方向，只约束世界竖直轴上的 yaw。
+    # 墙面尺寸、方向或创新不可靠时自动拒绝，不修改 XY、Z、roll 或 pitch。
+    lio.kf.wall_yaw_constraint.enable: true
+    lio.kf.wall_yaw_constraint.max_point_range: 20.0
+    lio.kf.wall_yaw_constraint.ransac_iterations: 128
+    lio.kf.wall_yaw_constraint.plane_distance_threshold: 0.08
+    lio.kf.wall_yaw_constraint.min_plane_inliers: 40
+    lio.kf.wall_yaw_constraint.min_plane_inlier_ratio: 0.05
+    lio.kf.wall_yaw_constraint.max_vertical_angle_deg: 8.0
+    lio.kf.wall_yaw_constraint.min_vertical_span: 0.8
+    lio.kf.wall_yaw_constraint.min_horizontal_span: 1.5
+    lio.kf.wall_yaw_constraint.reference_min_frames: 20
+    lio.kf.wall_yaw_constraint.reference_max_deviation_deg: 2.0
+    lio.kf.wall_yaw_constraint.max_innovation_deg: 5.0
+    lio.kf.wall_yaw_constraint.stddev_deg: 0.1
+
     lio.output.robot: true
     lio.output.plan_env_world: false
     lio.output.plan_env_body: false

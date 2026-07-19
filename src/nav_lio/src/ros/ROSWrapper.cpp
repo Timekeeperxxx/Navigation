@@ -377,6 +377,106 @@ void LoadParamFromRos(rclcpp::Node& node)
   g_level_attitude_stddev_deg = std::clamp(
       g_level_attitude_stddev_deg, 0.005, 10.0);
 
+  node.declare_parameter<bool>(
+      "lio.kf.wall_yaw_constraint.enable", false);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.enable", g_wall_yaw_constraint_enable);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.max_point_range", 20.0);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.max_point_range",
+      g_wall_yaw_max_point_range);
+  g_wall_yaw_max_point_range = std::clamp(
+      g_wall_yaw_max_point_range, 2.0, 100.0);
+
+  node.declare_parameter<int>(
+      "lio.kf.wall_yaw_constraint.ransac_iterations", 128);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.ransac_iterations",
+      g_wall_yaw_ransac_iterations);
+  g_wall_yaw_ransac_iterations = std::clamp(
+      g_wall_yaw_ransac_iterations, 16, 512);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.plane_distance_threshold", 0.08);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.plane_distance_threshold",
+      g_wall_yaw_plane_distance_threshold);
+  g_wall_yaw_plane_distance_threshold = std::clamp(
+      g_wall_yaw_plane_distance_threshold, 0.02, 0.3);
+
+  node.declare_parameter<int>(
+      "lio.kf.wall_yaw_constraint.min_plane_inliers", 40);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.min_plane_inliers",
+      g_wall_yaw_min_plane_inliers);
+  g_wall_yaw_min_plane_inliers = std::clamp(
+      g_wall_yaw_min_plane_inliers, 10, 5000);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.min_plane_inlier_ratio", 0.05);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.min_plane_inlier_ratio",
+      g_wall_yaw_min_plane_inlier_ratio);
+  g_wall_yaw_min_plane_inlier_ratio = std::clamp(
+      g_wall_yaw_min_plane_inlier_ratio, 0.005, 0.9);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.max_vertical_angle_deg", 8.0);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.max_vertical_angle_deg",
+      g_wall_yaw_max_vertical_angle_deg);
+  g_wall_yaw_max_vertical_angle_deg = std::clamp(
+      g_wall_yaw_max_vertical_angle_deg, 1.0, 30.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.min_vertical_span", 0.8);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.min_vertical_span",
+      g_wall_yaw_min_vertical_span);
+  g_wall_yaw_min_vertical_span = std::clamp(
+      g_wall_yaw_min_vertical_span, 0.2, 10.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.min_horizontal_span", 1.5);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.min_horizontal_span",
+      g_wall_yaw_min_horizontal_span);
+  g_wall_yaw_min_horizontal_span = std::clamp(
+      g_wall_yaw_min_horizontal_span, 0.2, 30.0);
+
+  node.declare_parameter<int>(
+      "lio.kf.wall_yaw_constraint.reference_min_frames", 20);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.reference_min_frames",
+      g_wall_yaw_reference_min_frames);
+  g_wall_yaw_reference_min_frames = std::clamp(
+      g_wall_yaw_reference_min_frames, 3, 500);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.reference_max_deviation_deg", 2.0);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.reference_max_deviation_deg",
+      g_wall_yaw_reference_max_deviation_deg);
+  g_wall_yaw_reference_max_deviation_deg = std::clamp(
+      g_wall_yaw_reference_max_deviation_deg, 0.2, 15.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.max_innovation_deg", 5.0);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.max_innovation_deg",
+      g_wall_yaw_max_innovation_deg);
+  g_wall_yaw_max_innovation_deg = std::clamp(
+      g_wall_yaw_max_innovation_deg, 0.2, 30.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.stddev_deg", 0.1);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.stddev_deg", g_wall_yaw_stddev_deg);
+  g_wall_yaw_stddev_deg = std::clamp(
+      g_wall_yaw_stddev_deg, 0.02, 10.0);
+
   // submaps
   node.declare_parameter<double>("lio.submap.submap_resolution", 0.0);
   node.get_parameter("lio.submap.submap_resolution", g_submap_resolution);

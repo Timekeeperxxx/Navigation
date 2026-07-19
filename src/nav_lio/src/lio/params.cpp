@@ -81,10 +81,23 @@ namespace LI2Sup{
   double g_level_min_plane_inlier_ratio = 0.12;
   double g_level_max_plane_gravity_angle_deg = 3.0;
   double g_level_max_attitude_innovation_deg = 6.0;
-  // Statistical uncertainty of one aggregated RANSAC/PCA plane normal, not
-  // the noise of an individual point. Scene37 shows this puts the absolute
-  // level observation in the same information range as scan matching.
+  // 这是聚合 RANSAC/PCA 平面法向的不确定度，不是单点噪声。
+  // Scene37 表明该取值可让绝对水平观测与点云匹配处于相近的信息量范围。
   double g_level_attitude_stddev_deg = 0.015;
+
+  bool g_wall_yaw_constraint_enable = false;
+  double g_wall_yaw_max_point_range = 20.0;
+  int g_wall_yaw_ransac_iterations = 128;
+  double g_wall_yaw_plane_distance_threshold = 0.08;
+  int g_wall_yaw_min_plane_inliers = 40;
+  double g_wall_yaw_min_plane_inlier_ratio = 0.05;
+  double g_wall_yaw_max_vertical_angle_deg = 8.0;
+  double g_wall_yaw_min_vertical_span = 0.8;
+  double g_wall_yaw_min_horizontal_span = 1.5;
+  int g_wall_yaw_reference_min_frames = 20;
+  double g_wall_yaw_reference_max_deviation_deg = 2.0;
+  double g_wall_yaw_max_innovation_deg = 5.0;
+  double g_wall_yaw_stddev_deg = 0.1;
 
   /// submap 
   double g_submap_resolution;
