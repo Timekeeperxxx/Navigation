@@ -128,6 +128,8 @@ def generate_launch_description():
     lidar_imu_roll_deg = LaunchConfiguration("lidar_imu_roll_deg")
     lidar_imu_pitch_deg = LaunchConfiguration("lidar_imu_pitch_deg")
     lidar_imu_yaw_deg = LaunchConfiguration("lidar_imu_yaw_deg")
+    offline_bag = LaunchConfiguration("offline_bag")
+    fastdds_builtin_transports = LaunchConfiguration("fastdds_builtin_transports")
     loop_closure = LaunchConfiguration("loop_closure")
     loop_search_radius = LaunchConfiguration("loop_search_radius")
     loop_icp_score_threshold = LaunchConfiguration("loop_icp_score_threshold")
@@ -195,6 +197,7 @@ def generate_launch_description():
                 "lio.sensor.imu_nba": imu_nba,
                 "lio.sensor.imu_nbg": imu_nbg,
                 "lio.sensor.use_query_time_undistort": use_query_time_undistort,
+                "lio.ros.offline_reliable_qos": offline_bag,
                 "lio.kf.estimate_gravity": estimate_gravity,
                 "lio.extrinsic.lidar_imu_roll_deg": lidar_imu_roll_deg,
                 "lio.extrinsic.lidar_imu_pitch_deg": lidar_imu_pitch_deg,
@@ -256,13 +259,16 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
+        DeclareLaunchArgument("fastdds_builtin_transports", default_value="UDPv4"),
+        SetEnvironmentVariable(
+            "FASTDDS_BUILTIN_TRANSPORTS", fastdds_builtin_transports),
         # Large Livox and PointCloud2 messages must be handed to the FastDDS
         # writer thread instead of blocking the ROS executor during publish().
         SetEnvironmentVariable("RMW_FASTRTPS_PUBLICATION_MODE", "ASYNCHRONOUS"),
         DeclareLaunchArgument("map_dir", default_value="/tmp/navigation_map"),
         DeclareLaunchArgument("map_name", default_value="map.pcd"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
+        DeclareLaunchArgument("offline_bag", default_value="false"),
         DeclareLaunchArgument("launch_livox", default_value="true"),
         DeclareLaunchArgument("launch_lio", default_value="true"),
         DeclareLaunchArgument("launch_terrain", default_value="true"),

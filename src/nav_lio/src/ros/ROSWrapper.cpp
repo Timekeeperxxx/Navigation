@@ -718,30 +718,52 @@ ROSWrapper::ROSWrapper(const rclcpp::NodeOptions& options)
 
 void ROSWrapper::setupIO(){
   //// input ======================================
-  cb_sensor_ = this->create_callback_group(
+  cb_imu_ = this->create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive);
+  cb_lidar_ = this->create_callback_group(
       rclcpp::CallbackGroupType::MutuallyExclusive);
   cb_processing_ = this->create_callback_group(
       rclcpp::CallbackGroupType::MutuallyExclusive);
 
-  rclcpp::SubscriptionOptions sub_opt;
-  sub_opt.callback_group = cb_sensor_;
+  rclcpp::SubscriptionOptions imu_sub_opt;
+  imu_sub_opt.callback_group = cb_imu_;
+  rclcpp::SubscriptionOptions lidar_sub_opt;
+  lidar_sub_opt.callback_group = cb_lidar_;
 
-  // Sensor streams must never back-pressure the Livox publishing threads.
-  // Small best-effort histories preserve the newest measurements instead of
-  // replaying seconds of stale IMU/LiDAR data after a temporary overload.
+  const bool offline_reliable_qos =
+      this->declare_parameter<bool>("lio.ros.offline_reliable_qos", false);
+  const int imu_qos_depth =
+      this->declare_parameter<int>(
+          "lio.ros.imu_qos_depth", offline_reliable_qos ? 2048 : 512);
+  const int lidar_qos_depth =
+      this->declare_parameter<int>(
+          "lio.ros.lidar_qos_depth", offline_reliable_qos ? 100 : 5);
+  if (imu_qos_depth < 2 || lidar_qos_depth < 2) {
+    throw std::invalid_argument("sensor QoS depth must be at least 2");
+  }
+
+  // Live sensors favor freshness; offline rosbag replay favors completeness.
   auto imu_qos = rclcpp::SensorDataQoS();
-  // MID-360 IMU is normally 200 Hz. Keep enough IMU history to cover the
-  // complete five-frame LiDAR history plus scheduling jitter.
-  imu_qos.keep_last(512);
+  imu_qos.keep_last(static_cast<std::size_t>(imu_qos_depth));
 
   auto lidar_qos = rclcpp::SensorDataQoS();
-  lidar_qos.keep_last(5);
+  lidar_qos.keep_last(static_cast<std::size_t>(lidar_qos_depth));
+  if (offline_reliable_qos) {
+    imu_qos.reliable();
+    lidar_qos.reliable();
+  }
+
+  LOG(INFO) << GREEN
+            << " ---> [SuperLIO]: sensor QoS mode="
+            << (offline_reliable_qos ? "offline-reliable" : "live-best-effort")
+            << " imu_depth=" << imu_qos_depth
+            << " lidar_depth=" << lidar_qos_depth << RESET;
 
   sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
       g_imu_topic,
       imu_qos,
       std::bind(&ROSWrapper::imuHandler, this, std::placeholders::_1),
-      sub_opt);
+      imu_sub_opt);
 
   if (g_lidar_type == LID_TYPE::LIVOX) {
     sub_lidar_ =
@@ -749,14 +771,14 @@ void ROSWrapper::setupIO(){
             g_lidar_topic,
             lidar_qos,
             std::bind(&ROSWrapper::livoxHandler, this, std::placeholders::_1),
-            sub_opt);
+            lidar_sub_opt);
   } else {
     sub_lidar_std_ =
         this->create_subscription<sensor_msgs::msg::PointCloud2>(
             g_lidar_topic,
             lidar_qos,
             std::bind(&ROSWrapper::stdMsgHandler, this, std::placeholders::_1),
-            sub_opt);
+            lidar_sub_opt);
   }
 
   pause_mapping_service_ = this->create_service<std_srvs::srv::Trigger>(
@@ -811,9 +833,14 @@ void ROSWrapper::pauseMapping(
   }
 
   response->success = true;
-  response->message = "SuperLIO input frozen; final map state is ready to save.";
+  response->message =
+      "SuperLIO input frozen; received_lidar=" +
+      std::to_string(received_lidar_count_) +
+      " source_gaps=" + std::to_string(lidar_source_gap_count_);
   LOG(INFO) << GREEN
-            << " ---> [SuperLIO]: mapping input frozen, pending sensor buffers cleared."
+            << " ---> [SuperLIO]: mapping input frozen, pending sensor buffers cleared. "
+            << "received_lidar=" << received_lidar_count_
+            << " source_gaps=" << lidar_source_gap_count_
             << RESET;
 }
 
@@ -883,6 +910,7 @@ void ROSWrapper::livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
   if (mapping_paused_.load()) return;
   if(msg->point_num < 10) return;
 
+  ++received_lidar_count_;
   const auto arrival_time = std::chrono::steady_clock::now();
   const double source_time = stampToSec(msg->header.stamp);
   if (last_lidar_source_time_ > 0.0) {
@@ -913,6 +941,7 @@ void ROSWrapper::livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
                    << source_interval << "s arrival_dt=" << arrival_interval << "s"
                    << RESET;
     } else if (source_interval < 0.08 || source_interval > 0.12) {
+      ++lidar_source_gap_count_;
       LOG(WARNING) << YELLOW
                    << " ---> [SuperLIO]: lidar source timestamp gap. source_dt="
                    << source_interval << "s arrival_dt=" << arrival_interval << "s"
@@ -1484,7 +1513,7 @@ void ROSWrapper::set_initial_data(BASIC::SE3& init_pose, bool& flg_get_init_gues
           V3 init_translation;
           init_translation << msg->pose.pose.position.x,
                               msg->pose.pose.position.y,
-                              0.2;
+                              msg->pose.pose.position.z;
 
           double x = msg->pose.pose.orientation.x;
           double y = msg->pose.pose.orientation.y;

@@ -100,7 +100,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "scene_dir",
-            default_value="/home/jetson/Project/BOTDOG/MAPS/Scene23_多楼层",
+            default_value="/home/jetson/Projects/Maps/Scene23_多楼层",
         ),
         DeclareLaunchArgument("map_pcd", default_value=""),
         DeclareLaunchArgument("ground_pcd", default_value=""),

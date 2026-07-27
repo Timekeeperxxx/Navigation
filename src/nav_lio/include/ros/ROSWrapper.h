@@ -93,7 +93,7 @@ public:
   void set_initial_data(BASIC::SE3& init_pose, bool& flg_get_init_guess, bool flg_finish_init = false);
 
   rclcpp::CallbackGroup::SharedPtr getSensorCallbackGroup() {
-    return cb_sensor_;
+    return cb_lidar_;
   }
 
   rclcpp::CallbackGroup::SharedPtr getProcessingCallbackGroup() {
@@ -112,7 +112,8 @@ private:
   void setupIO();
 
 private:
-  rclcpp::CallbackGroup::SharedPtr cb_sensor_;
+  rclcpp::CallbackGroup::SharedPtr cb_imu_;
+  rclcpp::CallbackGroup::SharedPtr cb_lidar_;
   rclcpp::CallbackGroup::SharedPtr cb_processing_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr pause_mapping_service_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
@@ -141,6 +142,8 @@ private:
   std::uint64_t pruned_imu_buffer_count_ = 0;
   std::uint64_t sync_window_completed_count_ = 0;
   std::uint64_t sync_window_dropped_count_ = 0;
+  std::uint64_t received_lidar_count_ = 0;
+  std::uint64_t lidar_source_gap_count_ = 0;
   bool sync_health_unhealthy_ = false;
   std::chrono::steady_clock::time_point sync_health_window_start_{};
 

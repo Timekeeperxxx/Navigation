@@ -234,8 +234,35 @@ bool SuperLIOReLoc::kf_init(){
     LOG(INFO) << RED << " ---> Global ICP Converged Fail! FitnessScore: " << icp.getFitnessScore() << RESET;
     return false;
   } else{
-    init_guess_T = icp.getFinalTransformation().cast<scalar>();
-    LOG(INFO) << GREEN << " ---> Global ICP Converged Succeed! FitnessScore: " << icp.getFitnessScore() << RESET;
+    const M4 icp_result = icp.getFinalTransformation().cast<scalar>();
+    const V3 correction = icp_result.block<3, 1>(0, 3) - init_guess_T.block<3, 1>(0, 3);
+    const M3 rotation_delta =
+        init_guess_T.block<3, 3>(0, 0).transpose() * icp_result.block<3, 3>(0, 0);
+    const double rotation_correction = Eigen::AngleAxis<scalar>(rotation_delta).angle();
+    constexpr double max_xy_correction = 2.0;
+    constexpr double max_z_correction = 0.75;
+    constexpr double max_rotation_correction = M_PI / 3.0;
+    const bool implausible_correction =
+        correction.head<2>().norm() > max_xy_correction ||
+        std::abs(correction(2)) > max_z_correction ||
+        std::abs(rotation_correction) > max_rotation_correction;
+
+    if (implausible_correction)
+    {
+      LOG(WARNING) << YELLOW
+                   << " ---> Global ICP result rejected as an alias match. "
+                   << "correction_xyz=" << correction.transpose()
+                   << " rotation=" << rotation_correction
+                   << " rad; keep the supplied initial pose."
+                   << RESET;
+    }
+    else
+    {
+      init_guess_T = icp_result;
+      LOG(INFO) << GREEN
+                << " ---> Global ICP Converged Succeed! FitnessScore: "
+                << icp.getFitnessScore() << RESET;
+    }
   }
 
   LOG(INFO) << GREEN << "\n" << init_guess_T << RESET;

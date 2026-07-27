@@ -26,11 +26,10 @@ int main(int argc, char** argv){
     data_wrapper->getProcessingCallbackGroup()
   );
 
-  // Sensor ingestion and LIO processing must be able to run concurrently.
-  // Two threads are sufficient on Jetson: one keeps IMU/LiDAR callbacks
-  // responsive while the other performs the heavier scan matching work.
+  // IMU ingestion, LiDAR conversion and LIO processing have independent
+  // callback groups, so each needs a worker during offline replay.
   rclcpp::executors::MultiThreadedExecutor executor(
-      rclcpp::ExecutorOptions(), 2);
+      rclcpp::ExecutorOptions(), 3);
   executor.add_node(data_wrapper);
   executor.spin();
 
