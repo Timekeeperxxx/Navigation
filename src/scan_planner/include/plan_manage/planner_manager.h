@@ -50,6 +50,7 @@ namespace scan_planner
     BsplineOptimizer::Ptr bspline_optimizer_rebound_;
 
     int continuous_failures_count_{0};
+    bool planar_motion_{false};
 
     void updateTrajInfo(const UniformBspline &position_traj, const rclcpp::Time time_now);
     bool checkDynamicFeasibility(UniformBspline position_traj);

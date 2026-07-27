@@ -66,6 +66,7 @@ namespace scan_planner
     getParam(nh, "manager/feasibility_tolerance", pp_.feasibility_tolerance_, 0.0);
     getParam(nh, "manager/control_points_distance", pp_.ctrl_pt_dist, -1.0);
     getParam(nh, "manager/planning_horizon", pp_.planning_horizon_, 5.0);
+    getParam(nh, "manager/planar_motion", planar_motion_, false);
 
     local_data_.traj_id_ = 0;
     grid_map_.reset(new GridMap);
@@ -135,9 +136,17 @@ namespace scan_planner
         {
           Eigen::Vector3d horizon_dir = ((start_pt - local_target_pt).cross(Eigen::Vector3d(0, 0, 1))).normalized();
           Eigen::Vector3d vertical_dir = ((start_pt - local_target_pt).cross(horizon_dir)).normalized();
+          Eigen::Vector3d vertical_perturbation = Eigen::Vector3d::Zero();
+          if (!planar_motion_)
+          {
+            vertical_perturbation =
+                (((double)rand()) / RAND_MAX - 0.5) *
+                (start_pt - local_target_pt).norm() * vertical_dir * 0.4 *
+                (-0.978 / (continuous_failures_count_ + 0.989) + 0.989);
+          }
           Eigen::Vector3d random_inserted_pt = (start_pt + local_target_pt) / 2 +
                                                (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * horizon_dir * 0.8 * (-0.978 / (continuous_failures_count_ + 0.989) + 0.989) +
-                                               (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * vertical_dir * 0.4 * (-0.978 / (continuous_failures_count_ + 0.989) + 0.989);
+                                               vertical_perturbation;
           Eigen::MatrixXd pos(3, 3);
           pos.col(0) = start_pt;
           pos.col(1) = random_inserted_pt;

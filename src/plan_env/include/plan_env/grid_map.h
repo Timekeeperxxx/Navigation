@@ -72,6 +72,7 @@ struct MappingParameters {
   double obstacles_inflation_z_up, obstacles_inflation_z_down;
   double double_cylinder_radius_, double_cylinder_offset_;
   double double_cylinder_center_offset_;
+  double collision_inflation_margin_xy_;
   bool map_sliding_en_;
   double map_sliding_thresh_;
   int map_sliding_thresh_vox_;
@@ -101,6 +102,11 @@ struct MappingParameters {
   bool cloud_is_world_;
   bool need_extrinsic_;
   double lidar_min_range_;
+  bool self_filter_enabled_;
+  double self_filter_radius_;
+  double self_filter_padding_;
+  double self_filter_z_min_offset_;
+  double self_filter_z_max_above_sensor_;
   Eigen::Matrix4d lidar_extrinsic_;
   Eigen::Matrix4d depth_extrinsic_;
 
@@ -123,6 +129,8 @@ struct MappingData {
   Eigen::Vector3d ray_pos_;
   Eigen::Quaterniond ray_q_;
   Eigen::Vector3d sliding_map_frame_pos_;
+  double body_yaw_;
+  bool has_body_pose_;
 
   // depth image data
 
@@ -231,6 +239,8 @@ private:
   // main update process
   void projectDepthImage();
   void raycastProcess();
+  void clearRobotSelfOccupancy();
+  bool isInsideRobotSelfMask(const Eigen::Vector3d& point) const;
 
   inline void inflatePoint(const Eigen::Vector3i& pt, int inf_step_xy, int inf_step_z_up, int inf_step_z_down, vector<Eigen::Vector3i>& pts);
   inline int getInflateOccupancyFromBuffer(Eigen::Vector3d pos, const std::vector<char>& buffer);

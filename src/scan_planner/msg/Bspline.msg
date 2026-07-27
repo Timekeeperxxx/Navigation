@@ -1,5 +1,6 @@
 int32 order
 int64 traj_id
+bool emergency_stop
 builtin_interfaces/Time start_time
 
 float64[] knots

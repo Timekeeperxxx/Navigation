@@ -52,6 +52,27 @@ target_link_libraries(plan_env
   ${PCL_LIBRARIES}
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_cloud_qos
+    test/test_cloud_qos.cpp
+  )
+  target_include_directories(test_cloud_qos PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  ament_target_dependencies(test_cloud_qos
+    rclcpp
+  )
+
+  ament_add_gtest(test_robot_self_filter
+    test/test_robot_self_filter.cpp
+  )
+  target_include_directories(test_robot_self_filter PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+endif()
+
 install(TARGETS plan_env
   EXPORT export_plan_env
   ARCHIVE DESTINATION lib

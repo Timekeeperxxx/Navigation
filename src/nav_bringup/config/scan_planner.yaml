@@ -21,6 +21,11 @@ scan_planner_node:
     # SCAN FSM wait for a new target after the body reaches this XY radius.
     "fsm/final_goal_tolerance": 0.10
     "fsm/emergency_time_": 1.0
+    # A blocked path stays stopped while SCAN searches for a bypass.  Bound
+    # retries so a temporarily impossible route does not saturate the Jetson,
+    # and never discard the active target merely because the safety layer is
+    # holding execution frozen.
+    "fsm/frozen_replan_retry_interval": 0.50
     "fsm/fail_safe": true
     "fsm/max_replan_fail_count": 1000
     "fsm/is_real_world": true
@@ -30,9 +35,16 @@ scan_planner_node:
     "grid_map/sensor_type": "lidar"
     "grid_map/cloud_is_world": true
     "grid_map/need_extrinsic": false
-    # B2 body/leg returns are inside about 0.60 m of the Mid-360.  Filter them
-    # before occupancy inflation while retaining nearby external obstacles.
-    "grid_map/lidar_min_range": 0.70
+    # Keep only the Mid-360 hardware blind range here.  The pose-aware body
+    # mask below removes B2 body/leg returns without hiding nearby walls.
+    "grid_map/lidar_min_range": 0.10
+    "grid_map/self_filter_enabled": true
+    # Keep the LiDAR body-return mask independent from the larger planning
+    # footprint, otherwise close walls can be erased as if they were the robot.
+    "grid_map/self_filter_radius": 0.27
+    "grid_map/self_filter_padding": 0.0
+    "grid_map/self_filter_z_min_offset": -0.15
+    "grid_map/self_filter_z_max_above_sensor": 0.05
     "grid_map/resolution": 0.05
     "grid_map/sliding_map_size_x": 10.0
     "grid_map/sliding_map_size_y": 10.0
@@ -44,12 +56,22 @@ scan_planner_node:
     "grid_map/map_sliding_thresh": 0.2
     # Replaces the previous Unitree Go2 collision profile backed up separately.
     # Measured from map -> base_footprint along the robot heading, place the
-    # two B2 collision-circle centres about 0.225m and 0.675m behind the TF
+    # two B2 collision-circle centres about 0.22m and 0.63m behind the TF
     # origin.  center_offset is their midpoint and offset is half their gap.
     "grid_map/body_height": 0.32
-    "grid_map/double_cylinder_radius": 0.25
-    "grid_map/double_cylinder_offset": 0.225
-    "grid_map/double_cylinder_center_offset": -0.45
+    # Radius 0.27m keeps more corner clearance than the old 0.225m footprint,
+    # while leaving one map voxel of start clearance in narrow corridors.
+    # The front circle stays 0.05m farther forward and both circles overlap.
+    "grid_map/double_cylinder_radius": 0.27
+    "grid_map/double_cylinder_offset": 0.205
+    "grid_map/double_cylinder_center_offset": -0.425
+    # One voxel of hard-layer margin keeps the planned curve off inner-corner
+    # apexes: the executor tracks the chord (time_forward lookahead + the
+    # 0.08 m/s vy clamp) and cuts inside the planned arc, so a plan touching
+    # the physical boundary gets executed into the wall.  Boundary deadlocks
+    # that this margin can create are recovered by the monitor's
+    # clearance-escape path.
+    "grid_map/collision_inflation_margin_xy": 0.05
     "grid_map/obstacles_inflation_z_up": 0.10
     "grid_map/obstacles_inflation_z_down": 0.33
     "grid_map/ground_height": 0.0
@@ -71,19 +93,31 @@ scan_planner_node:
     "grid_map/vis_height": 0.3
     "grid_map/show_occ_time": false
 
-    "manager/max_vel": 0.35
+    # Plan no faster than the controller can execute (max_vx 0.25): a 0.35
+    # time-parameterized plan makes the robot fall behind everywhere, and at
+    # corners the accumulated pos_err vector points through the inner apex.
+    "manager/max_vel": 0.22
     "manager/max_acc": 0.50
     "manager/max_jerk": 4.0
     "manager/control_points_distance": 0.20
     "manager/feasibility_tolerance": 0.5
     "manager/planning_horizon": 3.0
+    # SCAN originated as a 3D aerial planner.  B2 may detour laterally but
+    # cannot use random vertical waypoints to get around an obstacle.
+    "manager/planar_motion": true
 
     "optimization/lambda_smooth": 1.0
-    "optimization/lambda_collision": 1.0
+    "optimization/lambda_collision": 5.0
     "optimization/lambda_feasibility": 0.1
     "optimization/lambda_fitness": 1.0
-    "optimization/dist0": 0.20
-    "optimization/max_vel": 0.35
+    "optimization/dist0": 0.30
+    # 起点碰撞豁免半径：机器人当前足迹陷入膨胀壳时（贴墙漂移、有人贴身），
+    # 轨迹起点附近的占用不否决整条重规划——否则所有重规划被拒、原地冻结
+    # （7月24 22:15 实跑日志：40 秒内 2030 次拒绝）。超出该半径照常拒绝；
+    # 执行安全由动态避障监控层独立把关（clearance_escape 单调脱离条件）。
+    "optimization/start_collision_exempt_radius": 0.40
+    # Keep in lockstep with manager/max_vel above.
+    "optimization/max_vel": 0.22
     "optimization/vel_tolerance": 1.0
     "optimization/max_acc": 0.50
     "optimization/acc_tolerance": 1.0
@@ -96,8 +130,16 @@ closed_loop_controller:
     safety_execution_frozen_topic: "/planning/safety_execution_frozen"
     execution_path_publish_period: 0.2
     execution_path_sample_dt: 0.25
-    time_forward: 0.8
-    heading_error_threshold: 0.8
+    # Desired yaw is the chord toward the point time_forward ahead on the
+    # B-spline; the collision model assumed the tangent.  A shorter lookahead
+    # keeps the chord close to the tangent in 90-degree corners so the body
+    # stops cutting inside the planned arc.
+    time_forward: 0.4
+    # Walk-while-misaligned limit.  0.8 rad (46 deg) let the robot carry a
+    # large heading offset through corners where the 0.08 m/s vy clamp then
+    # bent the executed motion toward the inner wall; 0.5 rad forces more
+    # turn-in-place at sharp corners instead.
+    heading_error_threshold: 0.5
     kp_pos: 0.8
     kp_yaw: 1.5
     # Conservative B2 navigation speed; dynamic avoidance can still scale it

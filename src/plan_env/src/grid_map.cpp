@@ -1,4 +1,6 @@
 #include "plan_env/grid_map.h"
+#include "plan_env/cloud_qos.h"
+#include "plan_env/robot_self_filter.h"
 #include <chrono>
 #include <cstring>
 #include <cmath>
@@ -108,6 +110,11 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   getParam(node_, "grid_map/double_cylinder_radius", mp_.double_cylinder_radius_, -1.0);
   getParam(node_, "grid_map/double_cylinder_offset", mp_.double_cylinder_offset_, 0.0);
   getParam(node_, "grid_map/double_cylinder_center_offset", mp_.double_cylinder_center_offset_, 0.0);
+  getParam(
+      node_, "grid_map/collision_inflation_margin_xy",
+      mp_.collision_inflation_margin_xy_, 0.0);
+  mp_.collision_inflation_margin_xy_ =
+      std::max(0.0, mp_.collision_inflation_margin_xy_);
   getParam(node_, "grid_map/map_sliding_en", mp_.map_sliding_en_, true);
   getParam(node_, "grid_map/map_sliding_thresh", mp_.map_sliding_thresh_, mp_.resolution_);
 
@@ -140,6 +147,15 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   getParam(node_, "grid_map/cloud_is_world", mp_.cloud_is_world_, true);
   getParam(node_, "grid_map/need_extrinsic", mp_.need_extrinsic_, true);
   getParam(node_, "grid_map/lidar_min_range", mp_.lidar_min_range_, 0.0);
+  getParam(node_, "grid_map/self_filter_enabled", mp_.self_filter_enabled_, true);
+  getParam(
+      node_, "grid_map/self_filter_radius",
+      mp_.self_filter_radius_, mp_.double_cylinder_radius_);
+  getParam(node_, "grid_map/self_filter_padding", mp_.self_filter_padding_, 0.10);
+  getParam(node_, "grid_map/self_filter_z_min_offset", mp_.self_filter_z_min_offset_, -0.15);
+  getParam(
+      node_, "grid_map/self_filter_z_max_above_sensor",
+      mp_.self_filter_z_max_above_sensor_, 0.05);
 
   mp_.lidar_extrinsic_ <<
       1.0, 0.0, 0.0, -0.01100,
@@ -228,7 +244,8 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
             "/grid_map/sensor_pose", 50, std::bind(&GridMap::sensorPoseCallback, this, std::placeholders::_1));
     cloud_sub_ =
         node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-            "/grid_map/cloud", 10, std::bind(&GridMap::cloudCallback, this, std::placeholders::_1));
+            "/grid_map/cloud", plan_env::cloudSensorQos(),
+            std::bind(&GridMap::cloudCallback, this, std::placeholders::_1));
   }
 
   sliding_map_frame_sub_ =
@@ -257,6 +274,8 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   md_.ray_pos_.setZero();
   md_.sliding_map_frame_pos_.setZero();
   md_.ray_q_ = Eigen::Quaterniond::Identity();
+  md_.body_yaw_ = 0.0;
+  md_.has_body_pose_ = false;
 
   md_.fuse_time_ = 0.0;
   md_.update_num_ = 0;
@@ -282,7 +301,12 @@ void GridMap::updateMapBoundaryFromIndex()
 
 void GridMap::rebuildInflationOffsets()
 {
-  const double double_radius = std::max(0.0, mp_.double_cylinder_radius_);
+  // Keep the published/visualized physical circles unchanged, but give SCAN
+  // an explicit planning clearance so it does not enter a narrow gap and
+  // leave the downstream safety monitor with no collision-free escape.
+  const double double_radius =
+      std::max(0.0, mp_.double_cylinder_radius_) +
+      std::max(0.0, mp_.collision_inflation_margin_xy_);
   const int inf_step_xy = ceil(double_radius / mp_.resolution_);
   const int inf_step_z_up = ceil(mp_.obstacles_inflation_z_up / mp_.resolution_);
   const int inf_step_z_down = ceil(mp_.obstacles_inflation_z_down / mp_.resolution_);
@@ -615,9 +639,11 @@ void GridMap::projectDepthImage()
 
 void GridMap::raycastProcess()
 {
-  // if (md_.proj_points_.size() == 0)
   if (md_.proj_points_cnt == 0)
+  {
+    clearRobotSelfOccupancy();
     return;
+  }
 
   updateSlidingMap(md_.ray_pos_);
 
@@ -776,6 +802,79 @@ void GridMap::raycastProcess()
                  mp_.clamp_max_log_);
     applyOccupancyUpdate(idx, new_log_odds);
   }
+
+  clearRobotSelfOccupancy();
+}
+
+bool GridMap::isInsideRobotSelfMask(const Eigen::Vector3d& point) const
+{
+  if (!mp_.self_filter_enabled_ || !md_.has_body_pose_ || !md_.has_ray_pose_)
+    return false;
+
+  const double min_z = md_.sliding_map_frame_pos_.z() + mp_.self_filter_z_min_offset_;
+  const double max_z = md_.ray_pos_.z() + mp_.self_filter_z_max_above_sensor_;
+  return plan_env::insideRobotSelfMask(
+      point.x(), point.y(), point.z(),
+      md_.sliding_map_frame_pos_.x(), md_.sliding_map_frame_pos_.y(), md_.body_yaw_,
+      std::min(min_z, max_z), std::max(min_z, max_z),
+      mp_.self_filter_radius_, mp_.double_cylinder_offset_,
+      mp_.double_cylinder_center_offset_, mp_.self_filter_padding_);
+}
+
+void GridMap::clearRobotSelfOccupancy()
+{
+  if (!mp_.self_filter_enabled_ || !md_.has_body_pose_ || !md_.has_ray_pose_)
+    return;
+
+  const double radius =
+      std::max(0.0, mp_.self_filter_radius_) + std::max(0.0, mp_.self_filter_padding_);
+  const double reach =
+      std::max(radius, std::abs(mp_.double_cylinder_center_offset_) +
+                           std::abs(mp_.double_cylinder_offset_) + radius);
+  if (radius <= 0.0 || reach <= 0.0)
+    return;
+
+  const double min_z = std::min(
+      md_.sliding_map_frame_pos_.z() + mp_.self_filter_z_min_offset_,
+      md_.ray_pos_.z() + mp_.self_filter_z_max_above_sensor_);
+  const double max_z = std::max(
+      md_.sliding_map_frame_pos_.z() + mp_.self_filter_z_min_offset_,
+      md_.ray_pos_.z() + mp_.self_filter_z_max_above_sensor_);
+  Eigen::Vector3i min_id;
+  Eigen::Vector3i max_id;
+  posToIndex(
+      Eigen::Vector3d(
+          md_.sliding_map_frame_pos_.x() - reach,
+          md_.sliding_map_frame_pos_.y() - reach,
+          min_z),
+      min_id);
+  posToIndex(
+      Eigen::Vector3d(
+          md_.sliding_map_frame_pos_.x() + reach,
+          md_.sliding_map_frame_pos_.y() + reach,
+          max_z),
+      max_id);
+  boundIndex(min_id);
+  boundIndex(max_id);
+
+  for (int x = min_id.x(); x <= max_id.x(); ++x)
+    for (int y = min_id.y(); y <= max_id.y(); ++y)
+      for (int z = min_id.z(); z <= max_id.z(); ++z)
+      {
+        const Eigen::Vector3i id(x, y, z);
+        const int addr = toAddress(id);
+        if (md_.occupancy_buffer_[addr] <= mp_.min_occupancy_log_)
+          continue;
+
+        Eigen::Vector3d point;
+        indexToPos(id, point);
+        if (!isInsideRobotSelfMask(point))
+          continue;
+
+        applyOccupancyUpdate(id, mp_.clamp_min_log_);
+        md_.count_hit_[addr] = 0;
+        md_.count_hit_and_miss_[addr] = 0;
+      }
 }
 
 Eigen::Vector3d GridMap::closetPointInMap(const Eigen::Vector3d &pt, const Eigen::Vector3d &ray_pos)
@@ -940,6 +1039,18 @@ void GridMap::slidingMapFrameCallback(const nav_msgs::msg::Odometry::ConstShared
 {
   const geometry_msgs::msg::Point &pos = pose->pose.pose.position;
   md_.sliding_map_frame_pos_ = Eigen::Vector3d(pos.x, pos.y, pos.z);
+
+  const geometry_msgs::msg::Quaternion &orientation = pose->pose.pose.orientation;
+  Eigen::Quaterniond body_q(
+      orientation.w, orientation.x, orientation.y, orientation.z);
+  if (body_q.norm() < 1e-6)
+    return;
+  body_q.normalize();
+  const Eigen::Vector3d heading = body_q.toRotationMatrix().col(0);
+  if (heading.head<2>().squaredNorm() < 1e-8)
+    return;
+  md_.body_yaw_ = std::atan2(heading.y(), heading.x());
+  md_.has_body_pose_ = true;
 }
 
 void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &img)
@@ -988,10 +1099,12 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
     }
     const Eigen::Vector3d devi = pt_world - ray_pos;
     const double ray_length = devi.norm();
-    // Reject returns from the robot body before raycasting and footprint
-    // inflation.  Without this filter, body/leg returns become a dense
-    // inflated shell that follows the robot and is mistaken for an obstacle.
+    // Keep only the sensor's true blind range here.  Robot body/leg returns
+    // are removed by the pose-aware self mask below so a nearby wall remains
+    // visible to planning.
     if (ray_length < mp_.lidar_min_range_)
+      continue;
+    if (isInsideRobotSelfMask(pt_world))
       continue;
     const bool in_local_range =
         fabs(devi(0)) <= mp_.local_update_range_(0) && fabs(devi(1)) <= mp_.local_update_range_(1) &&
@@ -1006,9 +1119,6 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
 
     md_.proj_points_cnt++;
   }
-
-  if (md_.proj_points_cnt == 0)
-    return;
 
   md_.use_cloud_update_ = true;
   md_.occ_need_update_ = true;

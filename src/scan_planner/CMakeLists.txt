@@ -119,6 +119,19 @@ install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_final_yaw_latch
+    test/test_final_yaw_latch.cpp
+  )
+  target_include_directories(test_final_yaw_latch PRIVATE include)
+
+  ament_add_gtest(test_replan_failure_policy
+    test/test_replan_failure_policy.cpp
+  )
+  target_include_directories(test_replan_failure_policy PRIVATE include)
+endif()
+
 ament_export_include_directories(include)
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()

@@ -34,6 +34,8 @@ namespace scan_planner
     getParam(nh, "optimization/dist0", dist0_, -1.0);
     getParam(nh, "optimization/max_vel", max_vel_, -1.0);
     getParam(nh, "optimization/max_acc", max_acc_, -1.0);
+    getParam(nh, "optimization/start_collision_exempt_radius",
+             start_collision_exempt_radius_, 0.40);
 
     getParam(nh, "optimization/order", order_, 3);
   }
@@ -1035,6 +1037,7 @@ namespace scan_planner
         double tm, tmp;
         traj.getTimeSpan(tm, tmp);
         double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution());
+        const Eigen::Vector3d traj_start_pos = traj.evaluateDeBoorT(tm);
         for (double t = tm; t < tmp * 2 / 3; t += t_step) // Only check the closest 2/3 partition of the whole trajectory.
         {
           Eigen::Vector3d pos = traj.evaluateDeBoorT(t);
@@ -1046,6 +1049,20 @@ namespace scan_planner
 
             if (t <= bspline_interval_) // First 3 control points in obstacles!
             {
+              // The trajectory start is wherever the robot already stands.
+              // When the live footprint sits inside the inflated shell (wall
+              // boundary drift in a corner, or a person standing against the
+              // body) rejecting here refuses every replan and the robot
+              // freezes in place (field log 2026-07-24 22:15: 2030 rejections
+              // over 40 s).  Tolerate occupancy confined to the start
+              // neighbourhood; the dynamic avoidance monitor independently
+              // gates execution and only releases motion along a
+              // monotonically clearing escape trajectory.
+              if ((pos - traj_start_pos).norm() <= start_collision_exempt_radius_)
+              {
+                flag_occ = false;
+                continue;
+              }
               cout << cps_.points.col(1).transpose() << "\n"
                    << cps_.points.col(2).transpose() << "\n"
                    << cps_.points.col(3).transpose() << "\n"

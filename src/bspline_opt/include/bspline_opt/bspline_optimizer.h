@@ -124,6 +124,9 @@ namespace scan_planner
     //
     double dist0_;             // safe distance
     double max_vel_, max_acc_; // dynamic limits
+    // Occupancy hits this close to the trajectory start are the robot's own
+    // standing position inside the inflated shell, not a plan defect.
+    double start_collision_exempt_radius_;
 
     int variable_num_;              // optimization variables
     int iter_num_;                  // iteration of the solver

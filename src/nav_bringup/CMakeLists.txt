@@ -53,6 +53,7 @@ install(PROGRAMS
   scripts/rviz_2d_goal_planner.py
   scripts/scan_initial_path_adapter.py
   scripts/scan_tf_pose_publisher.py
+  scripts/sim_navigation_markers.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

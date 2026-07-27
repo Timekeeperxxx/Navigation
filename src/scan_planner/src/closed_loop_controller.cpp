@@ -18,6 +18,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include "bspline_opt/uniform_bspline.h"
+#include "plan_manage/final_yaw_latch.h"
 #include "scan_planner/msg/bspline.hpp"
 
 namespace
@@ -41,6 +42,7 @@ bool have_odom = false;
 std::vector<UniformBspline> traj;
 double traj_duration = 0.0;
 int traj_id = 0;
+bool emergency_stop_trajectory = false;
 
 Eigen::Vector3d odom_pos = Eigen::Vector3d::Zero();
 double odom_yaw = 0.0;
@@ -64,6 +66,7 @@ bool enable_final_yaw;
 bool have_goal_yaw = false;
 bool safety_execution_frozen = false;
 double goal_yaw = 0.0;
+scan_planner::FinalYawLatch final_yaw_latch;
 std::string body_pose_topic;
 std::string execution_path_topic;
 std::string execution_path_frame;
@@ -111,7 +114,8 @@ bool loadParams()
       0.0, getParamWithDefault<double>("min_translation_speed", 0.0));
   ok &= loadRequiredParam("finish_dist", finish_dist);
   enable_final_yaw = getParamWithDefault<bool>("enable_final_yaw", true);
-  final_yaw_tolerance = getParamWithDefault<double>("final_yaw_tolerance", 0.15);
+  final_yaw_tolerance = std::max(
+      0.0, getParamWithDefault<double>("final_yaw_tolerance", 0.15));
 
   if (ok && max_vyaw > kMaxVYawLimit)
   {
@@ -258,13 +262,17 @@ void bsplineCallback(const scan_planner::msg::Bspline::ConstSharedPtr &msg)
 
   traj_duration = traj[0].getTimeSum();
   traj_id = msg->traj_id;
+  emergency_stop_trajectory = msg->emergency_stop;
   traj_start_time = rclcpp::Time(msg->start_time, node->get_clock()->get_clock_type());
   exec_time = 0.0;
   last_update_time = node->now();
   receive_traj = true;
+  final_yaw_latch.reset();
 
-  RCLCPP_WARN(node->get_logger(), "[closed_loop_controller] received bspline traj_id=%d duration=%.3f",
-              traj_id, traj_duration);
+  RCLCPP_WARN(
+      node->get_logger(),
+      "[closed_loop_controller] received bspline traj_id=%d duration=%.3f emergency_stop=%s",
+      traj_id, traj_duration, emergency_stop_trajectory ? "true" : "false");
 }
 
 void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &msg)
@@ -280,6 +288,11 @@ void goalYawCallback(const std_msgs::msg::Float64::ConstSharedPtr &msg)
 {
   goal_yaw = normalizeAngle(msg->data);
   have_goal_yaw = true;
+  final_yaw_latch.reset();
+  RCLCPP_INFO(
+      node->get_logger(),
+      "[closed_loop_controller] received final goal yaw=%.3f rad.",
+      goal_yaw);
 }
 
 void safetyExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg)
@@ -307,6 +320,16 @@ void cmdCallback()
     return;
   }
 
+  // An emergency stationary spline is a stop command, not a completed route.
+  // Never let it enter the terminal-yaw latch or rotate toward a stale goal.
+  if (emergency_stop_trajectory)
+  {
+    publishExecutionFrozen(false);
+    publishStop();
+    last_update_time = now;
+    return;
+  }
+
   double dt = (now - last_update_time).seconds();
   if (dt < 0.0 || dt > 0.2)
     dt = 0.0;
@@ -314,6 +337,44 @@ void cmdCallback()
   const double t_eval = std::min(exec_time, traj_duration);
   Eigen::Vector3d pos_des = traj[0].evaluateDeBoorT(t_eval);
   Eigen::Vector3d vel_des = traj[1].evaluateDeBoorT(t_eval);
+  Eigen::Vector2d pos_err(pos_des(0) - odom_pos(0), pos_des(1) - odom_pos(1));
+
+  const double final_yaw_error = normalizeAngle(goal_yaw - odom_yaw);
+  const scan_planner::FinalYawDecision final_yaw_decision = final_yaw_latch.update(
+      exec_time >= traj_duration,
+      pos_err.norm(),
+      finish_dist,
+      enable_final_yaw,
+      have_goal_yaw,
+      final_yaw_error,
+      final_yaw_tolerance);
+
+  if (final_yaw_decision.alignment_started)
+  {
+    RCLCPP_INFO(
+        node->get_logger(),
+        "[closed_loop_controller] final yaw alignment started: target=%.3f current=%.3f "
+        "error=%.3f tolerance=%.3f rad; XY hold is now latched.",
+        goal_yaw, odom_yaw, final_yaw_error, final_yaw_tolerance);
+  }
+  if (final_yaw_decision.alignment_completed)
+  {
+    RCLCPP_INFO(
+        node->get_logger(),
+        "[closed_loop_controller] final yaw alignment completed: target=%.3f current=%.3f "
+        "error=%.3f tolerance=%.3f rad.",
+        goal_yaw, odom_yaw, final_yaw_error, final_yaw_tolerance);
+  }
+  if (final_yaw_decision.hold_position)
+  {
+    publishExecutionFrozen(false);
+    last_update_time = now;
+    geometry_msgs::msg::Twist cmd;
+    if (final_yaw_latch.isAligning())
+      cmd.angular.z = clamp(kp_yaw * final_yaw_error, -max_vyaw, max_vyaw);
+    cmd_vel_pub->publish(cmd);
+    return;
+  }
 
   const double yaw_des = estimateDesiredYaw(t_eval, pos_des);
   const double yaw_err = normalizeAngle(yaw_des - odom_yaw);
@@ -334,7 +395,7 @@ void cmdCallback()
   pos_des = traj[0].evaluateDeBoorT(exec_time);
   vel_des = traj[1].evaluateDeBoorT(exec_time);
 
-  Eigen::Vector2d pos_err(pos_des(0) - odom_pos(0), pos_des(1) - odom_pos(1));
+  pos_err = Eigen::Vector2d(pos_des(0) - odom_pos(0), pos_des(1) - odom_pos(1));
   Eigen::Vector2d vel_ff(vel_des(0), vel_des(1));
   Eigen::Vector2d vel_world = clampNorm(vel_ff + kp_pos * pos_err, std::max(max_vx, max_vy));
   const double planar_speed = vel_world.norm();
@@ -351,17 +412,6 @@ void cmdCallback()
   cmd.linear.x = clamp(c * vel_world(0) + s * vel_world(1), -max_vx, max_vx);
   cmd.linear.y = clamp(-s * vel_world(0) + c * vel_world(1), -max_vy, max_vy);
   cmd.angular.z = vyaw_cmd;
-
-  if (exec_time >= traj_duration && pos_err.norm() < finish_dist)
-  {
-    cmd = geometry_msgs::msg::Twist();
-    if (enable_final_yaw && have_goal_yaw)
-    {
-      const double final_yaw_error = normalizeAngle(goal_yaw - odom_yaw);
-      if (std::abs(final_yaw_error) > final_yaw_tolerance)
-        cmd.angular.z = clamp(kp_yaw * final_yaw_error, -max_vyaw, max_vyaw);
-    }
-  }
 
   cmd_vel_pub->publish(cmd);
 }

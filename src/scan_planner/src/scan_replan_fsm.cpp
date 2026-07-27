@@ -44,6 +44,7 @@ namespace scan_planner
     need_hover_stop_ = false;
     replan_fail_count_ = 0;
     last_freeze_update_time_ = node_->now();
+    frozen_replan_not_before_seconds_ = 0.0;
 
     /*  fsm param  */
     getParam(nh, "fsm/navi_mode", navi_mode_, -1);
@@ -55,6 +56,8 @@ namespace scan_planner
     getParam(nh, "fsm/final_goal_tolerance", final_goal_tolerance_, 0.12);
     final_goal_tolerance_ = std::max(0.05, final_goal_tolerance_);
     getParam(nh, "fsm/emergency_time_", emergency_time_, 1.0);
+    getParam(nh, "fsm/frozen_replan_retry_interval", frozen_replan_retry_interval_, 0.5);
+    frozen_replan_retry_interval_ = std::max(0.05, frozen_replan_retry_interval_);
     getParam(nh, "fsm/fail_safe", enable_fail_safe_, true);
     getParam(nh, "fsm/max_replan_fail_count", max_replan_fail_count_, 1000);
     getParam(nh, "grid_map/obstacles_inflation_z_up", self_inflation_z_up_, 0.0);
@@ -107,6 +110,9 @@ namespace scan_planner
     bspline_pub_ = nh->create_publisher<scan_planner::msg::Bspline>("/planning/bspline", 10);
     data_disp_pub_ = nh->create_publisher<scan_planner::msg::DataDisp>("/planning/data_display", 100);
     self_inflation_pub_ = nh->create_publisher<visualization_msgs::msg::Marker>("self_inflation", rclcpp::QoS(10).transient_local());
+    emergency_stop_state_pub_ = nh->create_publisher<std_msgs::msg::Bool>(
+        "/planning/scan_emergency_stop", rclcpp::QoS(1).reliable().transient_local());
+    emergency_stop_state_pub_->publish(std_msgs::msg::Bool().set__data(false));
 
     if (navi_mode_ == NAVI_MODE::MANUAL_TARGET)
       goal_sub_ = nh->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -455,7 +461,12 @@ namespace scan_planner
     if (msg->data && !go2_execution_frozen_)
     {
       odom_vel_.setZero();
+      frozen_replan_not_before_seconds_ = 0.0;
       ROS_INFO("[execution freeze] Hold SCAN trajectory execution; replanning remains enabled with zero boundary velocity.");
+    }
+    else if (!msg->data)
+    {
+      frozen_replan_not_before_seconds_ = 0.0;
     }
     go2_execution_frozen_ = msg->data;
   }
@@ -488,6 +499,23 @@ namespace scan_planner
     LocalTrajData *info = &planner_manager_->local_data_;
     if (go2_execution_frozen_ && info->start_time_.seconds() > 1e-5)
       info->start_time_ += rclcpp::Duration::from_seconds(dt);
+  }
+
+  bool SCANReplanFSM::frozenReplanAttemptReady() const
+  {
+    return frozenReplanAttemptDue(
+        go2_execution_frozen_,
+        node_->now().seconds(),
+        frozen_replan_not_before_seconds_);
+  }
+
+  void SCANReplanFSM::deferFrozenReplanAttempt()
+  {
+    if (!go2_execution_frozen_)
+      return;
+    frozen_replan_not_before_seconds_ = nextFrozenReplanTime(
+        node_->now().seconds(),
+        frozen_replan_retry_interval_);
   }
 
   Eigen::Vector3d SCANReplanFSM::getPlanningStartPosition() const
@@ -630,6 +658,8 @@ namespace scan_planner
     {
       if (finishReferencePathIfGoalReached("GEN_NEW_TRAJ"))
         break;
+      if (!frozenReplanAttemptReady())
+        break;
 
       setStartStateFromOdomOrCurrentTraj();
 
@@ -654,6 +684,7 @@ namespace scan_planner
       else
       {
         replan_fail_count_++;
+        deferFrozenReplanAttempt();
         changeFSMExecState(GEN_NEW_TRAJ, "FSM");
       }
       break;
@@ -662,6 +693,8 @@ namespace scan_planner
     case REPLAN_TRAJ:
     {
       if (finishReferencePathIfGoalReached("REPLAN_TRAJ"))
+        break;
+      if (!frozenReplanAttemptReady())
         break;
 
       if (planFromCurrentTraj())
@@ -672,6 +705,7 @@ namespace scan_planner
       else
       {
         replan_fail_count_++;
+        deferFrozenReplanAttempt();
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }
 
@@ -804,7 +838,22 @@ namespace scan_planner
 
   void SCANReplanFSM::finishProcess()
   {
-    if (replan_fail_count_ >= max_replan_fail_count_)
+    if (
+        go2_execution_frozen_ &&
+        max_replan_fail_count_ > 0 &&
+        replan_fail_count_ >= max_replan_fail_count_)
+    {
+      ROS_WARN(
+          "Replan failed %d times while safety-frozen; keep the target and continue bounded retries.",
+          replan_fail_count_);
+      replan_fail_count_ = 0;
+      return;
+    }
+
+    if (shouldEscalateReplanFailure(
+            replan_fail_count_,
+            max_replan_fail_count_,
+            go2_execution_frozen_))
     {
       ROS_WARN("Replan failed %d times. Emergency stop and wait for a new target.", replan_fail_count_);
       replan_fail_count_ = 0;
@@ -1009,6 +1058,7 @@ namespace scan_planner
       bspline.order = 3;
       bspline.start_time = toMsgTime(info->start_time_);
       bspline.traj_id = info->traj_id_;
+      bspline.emergency_stop = false;
 
       Eigen::MatrixXd pos_pts = info->position_traj_.getControlPoint();
       bspline.pos_pts.reserve(pos_pts.cols());
@@ -1029,6 +1079,7 @@ namespace scan_planner
       }
 
       bspline_pub_->publish(bspline);
+      emergency_stop_state_pub_->publish(std_msgs::msg::Bool().set__data(false));
 
       visualization_->displayOptimalTraj(info->position_traj_, 0);
     }
@@ -1048,6 +1099,7 @@ namespace scan_planner
     bspline.order = 3;
     bspline.start_time = toMsgTime(info->start_time_);
     bspline.traj_id = info->traj_id_;
+    bspline.emergency_stop = true;
 
     Eigen::MatrixXd pos_pts = info->position_traj_.getControlPoint();
     bspline.pos_pts.reserve(pos_pts.cols());
@@ -1068,6 +1120,7 @@ namespace scan_planner
     }
 
     bspline_pub_->publish(bspline);
+    emergency_stop_state_pub_->publish(std_msgs::msg::Bool().set__data(true));
 
     return true;
   }

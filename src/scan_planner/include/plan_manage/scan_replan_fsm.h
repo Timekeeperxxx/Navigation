@@ -17,6 +17,7 @@
 
 #include <bspline_opt/bspline_optimizer.h>
 #include <plan_env/grid_map.h>
+#include <plan_manage/replan_failure_policy.h>
 #include <scan_planner/msg/bspline.hpp>
 #include <scan_planner/msg/data_disp.hpp>
 #include <plan_manage/planner_manager.h>
@@ -84,6 +85,7 @@ namespace scan_planner
     double start_height_offset_;
     double final_goal_tolerance_;
     double emergency_time_;
+    double frozen_replan_retry_interval_;
     double rviz_goal_height_;
     double self_inflation_z_up_, self_inflation_z_down_;
     double self_double_cylinder_radius_, self_double_cylinder_offset_;
@@ -101,6 +103,7 @@ namespace scan_planner
     int replan_fail_count_{0};
     int max_replan_fail_count_{1000};
     rclcpp::Time last_freeze_update_time_;
+    double frozen_replan_not_before_seconds_{0.0};
 
     Eigen::Vector3d odom_pos_, odom_vel_, odom_acc_; // odometry state
     Eigen::Quaterniond odom_orient_;
@@ -126,6 +129,7 @@ namespace scan_planner
     rclcpp::Publisher<scan_planner::msg::Bspline>::SharedPtr bspline_pub_;
     rclcpp::Publisher<scan_planner::msg::DataDisp>::SharedPtr data_disp_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr self_inflation_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr emergency_stop_state_pub_;
 
     /* helper functions */
     bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj); // front-end and back-end method
@@ -152,6 +156,8 @@ namespace scan_planner
     double getOdomYaw() const;
     double estimateYawFromSegment(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const;
     void updateLocalTrajTimeFreeze();
+    bool frozenReplanAttemptReady() const;
+    void deferFrozenReplanAttempt();
 
     /* ROS functions */
     void execFSMCallback();
