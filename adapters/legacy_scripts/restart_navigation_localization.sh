@@ -211,7 +211,8 @@ navigation_failure_message() {
 
 wait_for_livox_data() {
   timeout "${NAV_LIVOX_DATA_TIMEOUT_SECONDS}s" \
-    ros2 topic echo /livox/lidar --once --qos-profile sensor_data --field timebase \
+    ros2 topic echo /livox/lidar --once --no-daemon --spin-time 2 \
+      --qos-profile sensor_data --field timebase \
     >/dev/null 2>&1
 }
 
@@ -325,7 +326,10 @@ if [ -n "$PLANGROUND_PCD" ]; then
   launch_args+=("planground_pcd:=$PLANGROUND_PCD")
 fi
 
+# 运行态探针只检查 LOG_FILE 中本轮 marker 之后的日志。marker 若只输出到
+# 启动器 stdout，后续即使 initialpose 已生效也会一直停在 awaiting_initialpose。
 log_info "$RUN_LOG_MARKER"
+printf '%s\n' "$RUN_LOG_MARKER" >> "$LOG_FILE"
 # 独立进程组便于有界停止；关闭 fd 9，防止 ROS 子进程继承 navigation.lock。
 setsid ros2 launch nav_bringup navigation.launch.py "${launch_args[@]}" 9>&- >> "$LOG_FILE" 2>&1 &
 

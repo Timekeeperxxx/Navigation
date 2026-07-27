@@ -55,7 +55,7 @@ ros2 launch nav_runtime runtime.launch.py
 发送建图命令示例：
 
 ```bash
-ros2 topic pub --once /nav/command_json std_msgs/msg/String "{data: '{\"command\":\"start_mapping\",\"map_dir\":\"/home/jetson/Project/BOTDOG/MAPS/test_scene\"}'}"
+ros2 topic pub --once /nav/command_json std_msgs/msg/String "{data: '{\"command\":\"start_mapping\",\"map_dir\":\"/home/jetson/Projects/Maps/test_scene\"}'}"
 ```
 
 订阅结果：
@@ -97,27 +97,27 @@ http://127.0.0.1:8090
 ## 建图入口
 
 ```bash
-bash adapters/legacy_scripts/start_mapping.sh /home/jetson/Project/BOTDOG/MAPS/Scene001
+bash adapters/legacy_scripts/start_mapping.sh /home/jetson/Projects/Maps/Scene001
 ```
 
 底层等价于：
 
 ```bash
-ros2 launch nav_bringup mapping.launch.py map_dir:=/home/jetson/Project/BOTDOG/MAPS/Scene001
+ros2 launch nav_bringup mapping.launch.py map_dir:=/home/jetson/Projects/Maps/Scene001
 ```
 
 ## 导航定位入口
 
 ```bash
 bash /home/jetson/Project/BOTDOG/BotDog/scripts/restart_navigation_localization.sh \
-  /home/jetson/Project/BOTDOG/MAPS/Scene23_多楼层
+  /home/jetson/Projects/Maps/Scene23_多楼层
 ```
 
 底层等价于：
 
 ```bash
 ros2 launch nav_bringup navigation.launch.py \
-  scene_dir:=/home/jetson/Project/BOTDOG/MAPS/Scene23_多楼层
+  scene_dir:=/home/jetson/Projects/Maps/Scene23_多楼层
 ```
 
 ## 停止入口

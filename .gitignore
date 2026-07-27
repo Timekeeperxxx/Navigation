@@ -4,6 +4,7 @@ log/
 logs/
 runtime/
 maps/
+/maps
 .agents/
 .codex/
 launch_params_*
@@ -14,4 +15,5 @@ __pycache__/
 .coverage
 *.bag
 *.db3
+*.bak*
 adapters/legacy_scripts/env.local
