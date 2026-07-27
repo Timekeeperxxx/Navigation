@@ -43,6 +43,8 @@ class LocalObstacleSimulator(Node):
         self.declare_parameter("obstacle_lifetime_sec", 0.0)
         self.declare_parameter("cluster_radius", 0.0)
         self.declare_parameter("cluster_points", 8)
+        self.declare_parameter("obstacle_height", 0.70)
+        self.declare_parameter("vertical_step", 0.10)
 
         self.frame_id = str(self.get_parameter("frame_id").value)
         self.obstacle_lifetime_sec = float(
@@ -50,6 +52,12 @@ class LocalObstacleSimulator(Node):
         )
         self.cluster_radius = float(self.get_parameter("cluster_radius").value)
         self.cluster_points = int(self.get_parameter("cluster_points").value)
+        self.obstacle_height = max(
+            float(self.get_parameter("obstacle_height").value), 0.0
+        )
+        self.vertical_step = max(
+            float(self.get_parameter("vertical_step").value), 0.01
+        )
         self.obstacles: list[SimObstacle] = []
 
         self.obstacle_pub = self.create_publisher(
@@ -142,18 +150,25 @@ class LocalObstacleSimulator(Node):
     def _expanded_points(self) -> list[tuple[float, float, float]]:
         points: list[tuple[float, float, float]] = []
         for obstacle in self.obstacles:
-            points.append((obstacle.x, obstacle.y, obstacle.z))
-            if self.cluster_radius <= 0.0 or self.cluster_points <= 0:
-                continue
-            for index in range(self.cluster_points):
-                angle = 2.0 * math.pi * index / self.cluster_points
-                points.append(
-                    (
-                        obstacle.x + self.cluster_radius * math.cos(angle),
-                        obstacle.y + self.cluster_radius * math.sin(angle),
-                        obstacle.z,
-                    )
+            vertical_count = max(
+                1, int(math.ceil(self.obstacle_height / self.vertical_step))
+            )
+            for vertical_index in range(vertical_count + 1):
+                z = obstacle.z + min(
+                    vertical_index * self.vertical_step, self.obstacle_height
                 )
+                points.append((obstacle.x, obstacle.y, z))
+                if self.cluster_radius <= 0.0 or self.cluster_points <= 0:
+                    continue
+                for index in range(self.cluster_points):
+                    angle = 2.0 * math.pi * index / self.cluster_points
+                    points.append(
+                        (
+                            obstacle.x + self.cluster_radius * math.cos(angle),
+                            obstacle.y + self.cluster_radius * math.sin(angle),
+                            z,
+                        )
+                    )
         return points
 
     def _prune_expired(self) -> None:

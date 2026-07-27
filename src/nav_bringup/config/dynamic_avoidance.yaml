@@ -13,6 +13,9 @@ dynamic_avoidance_monitor:
     scan_execution_path_timeout: 2.0
     scan_execution_path_global_tolerance: 1.0
     obstacle_topic: "/grid_map/occupancy_inflate"
+    # Monitor the fused LiDAR output itself.  GridMap can keep republishing an
+    # old occupancy cloud after LiDAR/IMU input has stopped.
+    sensor_heartbeat_topic: "/lio/cloud_world"
     status_topic: "/nav/obstacle_status"
     replan_request_topic: "/nav/replan_request"
     prune_plan_topic: "/prune_plan"
@@ -26,21 +29,51 @@ dynamic_avoidance_monitor:
     lookahead_distance: 2.0
     backward_prune_distance: 0.5
     path_deviation_tolerance: 1.0
-    # /grid_map/occupancy_inflate already contains the B2 footprint inflation.
-    # Add only two 0.05 m voxels of sampling tolerance; 0.45 m double-inflated
-    # the path and rejected trajectories that SCAN itself had marked clear.
-    path_corridor_radius: 0.10
+    # /grid_map/occupancy_inflate already contains the 0.27 m physical radius.
+    # This 0.04 m half-diagonal check matches a path position to the centre of
+    # its 0.05 m occupied voxel without double-inflating the physical body.
+    path_corridor_radius: 0.04
+    # Match SCAN's front/rear circle centres relative to base_footprint.
+    footprint_center_offsets: [-0.22, -0.63]
+    footprint_sweep_max_step: 0.05
+    footprint_sweep_max_yaw_step: 0.0872664626
     # The SCAN path is at the lifted body planning height.  Keep floor voxels
-    # below it out of the independent 2D safety check.
+    # below it out of the independent 2D safety check (downward tolerance).
     z_tolerance: 0.10
+    # Upward the check must cover the whole machine, not just the body slice:
+    # the Mid360 mast tops out near 0.97 m while the path sits at 0.30 m.
+    # Voxels are already inflated 0.33 m downwards, so 0.45 m above the path
+    # catches overhangs (table edges, shelf beams, door crossbars) whose
+    # physical bottom is below about 1.08 m; higher clearance passes.
+    z_tolerance_up: 0.45
     # Distances are measured from the B2 body centre.  Ignore points inside
     # the robot envelope, then retain a 0.35 m stopping margin outside it.
     # SCAN occupancy inflation expands B2 body/leg returns to about 0.80 m.
     # Clear that self-envelope while keeping a 0.30 m external stop margin.
-    robot_self_clear_radius: 0.90
+    # Body returns are removed upstream by GridMap's pose-aware self mask.
+    # Ignore only two local voxels of discretization noise; a larger blind
+    # radius can hide an inner-corner wall after footprint inflation.
+    robot_self_clear_radius: 0.10
     stop_distance: 1.20
     slow_distance: 1.80
     replan_blocked_duration: 2.0
+    # Once a persistent block requests replanning, do not release the old
+    # trajectory on a single flickering-clear point cloud frame.  Require a
+    # newer SCAN generation and 2.0 s of continuous clearance.
+    blocked_clear_duration: 2.0
+    # A one-frame collision prediction that clears before a replan was needed
+    # uses four LiDAR frames of confirmation.  Reusing the 2 s replan handoff
+    # delay for every transient footprint-edge flicker made narrow bypasses
+    # advance only a few centimetres at a time.
+    transient_clear_duration: 0.4
+    # A hard stop can otherwise deadlock when the current footprint is already
+    # on a voxel boundary.  Permit only a short, monotonic-clearance escape
+    # trajectory and keep it at the B2's effective 0.15 m/s walking floor.
+    allow_clearance_escape: true
+    clearance_escape_max_distance: 0.60
+    clearance_escape_max_drop: 0.015
+    clearance_escape_min_improvement: 0.02
+    clearance_escape_speed_scale: 0.60
     # Livox/grid-map updates can have ~0.7 s gaps under Jetson load.
     sensor_timeout: 1.5
     check_period_sec: 0.2
@@ -101,5 +134,9 @@ local_obstacle_simulator:
     initial_obstacles_json: "[]"
     publish_period_sec: 0.2
     obstacle_lifetime_sec: 0.0
-    cluster_radius: 0.0
-    cluster_points: 8
+    # RViz Publish Point 落在地面上；扩展成有宽度和高度的软障碍柱，
+    # 才会覆盖 SCAN 位于约 0.30 m 的机身规划切片。
+    cluster_radius: 0.12
+    cluster_points: 12
+    obstacle_height: 0.70
+    vertical_step: 0.10

@@ -15,7 +15,7 @@ livox:
   xfer_format: 0
 
 paths:
-  maps_root: "/home/jetson/Project/BOTDOG/MAPS"
+  maps_root: "/home/jetson/Projects/Maps"
   logs_root: "/home/jetson/Project/BOTDOG/BotDog/logs"
   runtime_root: "/home/jetson/Project/BOTDOG/BotDog/data/nav_runtime"
 

@@ -33,6 +33,7 @@ class _NavigatorHarness:
     nav_start_callback = WaypointNavigator.nav_start_callback
     waypoint_reached_callback = WaypointNavigator.waypoint_reached_callback
     publish_waypoint_context = WaypointNavigator.publish_waypoint_context
+    publish_auto_track_actions = WaypointNavigator.publish_auto_track_actions
 
     def __init__(self, task_file: Path):
         self.waypoints_file = str(task_file)
@@ -46,6 +47,7 @@ class _NavigatorHarness:
         self.publish_count = 0
         self.task_statuses = []
         self.waypoint_context_pub = _CapturePublisher()
+        self.auto_track_control_pub = _CapturePublisher()
         self._logger = _Logger()
 
     def get_logger(self):
@@ -183,3 +185,65 @@ def test_final_waypoint_publishes_task_complete(tmp_path):
     assert navigator.task_statuses[-1]["task_complete"] is True
     context = json.loads(navigator.waypoint_context_pub.messages[-1].data)
     assert context["active"] is False
+
+
+def test_auto_track_actions_execute_after_the_preceding_waypoint(tmp_path):
+    task_file = tmp_path / "current_task.json"
+    _write_task(task_file, "A点", 1.0)
+    payload = json.loads(task_file.read_text(encoding="utf-8"))
+    payload["steps"].extend(
+        [
+            {"type": "auto_track_control", "enabled": True},
+            {
+                "type": "navigate_waypoint",
+                "waypoint_id": "wp-b",
+                "waypoint_name": "B点",
+                "x": 8.0,
+                "y": 2.0,
+                "z": 0.3,
+                "yaw": 0.4,
+                "frame_id": "map",
+            },
+            {"type": "auto_track_control", "enabled": False},
+        ]
+    )
+    task_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    navigator = _NavigatorHarness(task_file)
+    navigator.nav_start_callback(_BoolMessage(True))
+    assert navigator.auto_track_control_pub.messages == []
+
+    navigator.waypoint_reached_callback(_BoolMessage(True))
+    first_action = json.loads(navigator.auto_track_control_pub.messages[-1].data)
+    assert first_action == {
+        "type": "auto_track_control",
+        "enabled": True,
+        "task_id": "task-1",
+        "step_index": 1,
+    }
+    assert navigator.navigating is True
+
+    navigator.waypoint_reached_callback(_BoolMessage(True))
+    second_action = json.loads(navigator.auto_track_control_pub.messages[-1].data)
+    assert second_action == {
+        "type": "auto_track_control",
+        "enabled": False,
+        "task_id": "task-1",
+        "step_index": 3,
+    }
+    assert navigator.navigating is False
+
+
+def test_auto_track_action_before_first_waypoint_executes_on_task_start(tmp_path):
+    task_file = tmp_path / "current_task.json"
+    _write_task(task_file, "A点", 1.0)
+    payload = json.loads(task_file.read_text(encoding="utf-8"))
+    payload["steps"].insert(0, {"type": "auto_track_control", "enabled": True})
+    task_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    navigator = _NavigatorHarness(task_file)
+    navigator.nav_start_callback(_BoolMessage(True))
+
+    action = json.loads(navigator.auto_track_control_pub.messages[-1].data)
+    assert action["enabled"] is True
+    assert action["step_index"] == 0

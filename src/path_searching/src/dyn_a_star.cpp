@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 
 using namespace std;
 using namespace Eigen;
@@ -102,43 +103,90 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector3d start_pt, Vector3d en
     const double path_yaw = std::atan2(start_to_end(1), start_to_end(0));
     start_to_end.normalize();
 
-    int occ = checkOccupancy(Index2Coord(start_idx), path_yaw);
-    if (occ)
-    {
-        //ROS_WARN("Start point is insdide an obstacle.");
-        do
-        {
-            start_pt -= start_to_end * step_size_;
-            if (!Coord2Index(start_pt, start_idx))
-                return false;
+    auto adjust_to_nearest_free =
+        [&](Vector3i &index, const Eigen::Vector2d &preferred_direction, const char *label) {
+            const int initial_occupancy = checkOccupancy(Index2Coord(index), path_yaw);
+            if (initial_occupancy == 0)
+                return true;
 
-            occ = checkOccupancy(Index2Coord(start_idx), path_yaw);
-            if (occ == -1)
+            const Vector3i original_index = index;
+            const int max_radius_cells = std::max(
+                1,
+                std::min(
+                    static_cast<int>(std::ceil(1.0 / step_size_)),
+                    std::min(POOL_SIZE_(0), POOL_SIZE_(1)) / 2 - 2));
+
+            for (int radius = 1; radius <= max_radius_cells; ++radius)
             {
-                ROS_WARN("[Astar] Start point outside the map region.");
-                return false;
-            }
-        } while (occ);
-    }
+                bool found = false;
+                Vector3i best_index = original_index;
+                double best_alignment = -std::numeric_limits<double>::infinity();
 
-    occ = checkOccupancy(Index2Coord(end_idx), path_yaw);
-    if (occ)
-    {
-        //ROS_WARN("End point is insdide an obstacle.");
-        do
-        {
-            end_pt += start_to_end * step_size_;
-            if (!Coord2Index(end_pt, end_idx))
-                return false;
+                for (int dx = -radius; dx <= radius; ++dx)
+                    for (int dy = -radius; dy <= radius; ++dy)
+                    {
+                        if (std::max(std::abs(dx), std::abs(dy)) != radius)
+                            continue;
 
-            occ = checkOccupancy(Index2Coord(end_idx), path_yaw);
-            if (occ == -1)
-            {
-                ROS_WARN("[Astar] End point outside the map region.");
-                return false;
+                        Vector3i candidate(
+                            original_index(0) + dx,
+                            original_index(1) + dy,
+                            original_index(2));
+                        if (candidate(0) < 1 || candidate(0) >= POOL_SIZE_(0) - 1 ||
+                            candidate(1) < 1 || candidate(1) >= POOL_SIZE_(1) - 1 ||
+                            candidate(2) < 1 || candidate(2) >= POOL_SIZE_(2) - 1)
+                            continue;
+                        if (checkOccupancy(Index2Coord(candidate), path_yaw) != 0)
+                            continue;
+
+                        Eigen::Vector2d offset(
+                            static_cast<double>(dx),
+                            static_cast<double>(dy));
+                        const double alignment =
+                            offset.norm() > 1e-6
+                                ? offset.normalized().dot(preferred_direction)
+                                : 0.0;
+                        if (!found || alignment > best_alignment)
+                        {
+                            found = true;
+                            best_alignment = alignment;
+                            best_index = candidate;
+                        }
+                    }
+
+                if (found)
+                {
+                    const double adjustment =
+                        (Index2Coord(best_index) - Index2Coord(original_index)).head<2>().norm();
+                    index = best_index;
+                    ROS_WARN(
+                        "[Astar] %s point occupied; shifted %.2fm to the nearest free footprint.",
+                        label,
+                        adjustment);
+                    return true;
+                }
             }
-        } while (occ);
-    }
+
+            ROS_WARN(
+                "[Astar] %s point occupied/outside and no free footprint exists within 1.0m.",
+                label);
+            return false;
+        };
+
+    Eigen::Vector2d path_direction = start_to_end.head<2>();
+    if (path_direction.norm() < 1e-6)
+        path_direction = Eigen::Vector2d::UnitX();
+    else
+        path_direction.normalize();
+
+    // Preserve the old preference (back away from a blocked start and move a
+    // blocked end forward), but search laterally as well.  A one-dimensional
+    // adjustment walked out of the sliding map at corners even when a free
+    // side-step cell existed.
+    if (!adjust_to_nearest_free(start_idx, -path_direction, "Start"))
+        return false;
+    if (!adjust_to_nearest_free(end_idx, path_direction, "End"))
+        return false;
 
     return true;
 }

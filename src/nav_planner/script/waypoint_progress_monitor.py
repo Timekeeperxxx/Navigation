@@ -9,6 +9,7 @@ from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float64, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -31,6 +32,9 @@ class WaypointProgressMonitor(Node):
         self.declare_parameter("goal_yaw_topic", "goal_yaw")
         self.declare_parameter("nav_start_topic", "/nav_start")
         self.declare_parameter("nav_stop_topic", "/nav_stop")
+        self.declare_parameter(
+            "planner_emergency_stop_topic", "/planning/scan_emergency_stop"
+        )
         self.declare_parameter("reach_tolerance_xy", 0.12)
         self.declare_parameter("reach_tolerance_z", 1.0)
         self.declare_parameter("reach_tolerance_yaw", 0.10)
@@ -53,6 +57,7 @@ class WaypointProgressMonitor(Node):
         self.active_goal_time = self.get_clock().now()
         self.last_status = "idle"
         self.navigation_enabled = False
+        self.planner_emergency_stop = False
         self.task_waypoint_context = None
         self.active_task_waypoint_context = None
 
@@ -101,6 +106,16 @@ class WaypointProgressMonitor(Node):
             self.get_parameter("nav_stop_topic").value,
             self._on_nav_stop,
             10,
+        )
+        self.create_subscription(
+            Bool,
+            self.get_parameter("planner_emergency_stop_topic").value,
+            self._on_planner_emergency_stop,
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
         )
         self.create_subscription(
             String,
@@ -191,6 +206,14 @@ class WaypointProgressMonitor(Node):
         self._publish_status("estop")
         self._publish_nav_status("estop", "收到导航急停")
 
+    def _on_planner_emergency_stop(self, msg: Bool) -> None:
+        emergency_stop = bool(msg.data)
+        if emergency_stop and not self.planner_emergency_stop:
+            self.get_logger().error(
+                "SCAN 连续重规划失败并已紧急停车；等待新的可执行轨迹"
+            )
+        self.planner_emergency_stop = emergency_stop
+
     def _on_waypoint_context(self, msg: String) -> None:
         try:
             payload = json.loads(msg.data)
@@ -232,6 +255,19 @@ class WaypointProgressMonitor(Node):
         if not self.navigation_enabled:
             self.last_status = "waiting_start"
             self._publish_status("waiting_start")
+            return
+        if self.planner_emergency_stop:
+            self.last_status = "planner_blocked"
+            self._publish_status(
+                "planner_blocked",
+                error_code="SCAN_REPLAN_FAILED",
+                error="SCAN 起点或局部路径位于障碍物内，连续重规划失败",
+            )
+            self._publish_nav_status(
+                "failed",
+                "SCAN 起点或局部路径位于障碍物内，已安全停车",
+                error_code="SCAN_REPLAN_FAILED",
+            )
             return
 
         now = self.get_clock().now()
@@ -354,13 +390,17 @@ class WaypointProgressMonitor(Node):
         self.status_pub.publish(msg)
 
     def _publish_nav_status(
-        self, status: str, message: str, distance_to_goal: Optional[float] = None
+        self,
+        status: str,
+        message: str,
+        distance_to_goal: Optional[float] = None,
+        error_code: Optional[str] = None,
     ) -> None:
         payload = {
             "status": status,
             "message": message,
             "distance_to_goal": distance_to_goal,
-            "error_code": None,
+            "error_code": error_code,
             "timestamp": self.get_clock().now().nanoseconds / 1e9,
         }
         self.nav_status_pub.publish(String(data=json.dumps(payload, ensure_ascii=False)))

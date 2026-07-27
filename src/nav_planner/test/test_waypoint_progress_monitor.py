@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import rclpy
 from geometry_msgs.msg import PointStamped
-from std_msgs.msg import Float64, String
+from std_msgs.msg import Bool, Float64, String
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "script"))
@@ -50,6 +50,14 @@ def test_repeated_yaw_point_delivery_keeps_final_yaw(monitor):
 def test_default_completion_tolerances_are_precise(monitor):
     assert monitor.reach_tolerance_xy == pytest.approx(0.12)
     assert monitor.reach_tolerance_yaw == pytest.approx(0.10)
+
+
+def test_scan_emergency_stop_is_latched_until_a_valid_trajectory(monitor):
+    monitor._on_planner_emergency_stop(Bool(data=True))
+    assert monitor.planner_emergency_stop is True
+
+    monitor._on_planner_emergency_stop(Bool(data=False))
+    assert monitor.planner_emergency_stop is False
 
 
 def _goal(x=1.0, y=-2.0, z=0.3):

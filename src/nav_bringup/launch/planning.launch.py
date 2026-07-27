@@ -3,6 +3,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -10,6 +11,9 @@ def generate_launch_description():
     map_pcd = LaunchConfiguration("map_pcd")
     ground_pcd = LaunchConfiguration("ground_pcd")
     planground_pcd = LaunchConfiguration("planground_pcd")
+    map_down_sample = LaunchConfiguration("map_down_sample")
+    ground_down_sample = LaunchConfiguration("ground_down_sample")
+    planground_down_sample = LaunchConfiguration("planground_down_sample")
     roi_file_path = LaunchConfiguration("roi_file_path")
     enable_pcl_publisher = LaunchConfiguration("enable_pcl_publisher")
     enable_polygon_loader = LaunchConfiguration("enable_polygon_loader")
@@ -18,6 +22,7 @@ def generate_launch_description():
     waypoint_navigator_start_topic = LaunchConfiguration("waypoint_navigator_start_topic")
     enable_waypoint_monitor = LaunchConfiguration("enable_waypoint_monitor")
     enable_dynamic_avoidance = LaunchConfiguration("enable_dynamic_avoidance")
+    dynamic_require_nav_start = LaunchConfiguration("dynamic_require_nav_start")
     enable_path_follower = LaunchConfiguration("enable_path_follower")
     enable_obstacle_simulator = LaunchConfiguration("enable_obstacle_simulator")
     enable_scan_planner = LaunchConfiguration("enable_scan_planner")
@@ -69,6 +74,15 @@ def generate_launch_description():
                 "map_dir": map_pcd,
                 "ground_dir": ground_pcd,
                 "planground_dir": planground_pcd,
+                "map_down_sample": ParameterValue(
+                    map_down_sample, value_type=float
+                ),
+                "ground_down_sample": ParameterValue(
+                    ground_down_sample, value_type=float
+                ),
+                "planground_down_sample": ParameterValue(
+                    planground_down_sample, value_type=float
+                ),
             },
         ],
         condition=IfCondition(enable_pcl_publisher),
@@ -154,6 +168,7 @@ def generate_launch_description():
                 "goal_yaw_topic": "goal_yaw",
                 "nav_start_topic": "/nav_start",
                 "nav_stop_topic": "/nav_stop",
+                "planner_emergency_stop_topic": "/planning/scan_emergency_stop",
                 "reach_tolerance_xy": 0.12,
                 "reach_tolerance_z": 1.0,
                 "reach_tolerance_yaw": 0.10,
@@ -168,7 +183,15 @@ def generate_launch_description():
         executable="dynamic_avoidance_monitor.py",
         name="dynamic_avoidance_monitor",
         output="screen",
-        parameters=[dynamic_avoidance_config],
+        parameters=[
+            dynamic_avoidance_config,
+            {
+                "sensor_heartbeat_topic": scan_cloud_topic,
+                "require_nav_start": ParameterValue(
+                    dynamic_require_nav_start, value_type=bool
+                ),
+            },
+        ],
         condition=IfCondition(enable_dynamic_avoidance),
     )
 
@@ -308,6 +331,9 @@ def generate_launch_description():
         DeclareLaunchArgument("map_pcd", default_value=""),
         DeclareLaunchArgument("ground_pcd", default_value=""),
         DeclareLaunchArgument("planground_pcd", default_value=""),
+        DeclareLaunchArgument("map_down_sample", default_value="0.2"),
+        DeclareLaunchArgument("ground_down_sample", default_value="0.3"),
+        DeclareLaunchArgument("planground_down_sample", default_value="0.1"),
         DeclareLaunchArgument("roi_file_path", default_value=""),
         DeclareLaunchArgument(
             "waypoints_file",
@@ -324,6 +350,7 @@ def generate_launch_description():
         DeclareLaunchArgument("waypoint_navigator_start_topic", default_value="/nav_task_start"),
         DeclareLaunchArgument("enable_waypoint_monitor", default_value="false"),
         DeclareLaunchArgument("enable_dynamic_avoidance", default_value="true"),
+        DeclareLaunchArgument("dynamic_require_nav_start", default_value="true"),
         DeclareLaunchArgument("enable_path_follower", default_value="false"),
         DeclareLaunchArgument("enable_obstacle_simulator", default_value="false"),
         DeclareLaunchArgument("enable_scan_planner", default_value="false"),

@@ -19,6 +19,7 @@ class WaypointNavigator(Node):
         self.declare_parameter('waypoint_reached_topic', '/waypoint_reached')
         self.declare_parameter('nav_status_topic', '/nav_status')
         self.declare_parameter('waypoint_context_topic', '/nav/task_waypoint_context')
+        self.declare_parameter('auto_track_control_topic', '/nav/task/auto_track_control')
 
         self.waypoints_file = self.resolve_waypoints_file(self.get_parameter('waypoints_file').value)
         self.frame_id = self.get_parameter('frame_id').value
@@ -27,6 +28,7 @@ class WaypointNavigator(Node):
         waypoint_reached_topic = self.get_parameter('waypoint_reached_topic').value
 
         self.waypoints = []
+        self.initial_actions = []
         self.task_id = None
         self.task_name = None
         self.current_index = 0
@@ -52,6 +54,11 @@ class WaypointNavigator(Node):
         self.waypoint_context_pub = self.create_publisher(
             String,
             self.get_parameter('waypoint_context_topic').value,
+            10,
+        )
+        self.auto_track_control_pub = self.create_publisher(
+            String,
+            self.get_parameter('auto_track_control_topic').value,
             10,
         )
 
@@ -83,6 +90,7 @@ class WaypointNavigator(Node):
         """Load waypoints from JSON file and return list of dicts with x, y, z, name."""
         self.task_id = None
         self.task_name = None
+        self.initial_actions = []
         if not filepath:
             self.get_logger().error('未配置 waypoints_file')
             return []
@@ -114,7 +122,7 @@ class WaypointNavigator(Node):
             # 新格式: 顶层 frame_id + steps 数组
             elif 'steps' in data:
                 top_frame_id = data.get('frame_id', self.frame_id)
-                for step in data['steps']:
+                for step_index, step in enumerate(data['steps']):
                     if step.get('type') == 'navigate_waypoint':
                         waypoints.append({
                             'name': step.get('waypoint_name', step.get('waypointName', 'unknown')),
@@ -124,7 +132,18 @@ class WaypointNavigator(Node):
                             'z': step['z'],
                             'yaw': step.get('yaw', 0.0),
                             'frame_id': step.get('frame_id', top_frame_id),
+                            'actions_after': [],
                         })
+                    elif step.get('type') == 'auto_track_control':
+                        action = {
+                            'type': 'auto_track_control',
+                            'enabled': bool(step.get('enabled')),
+                            'step_index': step_index,
+                        }
+                        if waypoints:
+                            waypoints[-1]['actions_after'].append(action)
+                        else:
+                            self.initial_actions.append(action)
             # 旧格式: items 数组
             elif 'items' in data:
                 for item in data['items']:
@@ -143,7 +162,7 @@ class WaypointNavigator(Node):
             # workflows.json 格式: 数组中的每个元素包含 steps
             for workflow in data:
                 steps = workflow.get('steps', [])
-                for step in steps:
+                for step_index, step in enumerate(steps):
                     if step.get('type') == 'navigate_waypoint':
                         waypoints.append({
                             'name': step.get('waypointName', step.get('label', 'unknown')),
@@ -152,7 +171,18 @@ class WaypointNavigator(Node):
                             'z': step['z'],
                             'yaw': step.get('yaw', 0.0),
                             'frame_id': step.get('frameId', self.frame_id),
+                            'actions_after': [],
                         })
+                    elif step.get('type') == 'auto_track_control':
+                        action = {
+                            'type': 'auto_track_control',
+                            'enabled': bool(step.get('enabled')),
+                            'step_index': step_index,
+                        }
+                        if waypoints:
+                            waypoints[-1]['actions_after'].append(action)
+                        else:
+                            self.initial_actions.append(action)
         else:
             self.get_logger().error(f'不支持的 JSON 格式: {type(data)}')
             return []
@@ -194,6 +224,7 @@ class WaypointNavigator(Node):
             self.navigating = True
             self.current_index = 0
             self.publish_task_status('moving', '任务已开始', task_complete=False)
+            self.publish_auto_track_actions(self.initial_actions)
             self.publish_current_waypoint()
         else:
             self.publish_waypoint_context(active=False)
@@ -265,6 +296,8 @@ class WaypointNavigator(Node):
                 f'已到达航点 [{self.current_index}] "{wp_name}" (SUCCESS)'
             )
             completed_index = self.current_index
+            completed_waypoint = self.waypoints[completed_index]
+            self.publish_auto_track_actions(completed_waypoint.get('actions_after', []))
             self.current_index += 1
             if self.current_index >= len(self.waypoints):
                 self.get_logger().info('所有航点已访问完毕，导航完成！')
@@ -334,6 +367,25 @@ class WaypointNavigator(Node):
         self.waypoint_context_pub.publish(
             String(data=json.dumps(payload, ensure_ascii=False))
         )
+
+    def publish_auto_track_actions(self, actions):
+        """按任务步骤顺序发布到点后的自动跟踪开关。"""
+        for action in actions:
+            if action.get('type') != 'auto_track_control':
+                continue
+            payload = {
+                'type': 'auto_track_control',
+                'enabled': bool(action.get('enabled')),
+                'task_id': self.task_id,
+                'step_index': action.get('step_index'),
+            }
+            self.auto_track_control_pub.publish(
+                String(data=json.dumps(payload, ensure_ascii=False))
+            )
+            self.get_logger().info(
+                f'执行自动跟踪联动步骤 [{payload["step_index"]}]：'
+                f'{"开启" if payload["enabled"] else "关闭"}'
+            )
 
     def publish_task_status(
         self,

@@ -8,7 +8,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    default_scene_dir = "/home/jetson/Project/BOTDOG/MAPS/Scene23_多楼层"
+    default_scene_dir = "/home/jetson/Projects/Maps/Scene23_多楼层"
     default_map_pcd = f"{default_scene_dir}/map.pcd"
     default_ground_pcd = f"{default_scene_dir}/terrain_map_20260702_213550_ground.pcd"
     default_planground_pcd = (
