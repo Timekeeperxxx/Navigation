@@ -35,6 +35,8 @@
 #include <global_planner/a_star_on_pc.h>
 #include <pcl/filters/voxel_grid.h>
 #include <nav_msgs/msg/path.hpp>
+#include <functional>
+#include <optional>
 
 /**
  * @brief Hybrid A* planner that fuses planground and ground point clouds into a single map.
@@ -70,6 +72,13 @@
  */
 class Hybrid_A_Star {
 public:
+  using EdgeValidator = A_Star_on_Graph::EdgeValidator;
+  using TurnValidator = std::function<bool(
+    const pcl::PointXYZI&, const pcl::PointXYZI&, const pcl::PointXYZI&)>;
+  using GoalConnectorValidator = std::function<bool(
+    const pcl::PointXYZI&, const pcl::PointXYZI&)>;
+  using CancelChecker = A_Star_on_Graph::CancelChecker;
+
   /**
    * @brief Constructor
    * @param pc_planground The planground point cloud (primary planning surface)
@@ -113,7 +122,64 @@ public:
    * @brief Set the voxel leaf size for downsampling the hybrid cloud
    * @param leaf_size The voxel grid leaf size in meters
    */
-  void setDownsampleLeafSize(double leaf_size) { hybrid_downsample_leaf_size_ = leaf_size; }
+  void setDownsampleLeafSize(double leaf_size);
+
+  /**
+   * @brief Limit the short planground-only reference search.
+   *
+   * The reference search is used only to estimate the detour ratio and to
+   * provide a connected fallback.  It must not delay the main hybrid search
+   * when the planground graph is disconnected.
+   */
+  void setReferencePlanningTime(double seconds);
+
+  /**
+   * @brief Limit the main hybrid A* search.
+   */
+  void setMaxPlanningTime(double seconds);
+
+  /**
+   * @brief Set the weighted-A* heuristic multiplier for the main search.
+   *
+   * A value of 1.0 is ordinary A*. Values greater than 1.0 trade some path
+   * optimality for a smaller search frontier.
+   */
+  void setHeuristicWeight(double weight);
+
+  /**
+   * @brief Install a cooperative cancellation check used by both A* passes.
+   *
+   * The callback should return true when a newer goal supersedes this search.
+   * An empty callback disables cancellation.
+   */
+  void setCancelChecker(CancelChecker checker);
+
+  /**
+   * @brief Install an optional validator for every planning and output edge.
+   *
+   * The same callback is applied by both A* passes and again after smoothing,
+   * so shortcutting or spline interpolation cannot bypass the planner's
+   * traversability rule.
+   */
+  void setEdgeValidator(EdgeValidator validator);
+
+  /**
+   * @brief Validate the B2 footprint while its heading changes at a path node.
+   *
+   * A position-only graph can contain two individually traversable edges
+   * whose common vertex has no ground support for the intermediate headings.
+   * The callback closes that gap before the reference path reaches SCAN.
+   */
+  void setTurnValidator(TurnValidator validator);
+
+  /**
+   * @brief Select a safe final approach point around the exact requested goal.
+   *
+   * The hybrid graph is position-only, while the B2 footprint is directional.
+   * This callback checks both the short connector into the exact XY and the
+   * requested terminal-yaw sweep before A* commits to one nearby cloud node.
+   */
+  void setGoalConnectorValidator(GoalConnectorValidator validator);
 
   /**
    * @brief Set the detour ratio threshold for path-length-balanced cost
@@ -280,7 +346,8 @@ public:
    */
   void getPathWithStartPose(const geometry_msgs::msg::PoseStamped& start_pose,
                              unsigned int goal,
-                             std::vector<unsigned int>& path);
+                             std::vector<unsigned int>& path,
+                             const pcl::PointXYZI* exact_goal = nullptr);
 
   /**
    * @brief Plan with start pose (robot current position) and goal on ground cloud
@@ -291,7 +358,8 @@ public:
    */
   void getPathWithStartPoseAndGroundGoal(const geometry_msgs::msg::PoseStamped& start_pose,
                                           unsigned int ground_goal,
-                                          std::vector<unsigned int>& path);
+                                          std::vector<unsigned int>& path,
+                                          const pcl::PointXYZI* exact_goal = nullptr);
 
   /**
    * @brief Get the hybrid point cloud (planground + ground fused)
@@ -553,7 +621,19 @@ private:
   double max_ground_bridge_length_ = 0.12; // Max distance from planground for ground points to be useful (v24: 从0.15降低到0.12)
                                            // 更严格限制地面路径长度，避免绕路
                                            // 超过此距离的地面点代价急剧上升
-  double hybrid_downsample_leaf_size_ = 0.15; // Voxel size for downsampling hybrid cloud
+  // Matches the Navigation default so construction does not build a 0.15 m
+  // cloud only to discard and rebuild it immediately at 0.20 m.
+  double hybrid_downsample_leaf_size_ = 0.20;
+  double reference_planning_time_ = 0.75;  // Short planground detour-reference budget (seconds)
+  // The robust phase has no wall-clock deadline. A newer goal can still
+  // cancel it immediately through cancel_checker_.
+  double max_planning_time_ = 0.0;
+  double heuristic_weight_ = 1.5;          // Weighted-A* multiplier for the main search
+  CancelChecker cancel_checker_;           // Cooperative cancellation for goal preemption
+  EdgeValidator edge_validator_;           // Shared A* and output-path edge validation
+  TurnValidator turn_validator_;           // B2 in-place heading transition validation
+  GoalConnectorValidator goal_connector_validator_;  // Exact-goal approach validation
+  std::optional<pcl::PointXYZI> exact_goal_connector_target_;
   
   // v24: Ultra-Strong Planground Preference with Maximum Anti-Detour (加强版)
   double detour_ratio_threshold_ = 4.0;    // Planground path length / straight-line ratio threshold (v23: 从3.0提高到4.0)

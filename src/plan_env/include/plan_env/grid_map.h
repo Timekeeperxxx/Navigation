@@ -11,6 +11,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <nav_msgs/msg/odometry.hpp>
 #include <queue>
@@ -33,6 +34,7 @@
 #include <message_filters/time_synchronizer.h>
 
 #include <plan_env/raycast.h>
+#include <plan_env/ground_support.h>
 
 #define logit(x) (log((x) / (1 - (x))))
 
@@ -107,6 +109,15 @@ struct MappingParameters {
   double self_filter_padding_;
   double self_filter_z_min_offset_;
   double self_filter_z_max_above_sensor_;
+  bool ground_support_enabled_;
+  bool ground_support_fail_closed_;
+  double ground_support_bucket_size_;
+  double ground_support_xy_tolerance_;
+  double ground_support_z_tolerance_;
+  double ground_support_planning_height_;
+  double ground_support_footprint_probe_margin_;
+  int ground_support_perimeter_samples_;
+  int ground_support_radial_samples_;
   Eigen::Matrix4d lidar_extrinsic_;
   Eigen::Matrix4d depth_extrinsic_;
 
@@ -165,6 +176,7 @@ struct MappingData {
 
   double fuse_time_, max_fuse_time_;
   int update_num_;
+  uint64_t obstacle_observation_count_;
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
@@ -191,7 +203,10 @@ public:
   inline void setOccupied(Eigen::Vector3d pos);
   inline int getOccupancy(Eigen::Vector3d pos);
   inline int getOccupancy(Eigen::Vector3i id);
-  inline int getInflateOccupancy(Eigen::Vector3d pos, double yaw);
+  int getInflateOccupancy(Eigen::Vector3d pos, double yaw);
+  int getDynamicInflateOccupancy(Eigen::Vector3d pos, double yaw);
+  bool isGroundSupported(const Eigen::Vector3d& pos, double yaw);
+  bool isGroundSupportReady();
 
   inline void boundIndex(Eigen::Vector3i& id);
   inline bool isUnknown(const Eigen::Vector3i& id);
@@ -212,6 +227,7 @@ public:
 
   bool hasDepthObservation();
   bool odomValid();
+  uint64_t getObstacleObservationCount();
   void getRegion(Eigen::Vector3d& ori, Eigen::Vector3d& size);
   inline double getResolution();
   Eigen::Vector3d getOrigin();
@@ -231,6 +247,7 @@ private:
   void sensorPoseCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& pose);
   void slidingMapFrameCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& pose);
   void cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& img);
+  void groundCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud);
 
   // update occupancy by raycasting
   void updateOccupancyCallback();
@@ -279,12 +296,18 @@ private:
   SynchronizerImagePose sync_image_pose_;
 
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr lidar_pose_sub_, sliding_map_frame_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_, ground_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_, map_inf_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr sliding_map_bbox_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr unknown_pub_, depth_cloud_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr extrinsic_pose_pub_;
   rclcpp::TimerBase::SharedPtr occ_timer_, vis_timer_;
+
+  plan_env::GroundSupportIndex ground_support_index_;
+  std::mutex ground_support_mutex_;
+  bool ground_support_ready_ = false;
+  std::size_t ground_support_source_point_count_ = 0;
+  std::uint64_t ground_support_source_signature_ = 0;
 
   //
   uniform_real_distribution<double> rand_noise_;
@@ -387,18 +410,6 @@ inline int GridMap::getOccupancy(Eigen::Vector3d pos) {
   posToIndex(pos, id);
 
   return md_.occupancy_buffer_[toAddress(id)] > mp_.min_occupancy_log_ ? 1 : 0;
-}
-
-inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos, double yaw) {
-  Eigen::Vector3d heading(std::cos(yaw), std::sin(yaw), 0.0);
-  Eigen::Vector3d center = pos + mp_.double_cylinder_center_offset_ * heading;
-  Eigen::Vector3d front = center + mp_.double_cylinder_offset_ * heading;
-  Eigen::Vector3d rear = center - mp_.double_cylinder_offset_ * heading;
-
-  int front_occ = getInflateOccupancyFromBuffer(front, md_.occupancy_buffer_inflate_);
-  if (front_occ != 0) return front_occ;
-
-  return getInflateOccupancyFromBuffer(rear, md_.occupancy_buffer_inflate_);
 }
 
 inline int GridMap::getInflateOccupancyFromBuffer(Eigen::Vector3d pos, const std::vector<char>& buffer) {

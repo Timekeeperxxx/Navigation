@@ -71,6 +71,13 @@ if(BUILD_TESTING)
   target_include_directories(test_robot_self_filter PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
   )
+
+  ament_add_gtest(test_ground_support
+    test/test_ground_support.cpp
+  )
+  target_include_directories(test_ground_support PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
 endif()
 
 install(TARGETS plan_env

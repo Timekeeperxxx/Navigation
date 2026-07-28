@@ -291,26 +291,36 @@ ASTAR_RET AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d
                 neighborPtr = GridNodeMap_[neighborIdx(0)][neighborIdx(1)][neighborIdx(2)];
                 neighborPtr->index = neighborIdx;
 
-                bool flag_explored = neighborPtr->rounds == rounds_;
+	                bool flag_explored = neighborPtr->rounds == rounds_;
 
-                if (flag_explored && neighborPtr->state == GridNode::CLOSEDSET)
-                {
-                    continue; //in closed set.
-                }
+	                if (flag_explored)
+	                {
+	                    if (neighborPtr->state == GridNode::CLOSEDSET ||
+	                        neighborPtr->occupied)
+	                        continue;
+	                }
+	                else
+	                {
+	                    neighborPtr->rounds = rounds_;
 
-                neighborPtr->rounds = rounds_;
-
-                // B2 is holonomic: a lateral A-star step does not imply that
-                // the 1.1 m body instantly rotates to face that grid edge.
-                // Using each neighbor direction as body yaw can make every
-                // neighbor occupied around a valid start (open set exhausted
-                // after one iteration).  Keep the segment heading used to
-                // validate the start/end footprint; the closed-loop controller
-                // aligns the body with this overall path heading.
-                if (checkOccupancy(Index2Coord(neighborPtr->index), search_yaw))
-                {
-                    continue;
-                }
+	                    // B2 is holonomic: a lateral A-star step does not imply that
+	                    // the 1.1 m body instantly rotates to face that grid edge.
+	                    // Using each neighbor direction as body yaw can make every
+	                    // neighbor occupied around a valid start (open set exhausted
+	                    // after one iteration). Keep the segment heading used to
+	                    // validate the start/end footprint.
+	                    //
+	                    // Reuse a node's occupancy result only within this <=0.2 s
+	                    // search round. This avoids repeating the complete
+	                    // double-circle ground query through up to eight parents;
+	                    // the finished spline is independently validated against
+	                    // the latest map before publication.
+	                    neighborPtr->occupied =
+	                        checkOccupancy(
+	                            Index2Coord(neighborPtr->index), search_yaw) != 0;
+	                    if (neighborPtr->occupied)
+	                        continue;
+	                }
 
                 const int dz = neighborIdx(2) - current->index(2);
                 double static_cost = sqrt(dx * dx + dy * dy + dz * dz);

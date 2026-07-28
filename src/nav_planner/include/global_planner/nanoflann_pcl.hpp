@@ -188,7 +188,10 @@ inline int KdTreeFLANN<PointT>::nearestKSearch(const PointT& point, int num_clos
 template <typename PointT>
 inline int KdTreeFLANN<PointT>::radiusSearch(const PointT& point, float radius, std::vector<int>& k_indices,
                                              std::vector<float>& k_sqr_distances) const {
-    static std::vector<nanoflann::ResultItem<int, float>> result;
+    // This function is called concurrently by the planner executor and action
+    // threads. A function-static scratch vector is a data race and can corrupt
+    // search results, so keep the scratch storage local to each invocation.
+    std::vector<nanoflann::ResultItem<int, float>> result;
     result.reserve(256);
 
     // From nanoflann README

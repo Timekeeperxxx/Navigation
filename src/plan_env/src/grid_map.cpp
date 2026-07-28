@@ -89,6 +89,43 @@ bool decodeDepthImage(const sensor_msgs::msg::Image& image, double scaling_facto
   }
   return true;
 }
+
+std::uint64_t groundCloudSignature(
+    const sensor_msgs::msg::PointCloud2 & cloud)
+{
+  constexpr std::uint64_t kOffset = 1469598103934665603ULL;
+  constexpr std::uint64_t kPrime = 1099511628211ULL;
+  std::uint64_t value = kOffset;
+  auto mix = [&](std::uint64_t item) {
+    value ^= item;
+    value *= kPrime;
+  };
+  mix(cloud.width);
+  mix(cloud.height);
+  mix(cloud.point_step);
+  mix(cloud.row_step);
+  mix(cloud.data.size());
+  mix(cloud.is_bigendian ? 1U : 0U);
+  mix(cloud.is_dense ? 1U : 0U);
+  mix(cloud.fields.size());
+  for (const auto & field : cloud.fields)
+  {
+    mix(field.name.size());
+    for (char character : field.name)
+      mix(static_cast<unsigned char>(character));
+    mix(field.offset);
+    mix(field.datatype);
+    mix(field.count);
+  }
+  mix(cloud.header.frame_id.size());
+  for (char character : cloud.header.frame_id)
+    mix(static_cast<unsigned char>(character));
+  // This is a static, safety-critical map. Hash all bytes so a changed region
+  // in the middle of a same-sized cloud can never keep the previous index.
+  for (const std::uint8_t byte : cloud.data)
+    mix(byte);
+  return value;
+}
 }  // namespace
 
 void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
@@ -156,6 +193,47 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   getParam(
       node_, "grid_map/self_filter_z_max_above_sensor",
       mp_.self_filter_z_max_above_sensor_, 0.05);
+  getParam(
+      node_, "grid_map/ground_support_enabled",
+      mp_.ground_support_enabled_, false);
+  getParam(
+      node_, "grid_map/ground_support_fail_closed",
+      mp_.ground_support_fail_closed_, true);
+  getParam(
+      node_, "grid_map/ground_support_bucket_size",
+      mp_.ground_support_bucket_size_, 0.15);
+  getParam(
+      node_, "grid_map/ground_support_xy_tolerance",
+      mp_.ground_support_xy_tolerance_, 0.15);
+  getParam(
+      node_, "grid_map/ground_support_z_tolerance",
+      mp_.ground_support_z_tolerance_, 0.20);
+  double configured_body_height = 0.32;
+  getParam(node_, "grid_map/body_height", configured_body_height, 0.32);
+  getParam(
+      node_, "grid_map/ground_support_planning_height",
+      mp_.ground_support_planning_height_, configured_body_height);
+  if (std::abs(
+        mp_.ground_support_planning_height_ - configured_body_height) > 1e-6)
+  {
+    RCLCPP_WARN(
+        node_->get_logger(),
+        "[GroundSupport] planning_height %.3f differs from body_height %.3f; "
+        "using body_height so target lifting and ground lookup stay aligned.",
+        mp_.ground_support_planning_height_, configured_body_height);
+    mp_.ground_support_planning_height_ = configured_body_height;
+  }
+  getParam(
+      node_, "grid_map/ground_support_footprint_probe_margin",
+      mp_.ground_support_footprint_probe_margin_,
+      mp_.ground_support_xy_tolerance_ +
+        mp_.collision_inflation_margin_xy_);
+  getParam(
+      node_, "grid_map/ground_support_perimeter_samples",
+      mp_.ground_support_perimeter_samples_, 16);
+  getParam(
+      node_, "grid_map/ground_support_radial_samples",
+      mp_.ground_support_radial_samples_, 2);
 
   mp_.lidar_extrinsic_ <<
       1.0, 0.0, 0.0, -0.01100,
@@ -187,6 +265,27 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   mp_.min_occupancy_log_ = logit(mp_.p_occ_);
   mp_.unknown_flag_ = 0.01;
   mp_.map_sliding_thresh_vox_ = std::max(1, static_cast<int>(std::ceil(mp_.map_sliding_thresh_ * mp_.resolution_inv_)));
+
+  plan_env::GroundSupportConfig ground_support_config;
+  ground_support_config.bucket_size = mp_.ground_support_bucket_size_;
+  ground_support_config.xy_tolerance = mp_.ground_support_xy_tolerance_;
+  ground_support_config.z_tolerance = mp_.ground_support_z_tolerance_;
+  ground_support_config.planning_height =
+      mp_.ground_support_planning_height_;
+  ground_support_config.circle_radius = mp_.double_cylinder_radius_;
+  ground_support_config.circle_offset = mp_.double_cylinder_offset_;
+  ground_support_config.circle_center_offset =
+      mp_.double_cylinder_center_offset_;
+  ground_support_config.footprint_probe_margin =
+      mp_.ground_support_footprint_probe_margin_;
+  ground_support_config.perimeter_samples =
+      mp_.ground_support_perimeter_samples_;
+  ground_support_config.radial_samples =
+      mp_.ground_support_radial_samples_;
+  ground_support_index_.configure(ground_support_config);
+  ground_support_ready_ = false;
+  ground_support_source_point_count_ = 0;
+  ground_support_source_signature_ = 0;
 
   cout << "hit: " << mp_.prob_hit_log_ << endl;
   cout << "miss: " << mp_.prob_miss_log_ << endl;
@@ -252,6 +351,28 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
       node_->create_subscription<nav_msgs::msg::Odometry>(
           "/grid_map/body_pose", 50, std::bind(&GridMap::slidingMapFrameCallback, this, std::placeholders::_1));
 
+  if (mp_.ground_support_enabled_)
+  {
+    const auto ground_qos =
+        rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+    ground_sub_ =
+        node_->create_subscription<sensor_msgs::msg::PointCloud2>(
+            "/grid_map/ground", ground_qos,
+            std::bind(
+              &GridMap::groundCallback, this,
+              std::placeholders::_1));
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "[GroundSupport] enabled: xy_tolerance=%.3fm z_tolerance=%.3fm "
+        "planning_height=%.3fm footprint_probe_margin=%.3fm samples=%dx%d",
+        ground_support_index_.config().xy_tolerance,
+        ground_support_index_.config().z_tolerance,
+        ground_support_index_.config().planning_height,
+        ground_support_index_.config().footprint_probe_margin,
+        ground_support_index_.config().radial_samples,
+        ground_support_index_.config().perimeter_samples);
+  }
+
   occ_timer_ = node_->create_wall_timer(std::chrono::milliseconds(50), std::bind(&GridMap::updateOccupancyCallback, this));
   vis_timer_ = node_->create_wall_timer(std::chrono::milliseconds(50), std::bind(&GridMap::visCallback, this));
 
@@ -279,6 +400,7 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
 
   md_.fuse_time_ = 0.0;
   md_.update_num_ = 0;
+  md_.obstacle_observation_count_ = 0;
   md_.max_fuse_time_ = 0.0;
   md_.local_bound_min_ = mp_.map_bound_min_idx_;
   md_.local_bound_max_ = mp_.map_bound_max_idx_;
@@ -926,6 +1048,7 @@ void GridMap::updateOccupancyCallback()
     projectDepthImage();
   // t2 = ros::Time::now();
   raycastProcess();
+  ++md_.obstacle_observation_count_;
   // t3 = ros::Time::now();
 
   // t4 = ros::Time::now();
@@ -1070,7 +1193,14 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
   md_.has_cloud_ = true;
 
   if (latest_cloud.points.size() == 0)
+  {
+    // An empty lidar frame is still a valid obstacle observation. This is
+    // common in the RViz simulator before a test obstacle is inserted and can
+    // also happen in genuinely open space. Count it as map warm-up without
+    // fabricating occupied or free voxels.
+    ++md_.obstacle_observation_count_;
     return;
+  }
 
   const Eigen::Matrix3d sensor_r = md_.ray_q_.toRotationMatrix();
   const Eigen::Vector3d ray_pos = md_.ray_pos_;
@@ -1122,6 +1252,142 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
 
   md_.use_cloud_update_ = true;
   md_.occ_need_update_ = true;
+}
+
+void GridMap::groundCallback(
+    const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg)
+{
+  if (!mp_.ground_support_enabled_ || !cloud_msg)
+    return;
+
+  auto invalidate_ground_support = [this]() {
+    std::lock_guard<std::mutex> lock(ground_support_mutex_);
+    ground_support_ready_ = false;
+    ground_support_source_point_count_ = 0;
+    ground_support_source_signature_ = 0;
+  };
+
+  const std::string source_frame = cloud_msg->header.frame_id;
+  if (source_frame != mp_.frame_id_)
+  {
+    invalidate_ground_support();
+    RCLCPP_ERROR_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "[GroundSupport] reject frame '%s'; expected '%s'.",
+        source_frame.c_str(), mp_.frame_id_.c_str());
+    return;
+  }
+
+  const std::size_t source_point_count =
+      static_cast<std::size_t>(cloud_msg->width) *
+      static_cast<std::size_t>(cloud_msg->height);
+  const std::uint64_t source_signature =
+      groundCloudSignature(*cloud_msg);
+  plan_env::GroundSupportConfig support_config;
+  {
+    std::lock_guard<std::mutex> lock(ground_support_mutex_);
+    // nav_pcd_map_publisher republishes the same transient-local static map.
+    // Avoid rebuilding a several-hundred-thousand-point index every second,
+    // while still accepting a same-sized map with a different sample hash.
+    if (ground_support_ready_ &&
+        source_point_count == ground_support_source_point_count_ &&
+        source_signature == ground_support_source_signature_)
+      return;
+    support_config = ground_support_index_.config();
+    // A changed latched map supersedes the old one. Keep the planner
+    // fail-closed until the replacement index has been built successfully.
+    ground_support_ready_ = false;
+    ground_support_source_point_count_ = 0;
+    ground_support_source_signature_ = 0;
+  }
+
+  pcl::PointCloud<pcl::PointXYZ> cloud;
+  pcl::fromROSMsg(*cloud_msg, cloud);
+  if (cloud.empty())
+  {
+    RCLCPP_ERROR_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "[GroundSupport] received an empty ground cloud; planning remains "
+        "fail-closed.");
+    return;
+  }
+
+  plan_env::GroundSupportIndex next_index(support_config);
+  next_index.reserve(cloud.size());
+  for (const pcl::PointXYZ & point : cloud.points)
+    next_index.addPoint(point.x, point.y, point.z);
+
+  if (next_index.empty())
+  {
+    RCLCPP_ERROR(
+        node_->get_logger(),
+        "[GroundSupport] ground cloud had no finite XYZ points; planning "
+        "remains fail-closed.");
+    return;
+  }
+
+  const std::size_t indexed_points = next_index.size();
+  {
+    std::lock_guard<std::mutex> lock(ground_support_mutex_);
+    ground_support_index_ = std::move(next_index);
+    ground_support_source_point_count_ = source_point_count;
+    ground_support_source_signature_ = source_signature;
+    ground_support_ready_ = true;
+  }
+  RCLCPP_INFO(
+      node_->get_logger(),
+      "[GroundSupport] indexed %zu ground points in frame '%s'.",
+      indexed_points, mp_.frame_id_.c_str());
+}
+
+bool GridMap::isGroundSupportReady()
+{
+  if (!mp_.ground_support_enabled_ || !mp_.ground_support_fail_closed_)
+    return true;
+  std::lock_guard<std::mutex> lock(ground_support_mutex_);
+  return ground_support_ready_;
+}
+
+bool GridMap::isGroundSupported(
+    const Eigen::Vector3d & pos, double yaw)
+{
+  if (!mp_.ground_support_enabled_)
+    return true;
+
+  std::lock_guard<std::mutex> lock(ground_support_mutex_);
+  if (!ground_support_ready_)
+    return !mp_.ground_support_fail_closed_;
+  return ground_support_index_.isPoseSupported(
+      pos.x(), pos.y(), pos.z(), yaw);
+}
+
+int GridMap::getInflateOccupancy(Eigen::Vector3d pos, double yaw)
+{
+  // Missing same-floor support is a hard collision condition, independent of
+  // positive-obstacle raycasting.  This makes holes, drop-offs and unmapped
+  // floor impossible shortcuts for A*, rebound optimization and final checks.
+  if (!isGroundSupported(pos, yaw))
+    return 1;
+  return getDynamicInflateOccupancy(pos, yaw);
+}
+
+int GridMap::getDynamicInflateOccupancy(Eigen::Vector3d pos, double yaw)
+{
+  Eigen::Vector3d heading(std::cos(yaw), std::sin(yaw), 0.0);
+  Eigen::Vector3d center =
+      pos + mp_.double_cylinder_center_offset_ * heading;
+  Eigen::Vector3d front =
+      center + mp_.double_cylinder_offset_ * heading;
+  Eigen::Vector3d rear =
+      center - mp_.double_cylinder_offset_ * heading;
+
+  int front_occ =
+      getInflateOccupancyFromBuffer(
+        front, md_.occupancy_buffer_inflate_);
+  if (front_occ != 0)
+    return front_occ;
+  return getInflateOccupancyFromBuffer(
+      rear, md_.occupancy_buffer_inflate_);
 }
 
 void GridMap::publishMap()
@@ -1320,6 +1586,11 @@ void GridMap::publishUnknown()
 bool GridMap::odomValid() { return md_.has_ray_pose_; }
 
 bool GridMap::hasDepthObservation() { return md_.has_first_depth_; }
+
+uint64_t GridMap::getObstacleObservationCount()
+{
+  return md_.obstacle_observation_count_;
+}
 
 Eigen::Vector3d GridMap::getOrigin() { return mp_.map_origin_; }
 

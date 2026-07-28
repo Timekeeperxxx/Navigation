@@ -35,6 +35,7 @@ struct GridNode
 	};
 
 	int rounds{0}; // Distinguish every call
+	bool occupied{false}; // Cached for one A* round; final spline is revalidated.
 	enum enum_state state
 	{
 		UNDEFINED

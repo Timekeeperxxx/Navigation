@@ -29,91 +29,120 @@
 * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include <global_planner/a_star_on_pc.h>
-#include <cmath>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <utility>
 
 AstarList::AstarList(pcl::PointCloud<pcl::PointXYZI>::Ptr& pc_original_z_up){
   pc_original_z_up_ = pc_original_z_up;
   kdtree_ground_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
+  // A* only needs the complete neighbour set; sorting every radius result
+  // adds work and does not affect costs or correctness.
+  kdtree_ground_->setSortedResults(false);
   kdtree_ground_->setInputCloud(pc_original_z_up_);
 }
 
 void AstarList::Initial(){
-  as_list_.clear(); 
-  for(unsigned int it=0; it!=pc_original_z_up_->points.size();it++){
-    Node_t new_node = {.self_index=0, .g=0, .h=0, .f=0, .parent_index=0, .is_closed=false, .is_opened=false, .consecutive_ground_steps=0};
-    as_list_[it] = new_node;
+  as_list_.assign(pc_original_z_up_->points.size(), Node_t{});
+  node_revisions_.assign(pc_original_z_up_->points.size(), 0);
+  for (size_t i = 0; i < as_list_.size(); ++i) {
+    as_list_[i].self_index = static_cast<unsigned int>(i);
   }
-  f_priority_set_.clear();
+  decltype(f_priority_queue_) empty_queue;
+  f_priority_queue_.swap(empty_queue);
 }
 
 Node_t AstarList::getNode(unsigned int node_index){
-
+  if (node_index >= as_list_.size()) {
+    return Node_t{};
+  }
   return as_list_[node_index];
 }
 
 float AstarList::getGVal(Node_t& a_node){
+  if (a_node.self_index >= as_list_.size()) {
+    return std::numeric_limits<float>::infinity();
+  }
   return as_list_[a_node.self_index].g;
 }
 
 void AstarList::closeNode(Node_t& a_node){
+  if (a_node.self_index >= as_list_.size()) {
+    return;
+  }
   as_list_[a_node.self_index].is_closed = true;
 }
 
 void AstarList::updateNode(Node_t& a_node){
+  if (a_node.self_index >= as_list_.size()) {
+    return;
+  }
   as_list_[a_node.self_index] = a_node;
-  f_p_ afp;
-  afp.first = a_node.f; //made minimum f to be top so we can pop it
-  afp.second = a_node.self_index;
-  f_priority_set_.insert(afp);
+  const std::uint64_t revision = ++node_revisions_[a_node.self_index];
+  f_priority_queue_.push(
+    FrontierEntry{a_node.f, a_node.self_index, revision});
   //ROS_DEBUG("Add node ---> %u with g: %f, h: %f, f: %f",a_node.self_index, a_node.g, a_node.h, a_node.f);
 }
 
-Node_t AstarList::getNode_wi_MinimumF(){
-  //@ CRITICAL FIX: Check if frontier is empty before accessing begin()
-  if (f_priority_set_.empty()) {
-    Node_t empty_node;
-    empty_node.self_index = 0;
-    empty_node.is_closed = true;
-    return empty_node;
-  }
-  
-  auto first_it = f_priority_set_.begin();
-  Node_t m_node = as_list_[(*first_it).second];
-  if(!m_node.is_closed){
-    f_priority_set_.erase(first_it);
-    return m_node;
-  }
-  
-  //Because we updateNode node even when new g value is smaller than that in openlist
-  //We will have duplicate f value in the f_priority_set_
-  int concern_cnt = 0;
-  while(m_node.is_closed && !f_priority_set_.empty()){
-    concern_cnt++;
-    f_priority_set_.erase(first_it);
-    first_it = f_priority_set_.begin();
-    if (first_it == f_priority_set_.end()) {
-      //@ CRITICAL FIX: Frontier became empty after erasing, return empty node
-      Node_t empty_node;
-      empty_node.self_index = 0;
-      empty_node.is_closed = true;
-      return empty_node;
+bool AstarList::tryPopNodeWithMinimumF(Node_t& node){
+  while (!f_priority_queue_.empty()) {
+    const FrontierEntry entry = f_priority_queue_.top();
+    f_priority_queue_.pop();
+
+    if (entry.node_index >= as_list_.size() ||
+        entry.node_index >= node_revisions_.size()) {
+      continue;
     }
-    m_node = as_list_[(*first_it).second];
+
+    const Node_t& candidate = as_list_[entry.node_index];
+    if (candidate.is_closed || !candidate.is_opened ||
+        node_revisions_[entry.node_index] != entry.revision) {
+      continue;
+    }
+
+    node = candidate;
+    return true;
   }
-  return m_node;
+
+  node = Node_t{};
+  return false;
+}
+
+Node_t AstarList::getNode_wi_MinimumF(){
+  Node_t node;
+  tryPopNodeWithMinimumF(node);
+  return node;
 }
 
 bool AstarList::isClosed(unsigned int node_index){
+  if (node_index >= as_list_.size()) {
+    return true;
+  }
   return as_list_[node_index].is_closed;
 }
 
 bool AstarList::isOpened(unsigned int node_index){
+  if (node_index >= as_list_.size()) {
+    return false;
+  }
   return as_list_[node_index].is_opened;
 }
 
 bool AstarList::isFrontierEmpty(){
-  return f_priority_set_.empty();
+  while (!f_priority_queue_.empty()) {
+    const FrontierEntry& entry = f_priority_queue_.top();
+    if (entry.node_index < as_list_.size() &&
+        entry.node_index < node_revisions_.size()) {
+      const Node_t& candidate = as_list_[entry.node_index];
+      if (!candidate.is_closed && candidate.is_opened &&
+          node_revisions_[entry.node_index] == entry.revision) {
+        return false;
+      }
+    }
+    f_priority_queue_.pop();
+  }
+  return f_priority_queue_.empty();
 }
 
 //@----------------------------------------------------------------------------------------
@@ -133,11 +162,6 @@ A_Star_on_Graph::A_Star_on_Graph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_origina
 
   perception_ground_cloud_.reset(new pcl::PointCloud<pcl::PointXYZI>());
   perception_ground_kdtree_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
-  auto shared_data = perception_ros_->getSharedDataPtr();
-  if (shared_data && shared_data->pcl_ground_) {
-    *perception_ground_cloud_ = *shared_data->pcl_ground_;
-  }
-  perception_ground_kdtree_->setInputCloud(perception_ground_cloud_);
 }
 
 A_Star_on_Graph::~A_Star_on_Graph(){
@@ -146,13 +170,47 @@ A_Star_on_Graph::~A_Star_on_Graph(){
 }
 
 void A_Star_on_Graph::updateGraph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up){
+  pc_original_z_up_ = pc_original_z_up;
+  perception_cache_ready_ = false;
+  planning_node_cache_.clear();
   ASLS_->pc_original_z_up_ = pc_original_z_up;
   ASLS_->kdtree_ground_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
-  ASLS_->kdtree_ground_->setInputCloud(pc_original_z_up_);
+  ASLS_->kdtree_ground_->setSortedResults(false);
+  ASLS_->kdtree_ground_->setInputCloud(pc_original_z_up);
   
   //@ Update ground line-of-sight kdtree
   kdtree_ground_los_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
-  kdtree_ground_los_->setInputCloud(pc_original_z_up_);
+  kdtree_ground_los_->setInputCloud(pc_original_z_up);
+}
+
+void A_Star_on_Graph::setMaxPlanningTime(double seconds){
+  max_planning_time_seconds_ =
+    std::isfinite(seconds) && seconds > 0.0 ? seconds : 0.0;
+}
+
+void A_Star_on_Graph::setCancelChecker(CancelChecker checker){
+  cancel_checker_ = std::move(checker);
+}
+
+void A_Star_on_Graph::setEdgeValidator(EdgeValidator validator){
+  edge_validator_ = std::move(validator);
+}
+
+void A_Star_on_Graph::setIndexEdgeValidator(IndexEdgeValidator validator){
+  index_edge_validator_ = std::move(validator);
+}
+
+void A_Star_on_Graph::setHeuristicWeight(double weight){
+  heuristic_weight_ =
+    std::isfinite(weight) && weight >= 0.0 ? weight : 1.0;
+}
+
+void A_Star_on_Graph::setUsePerceptionCosts(bool enabled){
+  if (use_perception_costs_ != enabled) {
+    perception_cache_ready_ = false;
+    planning_node_cache_.clear();
+  }
+  use_perception_costs_ = enabled;
 }
 
 double A_Star_on_Graph::getPitchFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding){
@@ -198,7 +256,10 @@ double A_Star_on_Graph::getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_curren
   return theta_of_vector;
 }
 
-bool A_Star_on_Graph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius){
+bool A_Star_on_Graph::isLineOfSightClear(
+  const pcl::PointXYZI& pcl_current,
+  const pcl::PointXYZI& pcl_expanding,
+  double inscribed_radius){
 
   //@ generate line equation
   float dX =
@@ -301,10 +362,33 @@ bool A_Star_on_Graph::getPerceptionGroundIndex(
 void A_Star_on_Graph::getPath(
   unsigned int start, unsigned int goal,
   std::vector<unsigned int>& path){
+  using SteadyClock = std::chrono::steady_clock;
 
-  /*
-  Create the first node which is start and add into frontier
-  */
+  path.clear();
+  planning_timed_out_ = false;
+  planning_cancelled_ = false;
+  const auto planning_started_at = SteadyClock::now();
+  size_t neighbor_candidates = 0;
+  size_t index_edge_rejections = 0;
+  size_t point_edge_checks = 0;
+  size_t point_edge_rejections = 0;
+  double point_edge_check_seconds = 0.0;
+
+  const auto should_stop = [&]() {
+    if (cancel_checker_ && cancel_checker_()) {
+      planning_cancelled_ = true;
+      return true;
+    }
+    if (max_planning_time_seconds_ > 0.0 &&
+        std::chrono::duration<double>(
+          SteadyClock::now() - planning_started_at).count() >=
+          max_planning_time_seconds_) {
+      planning_timed_out_ = true;
+      return true;
+    }
+    return false;
+  };
+
   if(start >= pc_original_z_up_->points.size() || goal >= pc_original_z_up_->points.size()){
     RCLCPP_WARN(perception_ros_->get_logger(),
       "[A*] Invalid start (%u) or goal (%u) for cloud size %lu",
@@ -314,32 +398,109 @@ void A_Star_on_Graph::getPath(
 
   pcl::PointXYZI pcl_goal = pc_original_z_up_->points[goal];
   pcl::PointXYZI pcl_start = pc_original_z_up_->points[start];
-  float f = sqrt(pcl::geometry::squaredDistance(pcl_start, pcl_goal));
-  Node_t current_node = {.self_index=start, .g=0, .h=0, .f=f, .parent_index=start, .is_closed=false, .is_opened=true};
+  const float initial_h = static_cast<float>(
+    heuristic_weight_ *
+    std::sqrt(pcl::geometry::squaredDistance(pcl_start, pcl_goal)));
+  Node_t current_node;
+  current_node.self_index = start;
+  current_node.g = 0.0f;
+  current_node.h = initial_h;
+  current_node.f = initial_h;
+  current_node.parent_index = start;
+  current_node.is_opened = true;
+
+  double inscribed_radius =
+    perception_ros_->getGlobalUtils()->getInscribedRadius();
+  double inflation_descending_rate =
+    perception_ros_->getGlobalUtils()->getInflationDescendingRate();
+
+  auto shared_data = perception_ros_->getSharedDataPtr();
+  if (use_perception_costs_ && !perception_cache_ready_) {
+    if (!shared_data || !shared_data->pcl_ground_ ||
+        shared_data->pcl_ground_->empty()) {
+      RCLCPP_WARN(
+        perception_ros_->get_logger(),
+        "[A*] Perception ground is unavailable while perception costs are enabled");
+      return;
+    }
+    // Build this translation tree lazily.  Reference-only searches explicitly
+    // disable perception costs and therefore avoid copying/indexing the full
+    // ground cloud before they can even start searching.
+    *perception_ground_cloud_ = *shared_data->pcl_ground_;
+    perception_ground_kdtree_->setInputCloud(perception_ground_cloud_);
+
+    perception_ros_->getStackedPerception()->aggregateLethal();
+    //@ generate kd-tree and handle no point cloud edge case
+    kdtree_lethal_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
+
+    if(perception_ros_->getSharedDataPtr()->aggregate_lethal_->points.size()>0){
+      kdtree_lethal_->setInputCloud(perception_ros_->getSharedDataPtr()->aggregate_lethal_);
+    } else {
+      //@ CRITICAL FIX: Even when lethal cloud is empty, we must set an empty input cloud
+      //@ to prevent null pointer dereference in isLineOfSightClear() -> kdtree_lethal_->radiusSearch()
+      pcl::PointCloud<pcl::PointXYZI>::Ptr empty_cloud(new pcl::PointCloud<pcl::PointXYZI>);
+      kdtree_lethal_->setInputCloud(empty_cloud);
+    }
+    perception_cache_ready_ = true;
+  }
+
+  // Resolve planning nodes into perception/static-graph index space lazily and
+  // at most once per search.  Weighted A* normally touches only a fraction of
+  // a large hybrid cloud; eagerly translating every node delayed the first
+  // expansion without improving the selected route.
+  if (planning_node_cache_.size() != pc_original_z_up_->points.size()) {
+    planning_node_cache_.assign(
+      pc_original_z_up_->points.size(), PlanningNodeCache{});
+  }
+  std::vector<int> ground_indices(1);
+  std::vector<float> ground_distances(1);
+  auto cached_perception_node =
+    [this, &shared_data,
+     &ground_indices, &ground_distances](
+      size_t planning_index) -> const PlanningNodeCache& {
+      PlanningNodeCache& cached = planning_node_cache_[planning_index];
+      if (cached.initialized) {
+        return cached;
+      }
+      cached.initialized = true;
+
+      if (!perception_ground_cloud_ || perception_ground_cloud_->empty() ||
+          !shared_data || !shared_data->sGraph_ptr_ ||
+          perception_ground_kdtree_->nearestKSearch(
+            pc_original_z_up_->points[planning_index], 1,
+            ground_indices, ground_distances) <= 0 ||
+          ground_indices[0] < 0 ||
+          static_cast<size_t>(ground_indices[0]) >=
+            perception_ground_cloud_->points.size()) {
+        return cached;
+      }
+
+      const unsigned int perception_ground_index =
+        static_cast<unsigned int>(ground_indices[0]);
+      cached.perception_ground_index = perception_ground_index;
+      cached.dgraph_value =
+        perception_ros_->get_min_dGraphValue(perception_ground_index);
+      cached.node_weight =
+        shared_data->sGraph_ptr_->getNodeWeight(perception_ground_index);
+      cached.valid = true;
+      return cached;
+    };
 
   ASLS_->Initial();
   ASLS_->updateNode(current_node);
 
-  double inscribed_radius = perception_ros_->getGlobalUtils()->getInscribedRadius();
-  double inflation_descending_rate = perception_ros_->getGlobalUtils()->getInflationDescendingRate();
-  double max_obstacle_distance = perception_ros_->getGlobalUtils()->getMaxObstacleDistance();
-
-  perception_ros_->getStackedPerception()->aggregateLethal();
-  //@ generate kd-tree and handle no point cloud edge case
-  kdtree_lethal_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
-
-  if(perception_ros_->getSharedDataPtr()->aggregate_lethal_->points.size()>0){
-    kdtree_lethal_->setInputCloud(perception_ros_->getSharedDataPtr()->aggregate_lethal_);
-  } else {
-    //@ CRITICAL FIX: Even when lethal cloud is empty, we must set an empty input cloud
-    //@ to prevent null pointer dereference in isLineOfSightClear() -> kdtree_lethal_->radiusSearch()
-    pcl::PointCloud<pcl::PointXYZI>::Ptr empty_cloud(new pcl::PointCloud<pcl::PointXYZI>);
-    kdtree_lethal_->setInputCloud(empty_cloud);
-  }
-
   const size_t max_iterations = std::max<size_t>(pc_original_z_up_->points.size() * 4, 50000);
   size_t iter_count = 0;
-  while(!ASLS_->isFrontierEmpty()){
+  while(ASLS_->tryPopNodeWithMinimumF(current_node)){
+    if (should_stop()) {
+      RCLCPP_WARN(perception_ros_->get_logger(),
+        "[A*] Planning %s after %lu expansions (cloud=%lu)",
+        planning_cancelled_ ? "cancelled" : "timed out",
+        iter_count, pc_original_z_up_->points.size());
+      path.clear();
+      return;
+    }
+
     if(++iter_count > max_iterations){
       RCLCPP_WARN(perception_ros_->get_logger(),
         "[A*] Aborting: exceeded max iterations (%lu) without reaching goal. cloud=%lu start=%u goal=%u",
@@ -347,14 +508,22 @@ void A_Star_on_Graph::getPath(
       path.clear();
       return;
     }
-    /*Pop minimum F, we leverage prior queue, so we dont need to loop frontier everytime*/
-    current_node = ASLS_->getNode_wi_MinimumF();
+
     if(current_node.self_index >= pc_original_z_up_->points.size()) {
       RCLCPP_WARN(perception_ros_->get_logger(),
         "[A*] Aborting: self_index=%u out of bounds (cloud=%lu)",
         current_node.self_index, pc_original_z_up_->points.size());
       path.clear();
       return;
+    }
+    if (current_node.parent_index >= pc_original_z_up_->points.size()) {
+      RCLCPP_WARN(perception_ros_->get_logger(),
+        "[A*] Aborting expansion: parent_index=%u out of bounds "
+        "(node=%u cloud=%lu)",
+        current_node.parent_index, current_node.self_index,
+        pc_original_z_up_->points.size());
+      ASLS_->closeNode(current_node);
+      continue;
     }
 
     //RCLCPP_DEBUG(rclcpp::get_logger("astar"), "Expand node: %u", current_node.self_index);
@@ -366,14 +535,64 @@ void A_Star_on_Graph::getPath(
 
     //@dealing with orphan node
     if(pointIdxRadiusSearch.size()<8){
-      ASLS_->kdtree_ground_->nearestKSearch(pcl_now, 8, pointIdxRadiusSearch, pointRadiusSquaredDistance);
+      const int found = ASLS_->kdtree_ground_->nearestKSearch(
+        pcl_now, 8, pointIdxRadiusSearch, pointRadiusSquaredDistance);
+      pointIdxRadiusSearch.resize(std::max(found, 0));
+      pointRadiusSquaredDistance.resize(std::max(found, 0));
     }
 
     for(unsigned int it = 0; it!=pointIdxRadiusSearch.size(); it++){
+      if ((it & 0x7fU) == 0U && should_stop()) {
+        RCLCPP_WARN(perception_ros_->get_logger(),
+          "[A*] Planning %s while expanding node %u (cloud=%lu)",
+          planning_cancelled_ ? "cancelled" : "timed out",
+          current_node.self_index, pc_original_z_up_->points.size());
+        path.clear();
+        return;
+      }
 
       int current_expanding_index = pointIdxRadiusSearch[it];
       if(current_expanding_index < 0 || static_cast<size_t>(current_expanding_index) >= pc_original_z_up_->points.size())
         continue;
+      if (ASLS_->isClosed(static_cast<unsigned int>(current_expanding_index))) {
+        continue;
+      }
+      ++neighbor_candidates;
+
+      if (index_edge_validator_ &&
+          !index_edge_validator_(
+            current_node.self_index,
+            static_cast<unsigned int>(current_expanding_index))) {
+        ++index_edge_rejections;
+        continue;
+      }
+
+      const pcl::PointXYZI& pcl_current =
+        pc_original_z_up_->points[current_node.self_index];
+      const pcl::PointXYZI& pcl_expanding =
+        pc_original_z_up_->points[current_expanding_index];
+      if (edge_validator_) {
+        ++point_edge_checks;
+        const auto edge_check_started_at = SteadyClock::now();
+        const bool edge_is_valid =
+          edge_validator_(pcl_current, pcl_expanding);
+        point_edge_check_seconds += std::chrono::duration<double>(
+          SteadyClock::now() - edge_check_started_at).count();
+        if (!edge_is_valid) {
+          ++point_edge_rejections;
+          continue;
+        }
+      }
+
+      const PlanningNodeCache& cached = use_perception_costs_ ?
+        cached_perception_node(
+          static_cast<size_t>(current_expanding_index)) :
+        planning_node_cache_[static_cast<size_t>(current_expanding_index)];
+      if (use_perception_costs_ && !cached.valid) {
+        continue;
+      }
+      const double dGraphValue = use_perception_costs_ ?
+        cached.dgraph_value : std::numeric_limits<double>::infinity();
 
       //@ Use intensity as ground edge weight for hybrid planning (v22 - Strong Planground Preference)
       //@ 
@@ -432,40 +651,25 @@ void A_Star_on_Graph::getPath(
       }
       float current_expanding_g = sqrt(pointRadiusSquaredDistance[it]);
 
-      //@ dGraph/static graph are indexed by perception ground, while hybrid A*
-      //@ uses planground + ground + an injected start pose. Resolve by XYZ first;
-      //@ directly reusing current_expanding_index marks most hybrid nodes lethal.
-      unsigned int perception_ground_index = 0;
-      if (!getPerceptionGroundIndex(
-            static_cast<unsigned int>(current_expanding_index), perception_ground_index)) {
-        continue;
-      }
-      double dGraphValue = perception_ros_->get_min_dGraphValue(perception_ground_index);
-
       /*This is for lethal*/
-      if(dGraphValue<inscribed_radius){
+      if(use_perception_costs_ && dGraphValue<inscribed_radius){
         //RCLCPP_DEBUG(rclcpp::get_logger("astar"), "%.2f,%.2f,%.2f, v: %.2f",pc_original_z_up_->points[(*it).first].x,pc_original_z_up_->points[(*it).first].y,pc_original_z_up_->points[(*it).first].z, dGraphValue);
         continue;
       }
 
-      // CRITICAL FIX: Validate parent_index before accessing to prevent segfault
-      if (current_node.parent_index >= pc_original_z_up_->points.size()) {
-        RCLCPP_WARN(perception_ros_->get_logger(),
-          "[A*] Invalid parent_index=%u (cloud=%lu), skipping expansion",
-          current_node.parent_index, pc_original_z_up_->points.size());
-        continue;
-      }
-      pcl::PointXYZI pcl_current = pc_original_z_up_->points[current_node.self_index];
-      pcl::PointXYZI pcl_current_parent = pc_original_z_up_->points[current_node.parent_index];
-      pcl::PointXYZI pcl_expanding = pc_original_z_up_->points[current_expanding_index];
+      const pcl::PointXYZI& pcl_current_parent =
+        pc_original_z_up_->points[current_node.parent_index];
 
       //@ check line-of-sight when distance is 2 times larger than inscribed_radius
-      if(current_expanding_g>=2*inscribed_radius){
+      if(use_perception_costs_ &&
+         current_expanding_g>=2*inscribed_radius){
         if(!isLineOfSightClear(pcl_current, pcl_expanding, inscribed_radius))
           continue;
       }
       
-      double factor = exp(-1.0 * inflation_descending_rate * (dGraphValue - inscribed_radius));
+      const double factor = use_perception_costs_ ?
+        exp(-1.0 * inflation_descending_rate *
+          (dGraphValue - inscribed_radius)) : 0.0;
 
       //@ get current_parent, current, expanding to compute theta od expanding
       double theta = getThetaFromParent2Expanding(pcl_current_parent, pcl_current, pcl_expanding);
@@ -473,19 +677,25 @@ void A_Star_on_Graph::getPath(
       //if(getPitchFromParent2Expanding(pcl_current_parent, pcl_current, pcl_expanding)>0.2)
       //  continue;
       
-      float node_weight = perception_ros_->getSharedDataPtr()->sGraph_ptr_->getNodeWeight(perception_ground_index);
-      float new_g = current_node.g + current_expanding_g + factor * 1.0 + node_weight + theta*turning_weight_ + ground_edge_weight;
-      float new_h = sqrt(pcl::geometry::squaredDistance(pcl_expanding, pcl_goal));
+      float new_g = current_node.g + current_expanding_g + factor * 1.0 +
+        (use_perception_costs_ ? cached.node_weight : 0.0f) +
+        theta*turning_weight_ + ground_edge_weight;
+      float new_h = static_cast<float>(
+        heuristic_weight_ *
+        std::sqrt(pcl::geometry::squaredDistance(pcl_expanding, pcl_goal)));
       float new_f = new_g + new_h;
       if(!std::isfinite(new_f)) continue;
 
-      Node_t new_node = {.self_index=static_cast<unsigned int>(current_expanding_index), .g=new_g, .h=new_h, .f=new_f, .parent_index=static_cast<unsigned int>(current_node.self_index), .is_closed=false, .is_opened=true, .consecutive_ground_steps=0};
+      Node_t new_node;
+      new_node.self_index = static_cast<unsigned int>(current_expanding_index);
+      new_node.g = new_g;
+      new_node.h = new_h;
+      new_node.f = new_f;
+      new_node.parent_index = current_node.self_index;
+      new_node.is_opened = true;
 
-      /*Check is in closed list*/
-      if(ASLS_->isClosed(current_expanding_index))
-        continue;
       /*Check is in opened list*/
-      else if(ASLS_->isOpened(current_expanding_index)){
+      if(ASLS_->isOpened(current_expanding_index)){
         if(ASLS_->getGVal(new_node)>new_g){
           ASLS_->updateNode(new_node);          
         }
@@ -506,8 +716,20 @@ void A_Star_on_Graph::getPath(
       Node_t trace_back = ASLS_->getNode(goal);
       size_t trace_steps = 0;
       const size_t max_trace = pc_original_z_up_->points.size() + 16;
-      while(trace_back.self_index!=trace_back.parent_index){
+      while(true){
+        if (trace_back.self_index >= pc_original_z_up_->points.size() ||
+            trace_back.parent_index >= pc_original_z_up_->points.size()) {
+          RCLCPP_WARN(perception_ros_->get_logger(),
+            "[A*] Invalid traceback node=%u parent=%u (cloud=%lu), aborting",
+            trace_back.self_index, trace_back.parent_index,
+            pc_original_z_up_->points.size());
+          path.clear();
+          return;
+        }
         path.push_back(trace_back.self_index);
+        if (trace_back.self_index == trace_back.parent_index) {
+          break;
+        }
         if(++trace_steps > max_trace){
           RCLCPP_WARN(perception_ros_->get_logger(),
             "[A*] Traceback exceeded %lu steps, aborting", max_trace);
@@ -516,12 +738,31 @@ void A_Star_on_Graph::getPath(
         }
         trace_back = ASLS_->getNode(trace_back.parent_index);
       }
-      path.push_back(trace_back.self_index);//Push start point
       std::reverse(path.begin(),path.end());
-      break;
+      const double elapsed_seconds = std::chrono::duration<double>(
+        SteadyClock::now() - planning_started_at).count();
+      RCLCPP_INFO(
+        perception_ros_->get_logger(),
+        "[A*] Path found after %lu expansions in %.3f s "
+        "(cloud=%lu candidates=%lu blocked=%lu footprint=%lu/%lu %.3fs)",
+        iter_count, elapsed_seconds, pc_original_z_up_->points.size(),
+        neighbor_candidates, index_edge_rejections,
+        point_edge_rejections, point_edge_checks,
+        point_edge_check_seconds);
+      return;
     }
 
     /*Check if*/
   }
 
+  const double elapsed_seconds = std::chrono::duration<double>(
+    SteadyClock::now() - planning_started_at).count();
+  RCLCPP_WARN(
+    perception_ros_->get_logger(),
+    "[A*] Search exhausted after %lu expansions in %.3f s "
+    "(cloud=%lu candidates=%lu blocked=%lu footprint=%lu/%lu %.3fs)",
+    iter_count, elapsed_seconds, pc_original_z_up_->points.size(),
+    neighbor_candidates, index_edge_rejections,
+    point_edge_rejections, point_edge_checks,
+    point_edge_check_seconds);
 }

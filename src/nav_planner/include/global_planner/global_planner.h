@@ -52,7 +52,13 @@ type edge_t is inside here
 #include <global_planner/a_star_on_pc.h>
 #include <global_planner/a_star_on_pre_graph.h>
 #include <global_planner/hybrid_a_star.h>
+#include <plan_env/ground_support.h>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <optional>
 #include <set>
+#include <thread>
 
 /*For distance calculation*/
 #include <pcl/common/geometry.h>
@@ -79,6 +85,7 @@ type edge_t is inside here
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
 
 namespace global_planner
 {
@@ -166,6 +173,14 @@ class GlobalPlanner : public rclcpp::Node {
       void cbPlanground(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
       void cbClickedPoint(const geometry_msgs::msg::PointStamped::SharedPtr clicked_goal);
       void cbGoalPose(const geometry_msgs::msg::PoseStamped::SharedPtr goal_pose);
+      void enqueueGoal(
+        const geometry_msgs::msg::PoseStamped& goal_pose,
+        bool enforce_goal_yaw);
+      void goalWorkerLoop();
+      void planGoalPose(
+        const geometry_msgs::msg::PoseStamped& goal_pose,
+        uint64_t generation,
+        bool enforce_goal_yaw);
       
 
       /*Func*/
@@ -196,6 +211,28 @@ class GlobalPlanner : public rclcpp::Node {
       void pubStaticGraph();
       void getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg::Path& ros_path);
       void pubWeight();
+      void configureHybridPlanner(
+        Hybrid_A_Star& planner,
+        const pcl::PointCloud<pcl::PointXYZI>::Ptr& ground_cloud,
+        const std::function<bool()>& cancel_checker = {});
+      std::shared_ptr<plan_env::GroundSupportIndex> makeGroundSupportIndex(
+        const pcl::PointCloud<pcl::PointXYZI>::Ptr& ground_cloud) const;
+      A_Star_on_Graph::EdgeValidator makeGroundEdgeValidator(
+        const std::shared_ptr<plan_env::GroundSupportIndex>& support) const;
+      Hybrid_A_Star::TurnValidator makeGroundTurnValidator(
+        const std::shared_ptr<plan_env::GroundSupportIndex>& support) const;
+      bool finalizeB2GlobalPath(
+        nav_msgs::msg::Path& path,
+        const geometry_msgs::msg::PoseStamped& live_start,
+        const geometry_msgs::msg::PoseStamped& exact_goal,
+        bool enforce_goal_yaw,
+        const pcl::PointCloud<pcl::PointXYZI>::Ptr& ground_cloud,
+        const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr& ground_kdtree);
+      void publishPlanningStatus(
+        const std::string& status,
+        const std::string& message,
+        uint64_t generation,
+        double elapsed_seconds = 0.0);
       
       std::mutex protect_kdtree_ground_;
       std::mutex protect_kdtree_planground_;
@@ -223,6 +260,38 @@ class GlobalPlanner : public rclcpp::Node {
       double hybrid_edge_penalty_radius_;
       double hybrid_edge_penalty_weight_;
       double hybrid_edge_penalty_falloff_rate_;
+      double hybrid_reference_planning_time_;
+      double hybrid_max_planning_time_;
+      double hybrid_heuristic_weight_;
+
+      bool global_ground_support_enabled_;
+      bool global_ground_support_turn_validation_enabled_;
+      double global_ground_support_edge_step_;
+      double global_ground_support_turn_angle_step_;
+      double global_ground_support_turn_min_angle_;
+      plan_env::GroundSupportConfig global_ground_support_config_;
+      double global_start_maneuver_max_forward_distance_;
+      double global_start_maneuver_forward_step_;
+      double global_start_maneuver_path_sample_step_;
+      double global_start_maneuver_yaw_sample_step_;
+      double global_start_maneuver_max_join_distance_;
+
+      rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_planning_status_;
+      struct PendingGoal
+      {
+        geometry_msgs::msg::PoseStamped pose;
+        uint64_t generation{0};
+        bool enforce_goal_yaw{false};
+      };
+      std::mutex pending_goal_mutex_;
+      std::condition_variable pending_goal_cv_;
+      std::optional<PendingGoal> pending_goal_;
+      std::optional<geometry_msgs::msg::PoseStamped> last_enqueued_goal_;
+      bool last_enqueued_goal_enforce_yaw_{false};
+      rclcpp::Time last_enqueued_goal_time_{0, 0, RCL_ROS_TIME};
+      std::thread goal_worker_;
+      std::atomic<bool> stop_goal_worker_{false};
+      std::atomic<uint64_t> planning_generation_{0};
 
     protected:
       std::shared_ptr<tf2_ros::Buffer> tf2Buffer_;

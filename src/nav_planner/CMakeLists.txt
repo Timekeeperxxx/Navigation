@@ -28,6 +28,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED)
 find_package(perception_3d REQUIRED)
 find_package(dddmr_sys_core REQUIRED)
+find_package(plan_env REQUIRED)
 
 set(dependencies
   rclcpp
@@ -50,6 +51,7 @@ set(dependencies
   pcl_conversions
   perception_3d
   dddmr_sys_core
+  plan_env
 )
 
 include_directories(
@@ -170,7 +172,33 @@ install(PROGRAMS
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
+  ament_add_gtest(
+    test_astar_list
+    test/test_astar_list.cpp
+  )
+  target_link_libraries(test_astar_list
+    a_star_on_graph
+    ${PCL_LIBRARIES}
+  )
+  ament_target_dependencies(test_astar_list
+    ${dependencies}
+  )
+  ament_add_gtest(
+    test_b2_start_maneuver
+    test/test_b2_start_maneuver.cpp
+  )
+  target_include_directories(test_b2_start_maneuver PRIVATE include)
+  ament_add_gtest(
+    test_b2_global_path_gate
+    test/test_b2_global_path_gate.cpp
+  )
+  target_include_directories(test_b2_global_path_gate PRIVATE include)
+  ament_add_pytest_test(
+    test_goal_queue_contract
+    test/test_goal_queue_contract.py
+  )
   ament_add_pytest_test(
     test_dynamic_avoidance_monitor
     test/test_dynamic_avoidance_monitor.py
