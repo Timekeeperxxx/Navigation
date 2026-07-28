@@ -35,6 +35,8 @@
     <param name="fsm/emergency_time_" value="1.0" type="double"/>
     <param name="fsm/fail_safe" value="true" type="bool"/>
     <param name="fsm/max_replan_fail_count" value="1000" type="int"/>
+    <param name="fsm/b2_reverse_recovery_enabled" value="true" type="bool"/>
+    <param name="fsm/b2_reverse_recovery_request_period" value="0.50" type="double"/>
     <param name="fsm/is_real_world" value="$(arg is_real_world)" type="bool"/>
 
     <!-- sliding map -->
@@ -87,6 +89,7 @@
     <param name="optimization/lambda_collision" value="5.0" type="double"/>
     <param name="optimization/lambda_feasibility" value="0.1" type="double"/>
     <param name="optimization/lambda_fitness" value="1.0" type="double"/>
+    <param name="optimization/lambda_reference" value="3.0" type="double"/>
     <param name="optimization/dist0" value="0.3" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="optimization/vel_tolerance" value="1.0" type="double"/>
@@ -98,6 +101,7 @@
   <!-- trajectory tracking -->
   <param name="closed_loop_controller/time_forward" value="0.8" type="double"/>
   <param name="closed_loop_controller/heading_error_threshold" value="0.8" type="double"/>
+  <param name="closed_loop_controller/heading_resume_threshold" value="0.55" type="double"/>
   <param name="closed_loop_controller/kp_pos" value="0.8" type="double"/>
   <param name="closed_loop_controller/kp_yaw" value="1.5" type="double"/>
   <param name="closed_loop_controller/max_vx" value="$(arg max_vel)" type="double"/>

@@ -87,7 +87,13 @@ if(BUILD_SCAN_PLANNER_AUX_NODES)
   target_include_directories(closed_loop_controller PRIVATE include ${EIGEN3_INCLUDE_DIRS})
   ament_target_dependencies(closed_loop_controller ${scan_planner_dependencies})
 
-  add_executable(go2_kinematic_sim src/go2_kinematic_sim.cpp)
+  add_executable(b2_kinematic_sim src/b2_kinematic_sim.cpp)
+  target_compile_features(b2_kinematic_sim PUBLIC cxx_std_14)
+  target_include_directories(b2_kinematic_sim PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+  ament_target_dependencies(b2_kinematic_sim ${scan_planner_dependencies})
+
+  # Compatibility executable for existing launch files and operator scripts.
+  add_executable(go2_kinematic_sim src/b2_kinematic_sim.cpp)
   target_compile_features(go2_kinematic_sim PUBLIC cxx_std_14)
   target_include_directories(go2_kinematic_sim PRIVATE include ${EIGEN3_INCLUDE_DIRS})
   ament_target_dependencies(go2_kinematic_sim ${scan_planner_dependencies})
@@ -99,12 +105,14 @@ if(BUILD_SCAN_PLANNER_AUX_NODES)
 
   target_link_libraries(open_loop_controller "${cpp_typesupport_target}")
   target_link_libraries(closed_loop_controller "${cpp_typesupport_target}")
+  target_link_libraries(b2_kinematic_sim "${cpp_typesupport_target}")
   target_link_libraries(go2_kinematic_sim "${cpp_typesupport_target}")
   target_link_libraries(go2_gait_publisher "${cpp_typesupport_target}")
 
   install(TARGETS
     open_loop_controller
     closed_loop_controller
+    b2_kinematic_sim
     go2_kinematic_sim
     go2_gait_publisher
     DESTINATION lib/${PROJECT_NAME}
@@ -121,15 +129,65 @@ install(DIRECTORY launch/
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
   ament_add_gtest(test_final_yaw_latch
     test/test_final_yaw_latch.cpp
   )
   target_include_directories(test_final_yaw_latch PRIVATE include)
 
+  ament_add_gtest(test_goal_yaw_handoff
+    test/test_goal_yaw_handoff.cpp
+  )
+  target_include_directories(test_goal_yaw_handoff PRIVATE include)
+
+  ament_add_gtest(test_heading_alignment_latch
+    test/test_heading_alignment_latch.cpp
+  )
+  target_include_directories(test_heading_alignment_latch PRIVATE include)
+
+  ament_add_gtest(test_b2_yaw_schedule
+    test/test_b2_yaw_schedule.cpp
+  )
+  target_include_directories(test_b2_yaw_schedule PRIVATE
+    include
+    ${EIGEN3_INCLUDE_DIRS}
+  )
+
   ament_add_gtest(test_replan_failure_policy
     test/test_replan_failure_policy.cpp
   )
   target_include_directories(test_replan_failure_policy PRIVATE include)
+  ament_add_gtest(test_b2_reverse_recovery
+    test/test_b2_reverse_recovery.cpp
+  )
+  target_include_directories(test_b2_reverse_recovery PRIVATE include)
+
+  ament_add_gtest(test_terrain_z_tracker
+    test/test_terrain_z_tracker.cpp
+  )
+  target_include_directories(test_terrain_z_tracker PRIVATE include)
+
+  ament_add_gtest(test_ground_z_tracker
+    test/test_ground_z_tracker.cpp
+  )
+  target_include_directories(test_ground_z_tracker PRIVATE include)
+
+  ament_add_gtest(test_reference_guide
+    test/test_reference_guide.cpp
+  )
+  target_include_directories(test_reference_guide PRIVATE
+    include
+    ${EIGEN3_INCLUDE_DIRS}
+  )
+
+  ament_add_pytest_test(
+    test_reference_path_contract
+    test/test_reference_path_contract.py
+  )
+  ament_add_pytest_test(
+    test_closed_loop_controller_contract
+    test/test_closed_loop_controller_contract.py
+  )
 endif()
 
 ament_export_include_directories(include)

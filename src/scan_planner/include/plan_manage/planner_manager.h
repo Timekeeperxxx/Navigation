@@ -28,7 +28,13 @@ namespace scan_planner
 
     /* main planning interface */
     bool reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
-                       Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit, bool flag_randomPolyTraj);
+                       Eigen::Vector3d end_pt, Eigen::Vector3d end_vel,
+                       bool flag_polyInit, bool flag_randomPolyTraj,
+                       const std::vector<Eigen::Vector3d> *reference_guide = nullptr,
+                       bool allow_short_verified_recovery_leg = false);
+    bool planVerifiedB2RecoveryLeg(
+        const Eigen::Vector3d &start_pt,
+        const Eigen::Vector3d &target_pt);
     bool EmergencyStop(Eigen::Vector3d stop_pos);
     bool planGlobalTraj(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                         const Eigen::Vector3d &end_pos, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc);

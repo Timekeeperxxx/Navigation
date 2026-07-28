@@ -10,9 +10,17 @@ TEST(ReplanFailurePolicy, FrozenExecutionUsesRetryDeadline)
   EXPECT_DOUBLE_EQ(scan_planner::nextFrozenReplanTime(10.0, 0.5), 10.5);
 }
 
+TEST(ReplanFailurePolicy, EveryFailedReplanUsesRetryDeadline)
+{
+  EXPECT_FALSE(scan_planner::replanAttemptDue(10.0, 10.5));
+  EXPECT_TRUE(scan_planner::replanAttemptDue(10.5, 10.5));
+  EXPECT_DOUBLE_EQ(scan_planner::nextReplanTime(10.0, 0.5), 10.5);
+}
+
 TEST(ReplanFailurePolicy, FrozenFailureNeverDropsActiveTarget)
 {
   EXPECT_FALSE(scan_planner::shouldEscalateReplanFailure(1000, 1000, true));
   EXPECT_FALSE(scan_planner::shouldEscalateReplanFailure(999, 1000, false));
   EXPECT_TRUE(scan_planner::shouldEscalateReplanFailure(1000, 1000, false));
+  EXPECT_FALSE(scan_planner::shouldEscalateReplanFailure(1000, 1000, false, true));
 }

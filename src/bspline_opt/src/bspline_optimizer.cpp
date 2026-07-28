@@ -30,12 +30,16 @@ namespace scan_planner
     getParam(nh, "optimization/lambda_collision", lambda2_, -1.0);
     getParam(nh, "optimization/lambda_feasibility", lambda3_, -1.0);
     getParam(nh, "optimization/lambda_fitness", lambda4_, -1.0);
+    getParam(nh, "optimization/lambda_reference", lambda_reference_, 3.0);
+    lambda_reference_ = std::max(0.0, lambda_reference_);
 
     getParam(nh, "optimization/dist0", dist0_, -1.0);
     getParam(nh, "optimization/max_vel", max_vel_, -1.0);
     getParam(nh, "optimization/max_acc", max_acc_, -1.0);
     getParam(nh, "optimization/start_collision_exempt_radius",
              start_collision_exempt_radius_, 0.40);
+    getParam(nh, "optimization/full_trajectory_collision_check",
+             full_trajectory_collision_check_, true);
 
     getParam(nh, "optimization/order", order_, 3);
   }
@@ -70,6 +74,19 @@ namespace scan_planner
 
   void BsplineOptimizer::setBsplineInterval(const double &ts) { bspline_interval_ = ts; }
 
+  void BsplineOptimizer::setReboundReference(
+      const vector<Eigen::Vector3d> &reference_points)
+  {
+    ref_pts_ = reference_points;
+    rebound_reference_enabled_ = ref_pts_.size() >= 3;
+  }
+
+  void BsplineOptimizer::clearReboundReference()
+  {
+    ref_pts_.clear();
+    rebound_reference_enabled_ = false;
+  }
+
   /* This function is very similar to check_collision_and_rebound().
    * It was written separately, just because I did it once and it has been running stably since March 2020.
    * But I will merge then someday.*/
@@ -91,7 +108,13 @@ namespace scan_planner
     int same_occ_state_times = ENOUGH_INTERVAL + 1;
     bool occ, last_occ = false;
     bool flag_got_start = false, flag_got_end = false, flag_got_end_maybe = false;
-    int i_end = (int)init_points.cols() - order_ - ((int)init_points.cols() - 2 * order_) / 3; // only check closed 2/3 points.
+    const int control_point_end = static_cast<int>(init_points.cols()) - order_;
+    const int i_end = full_trajectory_collision_check_
+                          ? control_point_end
+                          : control_point_end -
+                                (static_cast<int>(init_points.cols()) -
+                                 2 * order_) /
+                                    3;
     for (int i = order_; i <= i_end; ++i)
     {
       for (double a = 1.0; a >= 0.0; a -= step_size)
@@ -490,6 +513,40 @@ namespace scan_planner
     }
   }
 
+  void BsplineOptimizer::calcReferenceCostXY(
+      const Eigen::MatrixXd &q, double &cost,
+      Eigen::MatrixXd &gradient)
+  {
+    cost = 0.0;
+    if (!rebound_reference_enabled_ ||
+        ref_pts_.size() < static_cast<std::size_t>(q.cols() - 2))
+      return;
+
+    const int end_idx = q.cols() - order_;
+    for (int i = order_ - 1; i < end_idx + 1; ++i)
+    {
+      const Eigen::Vector2d tangent =
+          (ref_pts_[i] - ref_pts_[i - 2]).head<2>();
+      if (tangent.squaredNorm() < 1e-10)
+        continue;
+
+      const Eigen::Vector2d unit_tangent = tangent.normalized();
+      const Eigen::Vector2d normal(-unit_tangent.y(), unit_tangent.x());
+      const Eigen::Vector2d curve_point =
+          ((q.col(i - 1) + 4.0 * q.col(i) + q.col(i + 1)) /
+           6.0).head<2>();
+      const double lateral_error =
+          (curve_point - ref_pts_[i - 1].head<2>()).dot(normal);
+      cost += lateral_error * lateral_error;
+
+      const Eigen::Vector2d point_gradient =
+          2.0 * lateral_error * normal;
+      gradient.block<2, 1>(0, i - 1) += point_gradient / 6.0;
+      gradient.block<2, 1>(0, i) += 4.0 * point_gradient / 6.0;
+      gradient.block<2, 1>(0, i + 1) += point_gradient / 6.0;
+    }
+  }
+
   void BsplineOptimizer::calcSmoothnessCost(const Eigen::MatrixXd &q, double &cost,
                                             Eigen::MatrixXd &gradient, bool falg_use_jerk /* = true*/)
   {
@@ -744,7 +801,9 @@ namespace scan_planner
     int in_id, out_id;
     vector<std::pair<int, int>> segment_ids;
     bool flag_new_obs_valid = false;
-    int i_end = end_idx - (end_idx - order_) / 3;
+    const int i_end = full_trajectory_collision_check_
+                          ? end_idx
+                          : end_idx - (end_idx - order_) / 3;
     for (int i = order_ - 1; i <= i_end; ++i)
     {
 
@@ -1038,11 +1097,14 @@ namespace scan_planner
         traj.getTimeSpan(tm, tmp);
         double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution());
         const Eigen::Vector3d traj_start_pos = traj.evaluateDeBoorT(tm);
-        for (double t = tm; t < tmp * 2 / 3; t += t_step) // Only check the closest 2/3 partition of the whole trajectory.
+        const double collision_check_end =
+            full_trajectory_collision_check_ ? tmp : tmp * 2.0 / 3.0;
+        for (double t = tm; t < collision_check_end; t += t_step)
         {
           Eigen::Vector3d pos = traj.evaluateDeBoorT(t);
           Eigen::Vector3d pos_next = traj.evaluateDeBoorT(std::min(t + t_step, tmp));
-          flag_occ = grid_map_->getInflateOccupancy(pos, estimateSegmentYaw(pos, pos_next));
+          const double sample_yaw = estimateSegmentYaw(pos, pos_next);
+          flag_occ = grid_map_->getInflateOccupancy(pos, sample_yaw);
           if (flag_occ)
           {
             //cout << "hit_obs, t=" << t << " P=" << traj.evaluateDeBoorT(t).transpose() << endl;
@@ -1058,7 +1120,12 @@ namespace scan_planner
               // neighbourhood; the dynamic avoidance monitor independently
               // gates execution and only releases motion along a
               // monotonically clearing escape trajectory.
-              if ((pos - traj_start_pos).norm() <= start_collision_exempt_radius_)
+              // Start-neighbourhood escape is only for positive obstacles.
+              // Missing ground is a hard negative obstacle and must never be
+              // crossed under the wall-clearance exemption.
+              if ((pos - traj_start_pos).norm() <=
+                      start_collision_exempt_radius_ &&
+                  grid_map_->isGroundSupported(pos, sample_yaw))
               {
                 flag_occ = false;
                 continue;
@@ -1147,7 +1214,9 @@ namespace scan_planner
       double tm, tmp;
       traj.getTimeSpan(tm, tmp);
       double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution()); // Step size is defined as the maximum size that can passes through every grid.
-      for (double t = tm; t < tmp * 2 / 3; t += t_step)
+      const double collision_check_end =
+          full_trajectory_collision_check_ ? tmp : tmp * 2.0 / 3.0;
+      for (double t = tm; t < collision_check_end; t += t_step)
       {
         Eigen::Vector3d pos = traj.evaluateDeBoorT(t);
         Eigen::Vector3d pos_next = traj.evaluateDeBoorT(std::min(t + t_step, tmp));
@@ -1185,21 +1254,29 @@ namespace scan_planner
     memcpy(cps_.points.data() + 3 * order_, x, n * sizeof(x[0]));
 
     /* ---------- evaluate cost and gradient ---------- */
-    double f_smoothness, f_distance, f_feasibility;
+    double f_smoothness, f_distance, f_feasibility, f_reference = 0.0;
 
     Eigen::MatrixXd g_smoothness = Eigen::MatrixXd::Zero(3, cps_.size);
     Eigen::MatrixXd g_distance = Eigen::MatrixXd::Zero(3, cps_.size);
     Eigen::MatrixXd g_feasibility = Eigen::MatrixXd::Zero(3, cps_.size);
+    Eigen::MatrixXd g_reference = Eigen::MatrixXd::Zero(3, cps_.size);
 
     calcSmoothnessCost(cps_.points, f_smoothness, g_smoothness);
     calcDistanceCostRebound(cps_.points, f_distance, g_distance, iter_num_, f_smoothness);
     calcFeasibilityCost(cps_.points, f_feasibility, g_feasibility);
+    if (rebound_reference_enabled_)
+      calcReferenceCostXY(
+          cps_.points, f_reference, g_reference);
 
-    f_combine = lambda1_ * f_smoothness + new_lambda2_ * f_distance + lambda3_ * f_feasibility;
+    f_combine = lambda1_ * f_smoothness +
+                new_lambda2_ * f_distance +
+                lambda3_ * f_feasibility +
+                lambda_reference_ * f_reference;
     //printf("origin %f %f %f %f\n", f_smoothness, f_distance, f_feasibility, f_combine);
 
     Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + new_lambda2_ * g_distance +
-                              lambda3_ * g_feasibility;
+                              lambda3_ * g_feasibility +
+                              lambda_reference_ * g_reference;
     grad_3D.row(2).setZero();
     memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
   }
