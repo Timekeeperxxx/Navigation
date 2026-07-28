@@ -26,6 +26,7 @@ def generate_launch_description():
     waypoint_navigator_start_topic = LaunchConfiguration("waypoint_navigator_start_topic")
     enable_waypoint_monitor = LaunchConfiguration("enable_waypoint_monitor")
     enable_dynamic_avoidance = LaunchConfiguration("enable_dynamic_avoidance")
+    dynamic_require_nav_start = LaunchConfiguration("dynamic_require_nav_start")
     enable_path_follower = LaunchConfiguration("enable_path_follower")
     enable_obstacle_simulator = LaunchConfiguration("enable_obstacle_simulator")
     enable_scan_planner = LaunchConfiguration("enable_scan_planner")
@@ -36,6 +37,7 @@ def generate_launch_description():
     scan_body_pose_topic = LaunchConfiguration("scan_body_pose_topic")
     scan_sensor_pose_topic = LaunchConfiguration("scan_sensor_pose_topic")
     scan_cloud_topic = LaunchConfiguration("scan_cloud_topic")
+    scan_ground_topic = LaunchConfiguration("scan_ground_topic")
     scan_global_frame = LaunchConfiguration("scan_global_frame")
     scan_robot_frame = LaunchConfiguration("scan_robot_frame")
     scan_tf_pose_rate = LaunchConfiguration("scan_tf_pose_rate")
@@ -141,6 +143,7 @@ def generate_launch_description():
             "waypoint_navigator_start_topic": waypoint_navigator_start_topic,
             "enable_waypoint_monitor": enable_waypoint_monitor,
             "enable_dynamic_avoidance": enable_dynamic_avoidance,
+            "dynamic_require_nav_start": dynamic_require_nav_start,
             "enable_path_follower": enable_path_follower,
             "enable_obstacle_simulator": enable_obstacle_simulator,
             "enable_scan_planner": enable_scan_planner,
@@ -151,6 +154,7 @@ def generate_launch_description():
             "scan_body_pose_topic": scan_body_pose_topic,
             "scan_sensor_pose_topic": scan_sensor_pose_topic,
             "scan_cloud_topic": scan_cloud_topic,
+            "scan_ground_topic": scan_ground_topic,
             "scan_global_frame": scan_global_frame,
             "scan_robot_frame": scan_robot_frame,
             "scan_tf_pose_rate": scan_tf_pose_rate,
@@ -252,6 +256,9 @@ def generate_launch_description():
         DeclareLaunchArgument("waypoint_navigator_start_topic", default_value="/nav_task_start"),
         DeclareLaunchArgument("enable_waypoint_monitor", default_value="false"),
         DeclareLaunchArgument("enable_dynamic_avoidance", default_value="true"),
+        # /nav_start belongs to inspection-task lifecycle. A BotDog single
+        # GoTo publishes a goal only and must not be held at zero velocity.
+        DeclareLaunchArgument("dynamic_require_nav_start", default_value="false"),
         DeclareLaunchArgument("enable_path_follower", default_value="false"),
         DeclareLaunchArgument("enable_obstacle_simulator", default_value="false"),
         DeclareLaunchArgument("enable_scan_planner", default_value="false"),
@@ -269,6 +276,7 @@ def generate_launch_description():
         DeclareLaunchArgument("scan_body_pose_topic", default_value="/scan/body_pose"),
         DeclareLaunchArgument("scan_sensor_pose_topic", default_value="/lio/odom"),
         DeclareLaunchArgument("scan_cloud_topic", default_value="/lio/cloud_world"),
+        DeclareLaunchArgument("scan_ground_topic", default_value="/mapground"),
         DeclareLaunchArgument("scan_global_frame", default_value="map"),
         DeclareLaunchArgument("scan_robot_frame", default_value="base_footprint"),
         DeclareLaunchArgument("scan_tf_pose_rate", default_value="30.0"),

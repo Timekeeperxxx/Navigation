@@ -19,6 +19,12 @@ pcl_publisher:
     map_down_sample: 0.2
     ground_down_sample: 0.1
     planground_down_sample: 0.1
+    planground_bridge_enabled: true
+    planground_bridge_neighbor_radius: 0.2
+    planground_bridge_max_gap: 0.35
+    planground_bridge_point_spacing: 0.05
+    planground_bridge_min_component_points: 20
+    planground_bridge_max_bridges: 64
 
 perception_3d_global:
   ros__parameters:
@@ -28,7 +34,7 @@ perception_3d_global:
     inscribed_radius: 0.1
     inflation_descending_rate: 2.0
     inflation_radius: 1.5
-    sensors_collected_frequency: 5.0
+    sensors_collected_frequency: 1.0
     plugins: ["map"]
     map:
       plugin: "perception_3d::StaticLayer"
@@ -42,7 +48,9 @@ perception_3d_global:
       ground_topic: "mapground"
       support:
         mapping_mode: false
-        enable_edge_detection: true
+        # Ground/fill is the global traversability contract. Skip the unused
+        # static dGraph so large offline scenes become ready promptly.
+        enable_edge_detection: false
         generate_static_graph: false
 
 global_planner:
@@ -61,7 +69,11 @@ global_planner:
 
     use_hybrid_planner: true
     hybrid_planground_bias: 15.0
-    hybrid_downsample_leaf_size: 0.15
+    hybrid_downsample_leaf_size: 0.20
+    hybrid_reference_planning_time: 2.0
+    # No arbitrary failure deadline; a newer goal still preempts immediately.
+    hybrid_max_planning_time: 0.0
+    hybrid_heuristic_weight: 300.0
     hybrid_max_ground_bridge_length: 0.25
     hybrid_max_ground_cost: 250.0
     hybrid_min_ground_cost: 150.0
@@ -74,3 +86,24 @@ global_planner:
     hybrid_edge_penalty_radius: 0.1
     hybrid_edge_penalty_weight: 200.0
     hybrid_edge_penalty_falloff_rate: 2.0
+
+    global_ground_support_enabled: true
+    global_ground_support_edge_step: 0.05
+    global_ground_support_turn_validation_enabled: true
+    global_ground_support_turn_angle_step: 0.0872664626
+    global_ground_support_turn_min_angle: 0.0
+    global_ground_support_bucket_size: 0.15
+    global_ground_support_xy_tolerance: 0.15
+    global_ground_support_z_tolerance: 0.20
+    global_ground_support_planning_height: 0.32
+    global_ground_support_circle_radius: 0.27
+    global_ground_support_circle_offset: 0.205
+    global_ground_support_circle_center_offset: -0.425
+    global_ground_support_footprint_probe_margin: 0.19
+    global_ground_support_perimeter_samples: 16
+    global_ground_support_radial_samples: 2
+    global_start_maneuver_max_forward_distance: 2.0
+    global_start_maneuver_forward_step: 0.05
+    global_start_maneuver_path_sample_step: 0.05
+    global_start_maneuver_yaw_sample_step: 0.0872664626
+    global_start_maneuver_max_join_distance: 12.0

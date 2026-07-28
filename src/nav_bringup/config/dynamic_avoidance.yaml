@@ -8,6 +8,12 @@ dynamic_avoidance_monitor:
     robot_frame: "base_footprint"
     global_path_topic: "/global_path"
     scan_execution_path_topic: "/scan/execution_path"
+    planning_status_topic: "/nav/planning_status"
+    # A new single-point GoTo supersedes the old SCAN trajectory immediately.
+    # Keep /cmd_vel_safe at zero until the new global path and its matching,
+    # non-stationary SCAN execution path are both ready. Planning failure stays
+    # held; /nav_start remains reserved for inspection-task lifecycle control.
+    hold_during_goal_switch: true
     # The controller republishes the remaining B-spline every 0.1 s.  A short
     # timeout makes loss of that stream fall back to the conservative global path.
     scan_execution_path_timeout: 2.0
@@ -23,6 +29,10 @@ dynamic_avoidance_monitor:
     cmd_vel_in_topic: "/cmd_vel"
     cmd_vel_safe_topic: "/cmd_vel_safe"
     safety_execution_frozen_topic: "/planning/safety_execution_frozen"
+    # Generation-matched approval/denial for the controller's terminal
+    # in-place yaw sweep. This is separate from the generic freeze Bool so an
+    # old clear state cannot authorize a new 180-degree rotation.
+    final_yaw_validation_topic: "/planning/final_yaw_validation"
     nav_start_topic: "/nav_start"
     nav_stop_topic: "/nav_stop"
 
@@ -37,6 +47,19 @@ dynamic_avoidance_monitor:
     footprint_center_offsets: [-0.22, -0.63]
     footprint_sweep_max_step: 0.05
     footprint_sweep_max_yaw_step: 0.0872664626
+    # Independent negative-obstacle guard.  /mapground is the allowed support
+    # surface; map.pcd is intentionally not consumed by local planning.
+    require_ground_support: true
+    ground_topic: "/mapground"
+    ground_body_height: 0.32
+    ground_support_xy_tolerance: 0.15
+    ground_support_z_tolerance: 0.20
+    ground_footprint_radius: 0.27
+    # 0.14 m sampling compensation + 0.05 m execution tracking margin.
+    ground_footprint_probe_margin: 0.19
+    ground_perimeter_samples: 16
+    ground_radial_samples: 2
+    ground_map_static: true
     # The SCAN path is at the lifted body planning height.  Keep floor voxels
     # below it out of the independent 2D safety check (downward tolerance).
     z_tolerance: 0.10
@@ -61,6 +84,12 @@ dynamic_avoidance_monitor:
     # trajectory on a single flickering-clear point cloud frame.  Require a
     # newer SCAN generation and 2.0 s of continuous clearance.
     blocked_clear_duration: 2.0
+    # Missing ground support is a deterministic static-map violation, not a
+    # noisy positive-obstacle detection. Request a frozen-start replan on the
+    # first 0.2 s monitor tick, and unlock only after a newer execution
+    # generation stays completely ground-supported for 0.4 s.
+    ground_replan_blocked_duration: 0.0
+    ground_replan_clear_duration: 0.4
     # A one-frame collision prediction that clears before a replan was needed
     # uses four LiDAR frames of confirmation.  Reusing the 2 s replan handoff
     # delay for every transient footprint-edge flicker made narrow bypasses
@@ -82,6 +111,11 @@ dynamic_avoidance_monitor:
     obstacle_processing_period_sec: 0.3
     max_obstacle_points: 4000
     slow_speed_scale: 0.70
+    # B2 SportClient may report success while commands below these effective
+    # gait dead-zones produce no body motion. Safety stop remains exactly zero;
+    # nonzero slow/escape commands are floored after scaling.
+    minimum_nonzero_planar_speed: 0.15
+    minimum_in_place_yaw_speed: 0.20
     # This topic is already footprint-inflated.  Nearby points outside the
     # execution corridor include the robot's own 0.90 m inflation boundary;
     # only path-relevant points should reduce navigation speed.
@@ -93,7 +127,9 @@ dynamic_avoidance_monitor:
     # Keep the independent hard-stop layer enabled.  Self-occupancy must be
     # fixed at the grid/footprint source; bypassing this check is unsafe.
     enforce_path_blocking: true
-    require_nav_start: true
+    # /nav_start is reserved for inspection tasks; single-point GoTo becomes
+    # executable when its new planning generation is received.
+    require_nav_start: false
     publish_zero_on_stop: true
     publish_prune_plan: true
     replan_publish_period: 1.0
@@ -110,7 +146,7 @@ nav_path_follower:
     cmd_vel_topic: "/cmd_vel"
     nav_status_topic: "/nav_status"
 
-    require_nav_start: true
+    require_nav_start: false
     control_period_sec: 0.1
     path_timeout_sec: 2.0
     status_timeout_sec: 1.0

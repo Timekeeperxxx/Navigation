@@ -2,7 +2,7 @@
 
 This launch intentionally contains no hardware driver or robot command bridge.
 The SCAN controller output is filtered by the dynamic-avoidance monitor and is
-consumed only by go2_kinematic_sim, which publishes simulated odometry and TF.
+consumed only by b2_kinematic_sim, which publishes simulated odometry and TF.
 """
 
 from launch import LaunchDescription
@@ -39,7 +39,10 @@ def generate_launch_description():
             # normal hardware launch keeps its lighter production defaults.
             "map_down_sample": "0.10",
             "ground_down_sample": "0.10",
-            "planground_down_sample": "0.05",
+            # A 0.05 m cloud leaves about 91k planning nodes in Scene5 and
+            # makes the global point-cloud A* needlessly expensive.  0.10 m
+            # still gives two samples inside the 0.20 m expansion radius.
+            "planground_down_sample": "0.10",
             "enable_pcl_publisher": "true",
             "enable_dynamic_avoidance": "true",
             # Offline simulation starts immediately after a goal is selected.
@@ -59,10 +62,10 @@ def generate_launch_description():
         }.items(),
     )
 
-    kinematic_sim = Node(
+    b2_kinematic_sim = Node(
         package="scan_planner",
-        executable="go2_kinematic_sim",
-        name="go2_kinematic_sim",
+        executable="b2_kinematic_sim",
+        name="b2_kinematic_sim",
         output="screen",
         parameters=[
             {
@@ -79,6 +82,22 @@ def generate_launch_description():
                 "publish_tf": True,
                 "frame_id": "map",
                 "child_frame_id": "base_footprint",
+                # Track base height from the static ground surface below.
+                # Missing local ground leaves init_z/current z unchanged.
+                "terrain_z_tracking_enabled": True,
+                "execution_path_topic": "/scan/execution_path",
+                # Ground is authoritative for simulated base height. Choosing
+                # the vertically continuous layer handles overlapping floors
+                # without feeding SCAN's output path back into its odometry.
+                "terrain_ground_topic": "/mapground",
+                "terrain_ground_bucket_size": 0.20,
+                "terrain_ground_xy_tolerance": 0.15,
+                "terrain_ground_max_layer_distance": 0.50,
+                "terrain_body_height": 0.32,
+                "terrain_path_timeout": 2.0,
+                "terrain_max_path_slope": 0.70,
+                "terrain_max_z_rate": 0.30,
+                "terrain_max_projection_distance": 1.0,
             }
         ],
         remappings=[("cmd_vel", "/cmd_vel_safe")],
@@ -132,7 +151,7 @@ def generate_launch_description():
             DeclareLaunchArgument("init_yaw", default_value="0.0"),
             DeclareLaunchArgument("open_rviz", default_value="true"),
             planning,
-            kinematic_sim,
+            b2_kinematic_sim,
             sim_markers,
             rviz_node,
         ]

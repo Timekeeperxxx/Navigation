@@ -33,6 +33,7 @@ def generate_launch_description():
     scan_body_pose_topic = LaunchConfiguration("scan_body_pose_topic")
     scan_sensor_pose_topic = LaunchConfiguration("scan_sensor_pose_topic")
     scan_cloud_topic = LaunchConfiguration("scan_cloud_topic")
+    scan_ground_topic = LaunchConfiguration("scan_ground_topic")
     scan_global_frame = LaunchConfiguration("scan_global_frame")
     scan_robot_frame = LaunchConfiguration("scan_robot_frame")
     scan_tf_pose_rate = LaunchConfiguration("scan_tf_pose_rate")
@@ -187,6 +188,7 @@ def generate_launch_description():
             dynamic_avoidance_config,
             {
                 "sensor_heartbeat_topic": scan_cloud_topic,
+                "ground_topic": scan_ground_topic,
                 "require_nav_start": ParameterValue(
                     dynamic_require_nav_start, value_type=bool
                 ),
@@ -222,8 +224,13 @@ def generate_launch_description():
             {
                 "input_path_topic": scan_raw_path_topic,
                 "output_path_topic": scan_initial_path_topic,
-                "min_point_spacing": 0.5,
-                "max_points": 120,
+                # /global_path has already been checked continuously with the
+                # full double-circle ground footprint.  Geometric
+                # downsampling creates new chords which can cut across an
+                # inner corner or unsupported ground, invalidating that
+                # guarantee.  Keep the verified polyline unchanged for SCAN.
+                "min_point_spacing": 0.0,
+                "max_points": 0,
             }
         ],
         condition=IfCondition(
@@ -247,6 +254,7 @@ def generate_launch_description():
             "robot_frame": scan_robot_frame,
             "output_topic": scan_body_pose_topic,
             "publish_rate_hz": scan_tf_pose_rate,
+            "execution_frozen_topic": "/planning/b2_execution_frozen",
         }],
         condition=IfCondition(
             PythonExpression([
@@ -277,6 +285,7 @@ def generate_launch_description():
             ("/grid_map/body_pose", scan_body_pose_topic),
             ("/grid_map/sensor_pose", scan_sensor_pose_topic),
             ("/grid_map/cloud", scan_cloud_topic),
+            ("/grid_map/ground", scan_ground_topic),
         ],
         condition=IfCondition(enable_scan_planner),
     )
@@ -332,7 +341,10 @@ def generate_launch_description():
         DeclareLaunchArgument("ground_pcd", default_value=""),
         DeclareLaunchArgument("planground_pcd", default_value=""),
         DeclareLaunchArgument("map_down_sample", default_value="0.2"),
-        DeclareLaunchArgument("ground_down_sample", default_value="0.3"),
+        # Ground is also SCAN's hard support mask.  At 0.3 m voxel spacing a
+        # valid footprint probe can fall more than 0.2 m from its nearest
+        # sample and be falsely rejected.
+        DeclareLaunchArgument("ground_down_sample", default_value="0.1"),
         DeclareLaunchArgument("planground_down_sample", default_value="0.1"),
         DeclareLaunchArgument("roi_file_path", default_value=""),
         DeclareLaunchArgument(
@@ -350,7 +362,9 @@ def generate_launch_description():
         DeclareLaunchArgument("waypoint_navigator_start_topic", default_value="/nav_task_start"),
         DeclareLaunchArgument("enable_waypoint_monitor", default_value="false"),
         DeclareLaunchArgument("enable_dynamic_avoidance", default_value="true"),
-        DeclareLaunchArgument("dynamic_require_nav_start", default_value="true"),
+        # Single-point B2 GoTo does not publish /nav_start. Keep this opt-in
+        # for legacy task launchers instead of gating every navigation goal.
+        DeclareLaunchArgument("dynamic_require_nav_start", default_value="false"),
         DeclareLaunchArgument("enable_path_follower", default_value="false"),
         DeclareLaunchArgument("enable_obstacle_simulator", default_value="false"),
         DeclareLaunchArgument("enable_scan_planner", default_value="false"),
@@ -364,6 +378,7 @@ def generate_launch_description():
         DeclareLaunchArgument("scan_body_pose_topic", default_value="/scan/body_pose"),
         DeclareLaunchArgument("scan_sensor_pose_topic", default_value="/lio/odom"),
         DeclareLaunchArgument("scan_cloud_topic", default_value="/lio/cloud_world"),
+        DeclareLaunchArgument("scan_ground_topic", default_value="/mapground"),
         DeclareLaunchArgument("scan_global_frame", default_value="map"),
         DeclareLaunchArgument("scan_robot_frame", default_value="base_footprint"),
         DeclareLaunchArgument("scan_tf_pose_rate", default_value="30.0"),

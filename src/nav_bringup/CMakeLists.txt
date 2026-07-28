@@ -15,7 +15,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
-find_package(PCL REQUIRED COMPONENTS io)
+find_package(PCL REQUIRED COMPONENTS io kdtree)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 

@@ -45,4 +45,6 @@ dynamic_avoidance:
   path_corridor_radius: 0.10
   z_tolerance: 0.10
   replan_blocked_duration: 2.0
+  ground_replan_blocked_duration: 0.0
+  ground_replan_clear_duration: 0.4
   sensor_timeout: 0.5

@@ -114,7 +114,7 @@ class ScanTfPosePublisher(Node):
         self.declare_parameter("max_linear_speed", 2.0)
         self.declare_parameter("max_angular_speed", 3.0)
         self.declare_parameter(
-            "execution_frozen_topic", "/planning/go2_execution_frozen"
+            "execution_frozen_topic", "/planning/b2_execution_frozen"
         )
 
         self.global_frame = str(self.get_parameter("global_frame").value).strip()
