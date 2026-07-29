@@ -22,7 +22,9 @@ struct GroundSupportPoint
 struct GroundSupportConfig
 {
   double bucket_size = 0.15;
-  double xy_tolerance = 0.15;
+  // Includes a 5 mm voxel-centroid/numeric boundary allowance. This remains
+  // a nearest-sample match, not permission to miss a centre or inner probe.
+  double xy_tolerance = 0.155;
   double z_tolerance = 0.20;
   double planning_height = 0.32;
   double circle_radius = 0.27;
@@ -34,6 +36,10 @@ struct GroundSupportConfig
   double footprint_probe_margin = 0.14;
   int perimeter_samples = 16;
   int radial_samples = 2;
+  // The outermost ring tolerates a limited number of point-cloud sampling
+  // holes. The centre and every inner ring remain fail-closed, so broad
+  // unsupported areas are still rejected.
+  int outer_ring_max_missing_per_circle = 3;
 };
 
 class GroundSupportIndex
@@ -148,7 +154,6 @@ public:
     constexpr double kTwoPi = 6.283185307179586476925286766559;
     const double probe_radius =
         config_.circle_radius + config_.footprint_probe_margin;
-
     for (double offset : offsets)
     {
       const double circle_x = center_x + offset * cos_yaw;
@@ -167,15 +172,25 @@ public:
             ring == config_.radial_samples
               ? config_.perimeter_samples
               : std::max(4, config_.perimeter_samples / 2);
+        int outer_ring_missing = 0;
         for (int sample = 0; sample < ring_samples; ++sample)
         {
           const double angle =
               kTwoPi * static_cast<double>(sample) /
               static_cast<double>(ring_samples);
-          if (!hasSupport(
-                circle_x + ring_radius * std::cos(angle),
-                circle_y + ring_radius * std::sin(angle),
-                ground_z))
+          const bool supported = hasSupport(
+              circle_x + ring_radius * std::cos(angle),
+              circle_y + ring_radius * std::sin(angle),
+              ground_z);
+          if (ring != config_.radial_samples)
+          {
+            if (!supported)
+              return false;
+            continue;
+          }
+          if (!supported &&
+              ++outer_ring_missing >
+              config_.outer_ring_max_missing_per_circle)
             return false;
         }
       }
@@ -196,6 +211,9 @@ private:
         std::max(0.0, config.footprint_probe_margin);
     config.perimeter_samples = std::max(4, config.perimeter_samples);
     config.radial_samples = std::max(1, config.radial_samples);
+    config.outer_ring_max_missing_per_circle = std::min(
+        config.perimeter_samples,
+        std::max(0, config.outer_ring_max_missing_per_circle));
     return config;
   }
 

@@ -76,6 +76,14 @@ global_planner:
     planground_search_radius: 0.2
     planground_fallback_ratio: 0.3
     planground_downsample_leaf_size: 0.2
+    # RViz 2D Goal Pose always publishes z=0. Select ground by XY and use the
+    # robot's current z to disambiguate overlapping floors. BotDog's
+    # /clicked_point goal keeps using its explicitly saved ground z.
+    rviz_goal_ground_snap_enabled: true
+    rviz_goal_ground_snap_xy_radius: 0.50
+    rviz_goal_ground_snap_max_layer_distance: 0.75
+    rviz_goal_ground_snap_xy_layer_tie_distance: 0.15
+    rviz_goal_unspecified_z_tolerance: 0.001
 
     use_hybrid_planner: true
     hybrid_planground_bias: 15.0
@@ -104,9 +112,9 @@ global_planner:
     hybrid_edge_penalty_weight: 200.0
     hybrid_edge_penalty_falloff_rate: 2.0
 
-    # Use exactly the same same-floor B2 double-circle support semantics as
-    # SCAN.  This prevents the global centreline/spline from handing SCAN a
-    # route that it must immediately reject at execution time.
+    # The global planner is the sole static-ground authority. It validates the
+    # complete B2 double-circle footprint along candidate edges and turns;
+    # SCAN and the execution monitor do not repeat /mapground probes.
     global_ground_support_enabled: true
     global_ground_support_edge_step: 0.05
     # Validate turns only on complete A* candidates. An unsupported incoming
@@ -115,11 +123,12 @@ global_planner:
     global_ground_support_turn_validation_enabled: true
     global_ground_support_turn_angle_step: 0.0872664626
     global_ground_support_turn_min_angle: 0.0
-    # 0.15 m absorbs the worst observed 0.1 m voxel-centroid quantization
+    # 0.155 m absorbs the worst observed 0.1 m voxel-centroid quantization
     # (Scene5 missed raw support by 1.29 mm at 0.14 m). Combined with the
-    # 0.19 m probe margin, this still checks 0.04 m outside the B2 circles.
+    # 0.19 m probe margin, this still checks 0.035 m outside the B2 circles.
     global_ground_support_bucket_size: 0.15
-    global_ground_support_xy_tolerance: 0.15
+    # 0.15 m matching radius + 5 mm voxel-centroid/numeric boundary allowance.
+    global_ground_support_xy_tolerance: 0.155
     global_ground_support_z_tolerance: 0.20
     global_ground_support_planning_height: 0.32
     global_ground_support_circle_radius: 0.27
@@ -128,6 +137,8 @@ global_planner:
     global_ground_support_footprint_probe_margin: 0.19
     global_ground_support_perimeter_samples: 16
     global_ground_support_radial_samples: 2
+    # Sparse-map tolerance only: each circle centre and inner ring stay strict.
+    global_ground_support_outer_ring_max_missing_per_circle: 3
     # If the exact live yaw cannot rotate directly onto the nominal path,
     # search only straight ahead for a supported pivot, then turn and rejoin.
     # This is forward motion, not reverse recovery.
@@ -136,3 +147,7 @@ global_planner:
     global_start_maneuver_path_sample_step: 0.05
     global_start_maneuver_yaw_sample_step: 0.0872664626
     global_start_maneuver_max_join_distance: 12.0
+    # Hybrid A* has already validated the route edges and turns above. Hand the
+    # connected route to SCAN without a second vertex-as-in-place-turn veto;
+    # SCAN may smooth those vertices while retaining live-obstacle avoidance.
+    global_delegate_pose_safety_to_local_planner: true

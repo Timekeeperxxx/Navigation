@@ -156,6 +156,11 @@ struct B2DirectionGuardConfig
 struct B2ForwardDetourSearchConfig
 {
   double position_resolution = 0.05;
+  // Keep the lattice compact, but validate every transition at the same
+  // continuous position density as the downstream execution gate.  These
+  // are deliberately separate: a 5 cm state grid must not skip a narrow
+  // unsupported strip halfway between two safe states.
+  double maximum_position_step = 0.025;
   double translation_step = 0.10;
   double arc_translation_step = 0.20;
   int heading_bins = 24;
@@ -224,6 +229,131 @@ inline bool isB2StopTurnForwardLegSafe(
 }
 
 /**
+ * Select the farthest ordered reference point reachable by one verified
+ * stop-turn-forward leg from the live B2 pose.
+ *
+ * The far local target can be safe on the original polyline while its direct
+ * chord leaves that corridor.  Walking the guide backwards finds the most
+ * useful deterministic rejoin without assuming that the complete lookahead
+ * can be shortcut.
+ */
+inline bool findFarthestSafeB2ReferenceLeg(
+    const Eigen::Vector3d &start,
+    double start_yaw,
+    const std::vector<Eigen::Vector3d> &reference_guide,
+    double minimum_leg_length,
+    double maximum_yaw_step,
+    double maximum_position_step,
+    const std::function<bool(const Eigen::Vector3d &, double)> &pose_is_safe,
+    Eigen::Vector3d &target,
+    std::size_t *target_index = nullptr)
+{
+  if (!start.allFinite() || !std::isfinite(start_yaw) ||
+      reference_guide.size() < 2 || !pose_is_safe)
+    return false;
+
+  const double minimum_distance = std::max(0.02, minimum_leg_length);
+  for (std::size_t reverse_index = reference_guide.size();
+       reverse_index > 0;
+       --reverse_index)
+  {
+    const std::size_t index = reverse_index - 1;
+    const Eigen::Vector3d &candidate = reference_guide[index];
+    if (!candidate.allFinite() ||
+        (candidate - start).head<2>().norm() < minimum_distance)
+      continue;
+    if (!isB2StopTurnForwardLegSafe(
+            start,
+            start_yaw,
+            candidate,
+            maximum_yaw_step,
+            maximum_position_step,
+            pose_is_safe))
+      continue;
+
+    target = candidate;
+    if (target_index)
+      *target_index = index;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Find dynamic occupancy anywhere along an ordered B2 reference guide.
+ *
+ * Checking only guide vertices can miss a narrow obstacle between two path
+ * samples.  Sample every segment at execution-validation density and use the
+ * segment tangent as body yaw so the caller's double-circle occupancy query
+ * covers the physical B2 footprint.  The reported segment range lets a
+ * detour rejoin strictly beyond the complete blocked portion instead of
+ * selecting the last free point immediately in front of it.
+ */
+inline bool findB2ReferenceDynamicBlockage(
+    const std::vector<Eigen::Vector3d> &reference_guide,
+    double maximum_position_step,
+    const std::function<bool(const Eigen::Vector3d &, double)>
+        &pose_is_dynamically_occupied,
+    std::size_t *first_blocked_segment = nullptr,
+    std::size_t *last_blocked_segment = nullptr)
+{
+  if (reference_guide.size() < 2 || !pose_is_dynamically_occupied)
+    return false;
+
+  const double position_step =
+      std::max(0.01, std::abs(maximum_position_step));
+  bool found_blockage = false;
+  std::size_t first_blocked = 0;
+  std::size_t last_blocked = 0;
+
+  for (std::size_t segment_index = 0;
+       segment_index + 1 < reference_guide.size();
+       ++segment_index)
+  {
+    const Eigen::Vector3d &from = reference_guide[segment_index];
+    const Eigen::Vector3d &to = reference_guide[segment_index + 1];
+    if (!from.allFinite() || !to.allFinite())
+      continue;
+
+    const Eigen::Vector2d delta = (to - from).head<2>();
+    const double length = delta.norm();
+    if (length <= 1e-6)
+      continue;
+
+    const double yaw = std::atan2(delta.y(), delta.x());
+    const int samples = std::max(
+        1, static_cast<int>(std::ceil(length / position_step)));
+    bool segment_blocked = false;
+    for (int sample = 0; sample <= samples; ++sample)
+    {
+      const double ratio =
+          static_cast<double>(sample) / static_cast<double>(samples);
+      if (pose_is_dynamically_occupied(
+              from + ratio * (to - from), yaw))
+      {
+        segment_blocked = true;
+        break;
+      }
+    }
+
+    if (!segment_blocked)
+      continue;
+    if (!found_blockage)
+      first_blocked = segment_index;
+    last_blocked = segment_index;
+    found_blockage = true;
+  }
+
+  if (!found_blockage)
+    return false;
+  if (first_blocked_segment)
+    *first_blocked_segment = first_blocked;
+  if (last_blocked_segment)
+    *last_blocked_segment = last_blocked;
+  return true;
+}
+
+/**
  * Find a forward-only, heading-aware B2 detour.
  *
  * SCAN's historical local A* indexes only XYZ. That is sufficient for an
@@ -268,7 +398,7 @@ inline bool searchB2ForwardDetour(
             start_yaw,
             target,
             config.maximum_yaw_step,
-            config.position_resolution,
+            config.maximum_position_step,
             pose_is_safe))
     {
       path = {start, target};
@@ -383,7 +513,9 @@ inline bool searchB2ForwardDetour(
                              const Eigen::Vector3d &to,
                              double yaw) {
     const double length = (to - from).head<2>().norm();
-    const double sample_step = std::min(resolution, 0.05);
+    const double sample_step = std::min(
+        std::min(resolution, 0.05),
+        std::max(0.01, std::abs(config.maximum_position_step)));
     const int samples = std::max(
         1, static_cast<int>(std::ceil(length / sample_step)));
     for (int sample = 1; sample <= samples; ++sample)
@@ -404,7 +536,12 @@ inline bool searchB2ForwardDetour(
     const int position_samples = std::max(
         1,
         static_cast<int>(std::ceil(
-            length / std::min(resolution, 0.05))));
+            length /
+            std::min(
+                std::min(resolution, 0.05),
+                std::max(
+                    0.01,
+                    std::abs(config.maximum_position_step))))));
     const int yaw_samples = std::max(
         1,
         static_cast<int>(std::ceil(
@@ -757,7 +894,7 @@ inline bool searchB2ForwardDetour(
  * displacement while still blocking the retained execution path. Dropping
  * detour mode at that point makes every following fallback obey the normal
  * reference cone again and recreates the permanent stop. The downstream
- * footprint, obstacle and ground sweeps remain authoritative.
+ * configured footprint and live-obstacle sweeps remain authoritative.
  */
 inline bool shouldUseB2BoundedObstacleDetour(
     bool fallback_candidate,

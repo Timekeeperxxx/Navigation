@@ -2125,77 +2125,334 @@ namespace scan_planner
                                   flag_randomPolyTraj,
                                   reference_guide,
                                   false);
+    bool used_verified_reference_rejoin_leg = false;
+    double reference_rejoin_start_yaw = getOdomYaw();
+    double reference_rejoin_end_yaw = reference_rejoin_start_yaw;
+    bool reference_rejoin_simultaneous_yaw = false;
+    std::size_t reference_rejoin_target_index = 0;
+    std::size_t reference_rejoin_route_pose_count = 0;
+    const char *reference_rejoin_reason = "guided planner failure";
+    const char *reference_rejoin_motion = "stop-turn-forward";
+    auto tryVerifiedReferenceRejoin =
+        [&](const char *reason) {
+      if (reference_guide == nullptr ||
+          use_verified_b2_recovery_leg ||
+          used_verified_reference_rejoin_leg)
+      {
+        return false;
+      }
+
+      // Rebound/A* can fail even while the supplied reference corridor is
+      // usable: its control-point repairs may leave that corridor or enter a
+      // live obstacle. A dynamically blocked guide must never be shortened to
+      // its last free point: doing so deliberately drives B2 up to the
+      // obstacle and removes the room needed to steer around it. In that
+      // case, search only for a forward detour that rejoins beyond the full
+      // blocked section. The simple swept stop-turn-forward connector remains
+      // available for non-obstacle optimizer failures.
+      reference_rejoin_start_yaw = getOdomYaw();
+      Eigen::Vector3d reference_rejoin_target;
+      std::size_t first_dynamically_blocked_segment = 0;
+      std::size_t last_dynamically_blocked_segment = 0;
+      const bool reference_dynamically_blocked =
+          findB2ReferenceDynamicBlockage(
+              *reference_guide,
+              execution_validation_max_position_step_,
+              [this](const Eigen::Vector3d &position, double yaw) {
+                return isExecutionPoseDynamicallyOccupied(position, yaw);
+              },
+              &first_dynamically_blocked_segment,
+              &last_dynamically_blocked_segment);
+      if (reference_dynamically_blocked)
+      {
+        // This is stronger evidence than the downstream execution-path Bool:
+        // the latter can become a spatially mismatched one-point path after
+        // the last short recovery leg and incorrectly report "clear".
+        // Latch the obstacle here so repeated planning failure plus SCAN's
+        // own blocked forward probe can request the existing straight-only
+        // reverse preflight without depending on that collapsed path.
+        b2_obstacle_recovery_latched_ = true;
+        RCLCPP_INFO_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 1000,
+            "[reference path] Dynamic obstacle blocks guide segments "
+            "%zu..%zu; latch obstacle recovery, skip the last-safe-point "
+            "connector, and search a forward bypass that rejoins beyond the "
+            "obstacle. If no bypass remains and the forward probe is blocked, "
+            "the straight reverse preflight no longer depends on a reduced "
+            "execution path reporting safety_frozen.",
+            first_dynamically_blocked_segment,
+            last_dynamically_blocked_segment);
+      }
+
+      bool found_rejoin = false;
+      reference_rejoin_simultaneous_yaw = false;
+      reference_rejoin_route_pose_count = 0;
+      reference_rejoin_motion = "stop-turn-forward";
+
+      if (!reference_dynamically_blocked)
+      {
+        found_rejoin = findFarthestSafeB2ReferenceLeg(
+            start_pt_,
+            reference_rejoin_start_yaw,
+            *reference_guide,
+            0.20,
+            execution_validation_max_yaw_step_,
+            execution_validation_max_position_step_,
+            [this](const Eigen::Vector3d &position, double yaw) {
+              return !isExecutionPoseOccupied(position, yaw);
+            },
+            reference_rejoin_target,
+            &reference_rejoin_target_index);
+        reference_rejoin_route_pose_count = found_rejoin ? 2 : 0;
+      }
+
+      if (!found_rejoin)
+      {
+        B2ForwardDetourSearchConfig search_config;
+        search_config.maximum_yaw_step =
+            execution_validation_max_yaw_step_;
+        search_config.maximum_position_step =
+            execution_validation_max_position_step_;
+        // The controller's position tolerance is 0.10 m.  A 0.15 m straight
+        // lattice primitive (and the existing 0.20 m steering primitive)
+        // guarantees that the first verified leg cannot be pruned at its
+        // starting pose.
+        search_config.translation_step =
+            std::max(0.15, search_config.translation_step);
+
+        std::vector<Eigen::Vector3d> steering_route;
+        std::vector<double> steering_yaws;
+        std::vector<bool> steering_simultaneous_yaw;
+        double last_search_distance =
+            std::numeric_limits<double>::infinity();
+        for (std::size_t reverse_index = reference_guide->size();
+             reverse_index > 1;
+             --reverse_index)
+        {
+          const std::size_t candidate_index = reverse_index - 1;
+          if (reference_dynamically_blocked &&
+              candidate_index <= last_dynamically_blocked_segment)
+          {
+            continue;
+          }
+          const Eigen::Vector3d &candidate =
+              (*reference_guide)[candidate_index];
+          const double candidate_distance =
+              (candidate - start_pt_).head<2>().norm();
+          if (candidate_distance < 0.20)
+            continue;
+
+          // Try the complete bounded lookahead first, followed by at most
+          // one target per 0.5 m while walking back toward the robot.  This
+          // keeps failure latency bounded without overlooking a useful
+          // earlier point when the far target lies beyond a tight bend.
+          if (std::isfinite(last_search_distance) &&
+              last_search_distance - candidate_distance < 0.50 &&
+              candidate_index > 1)
+          {
+            continue;
+          }
+          last_search_distance = candidate_distance;
+          steering_route.clear();
+          steering_yaws.clear();
+          steering_simultaneous_yaw.clear();
+          if (!searchB2ForwardDetour(
+                  start_pt_,
+                  reference_rejoin_start_yaw,
+                  candidate,
+                  search_config,
+                  [this](
+                      const Eigen::Vector3d &position,
+                      double yaw) {
+                    return !isExecutionPoseOccupied(position, yaw);
+                  },
+                  steering_route,
+                  &steering_yaws,
+                  &steering_simultaneous_yaw) ||
+              steering_route.size() < 2 ||
+              steering_yaws.size() != steering_route.size() ||
+              steering_simultaneous_yaw.size() !=
+                  steering_route.size() ||
+              (steering_route[1] - start_pt_).head<2>().norm() <
+                  0.105)
+          {
+            continue;
+          }
+
+          reference_rejoin_target = steering_route[1];
+          reference_rejoin_end_yaw = steering_yaws[1];
+          reference_rejoin_simultaneous_yaw =
+              steering_simultaneous_yaw[1];
+          reference_rejoin_target_index = candidate_index;
+          reference_rejoin_route_pose_count = steering_route.size();
+          reference_rejoin_motion =
+              reference_rejoin_simultaneous_yaw
+                  ? "forward-steering"
+                  : "stop-turn-forward";
+          found_rejoin = true;
+          break;
+        }
+      }
+
+      if (!found_rejoin)
+        return false;
+
+      if (reference_rejoin_route_pose_count == 2)
+      {
+        const Eigen::Vector2d rejoin_delta =
+            (reference_rejoin_target - start_pt_).head<2>();
+        reference_rejoin_end_yaw =
+            std::atan2(rejoin_delta.y(), rejoin_delta.x());
+      }
+
+      local_target_pt_ = reference_rejoin_target;
+      local_target_vel_.setZero();
+      const bool rejoin_plan_success =
+          planner_manager_->planVerifiedB2RecoveryLeg(
+              start_pt_, local_target_pt_);
+      if (!rejoin_plan_success)
+        return false;
+
+      reference_rejoin_reason = reason;
+      used_verified_reference_rejoin_leg = true;
+      // This is a bounded, fully swept steering primitive.  Reuse the
+      // recovery-leg execution semantics so the legacy tangent-only
+      // collision timer cannot replace its explicit yaw schedule halfway
+      // through the manoeuvre, and wait for live odometry to reach its
+      // endpoint before selecting the next reference segment.
+      b2_recovery_subgoal_active_ = true;
+      return true;
+    };
+
+    if (!plan_success)
+      plan_success =
+          tryVerifiedReferenceRejoin("guided planner failure");
     have_new_target_ = false;
 
     cout << "final_plan_success=" << plan_success << endl;
 
     if (plan_success)
     {
-
-      auto info = &planner_manager_->local_data_;
-      bool enforce_initial_reference_cone = flag_randomPolyTraj;
-      bool allow_bounded_obstacle_detour =
-          b2_recovery_subgoal_active_;
-      bool current_dynamic_obstacle = false;
-      bool forward_dynamic_obstacle = false;
-      const bool immediate_dynamic_obstacle =
-          hasB2ImmediateDynamicObstacle(
-              current_dynamic_obstacle,
-              forward_dynamic_obstacle);
-      if (shouldUseB2BoundedObstacleDetour(
-              flag_randomPolyTraj,
-              immediate_dynamic_obstacle,
-              b2_obstacle_recovery_latched_))
-      {
-        // A verified obstacle bypass may have to begin almost sideways to
-        // leave the blocked reference corridor. This is not reverse motion:
-        // the controller first aligns the body with the candidate tangent,
-        // then drives forward along it. Keep detour mode latched for the
-        // complete safety-frozen replan: a prior recovery displacement can
-        // move the obstacle outside the short immediate probe even though it
-        // still blocks the retained execution path.
-        enforce_initial_reference_cone = false;
-        allow_bounded_obstacle_detour = true;
-      }
-      if (!b2_allow_reverse_ &&
-          navi_mode_ == NAVI_MODE::REFERENCE_PATH &&
-          !isB2TrajectoryDirectionSafe(
-              info->position_traj_,
-              enforce_initial_reference_cone,
-              allow_bounded_obstacle_detour))
-      {
-        RCLCPP_WARN_THROTTLE(
-            node_->get_logger(), *node_->get_clock(), 1000,
-            "[B2 motion] Reject %s candidate: initial motion leaves the "
-            "forward/reference cone or backtracks "
-            "(obstacle_detour=%s current=%s forward=%s).",
-            flag_randomPolyTraj ? "unguided fallback" : "guided reference",
-            flag_randomPolyTraj && !enforce_initial_reference_cone
-                ? "true" : "false",
-            current_dynamic_obstacle ? "blocked" : "clear",
-            forward_dynamic_obstacle ? "blocked" : "clear");
-        planner_manager_->local_data_ = previous_local_traj;
-        return false;
-      }
       std::vector<double> validated_yaw_schedule;
       double validated_yaw_dt = 0.0;
-      if (!isTrajectorySafeForExecution(
-              info->position_traj_,
-              &validated_yaw_schedule,
-              &validated_yaw_dt,
-              use_verified_b2_recovery_leg,
-              b2_recovery_leg_start_yaw_,
-              b2_recovery_leg_end_yaw_,
-              b2_recovery_leg_simultaneous_yaw_))
+      bool candidate_accepted = false;
+      for (int validation_attempt = 0;
+           validation_attempt < 2;
+           ++validation_attempt)
+      {
+        auto info = &planner_manager_->local_data_;
+        bool enforce_initial_reference_cone = flag_randomPolyTraj;
+        bool allow_bounded_obstacle_detour =
+            b2_recovery_subgoal_active_ ||
+            used_verified_reference_rejoin_leg;
+        bool current_dynamic_obstacle = false;
+        bool forward_dynamic_obstacle = false;
+        const bool immediate_dynamic_obstacle =
+            hasB2ImmediateDynamicObstacle(
+                current_dynamic_obstacle,
+                forward_dynamic_obstacle);
+        if (shouldUseB2BoundedObstacleDetour(
+                flag_randomPolyTraj,
+                immediate_dynamic_obstacle,
+                b2_obstacle_recovery_latched_))
+        {
+          // A verified obstacle bypass may have to begin almost sideways to
+          // leave the blocked reference corridor. This is not reverse
+          // motion: the controller first aligns the body with the candidate
+          // tangent, then drives forward along it. Keep detour mode latched
+          // for the complete safety-frozen replan.
+          enforce_initial_reference_cone = false;
+          allow_bounded_obstacle_detour = true;
+        }
+        const bool direction_safe =
+            b2_allow_reverse_ ||
+            navi_mode_ != NAVI_MODE::REFERENCE_PATH ||
+            isB2TrajectoryDirectionSafe(
+                info->position_traj_,
+                enforce_initial_reference_cone,
+                allow_bounded_obstacle_detour);
+        if (!direction_safe)
+        {
+          RCLCPP_WARN_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 1000,
+              "[B2 motion] Reject %s candidate: initial motion leaves the "
+              "forward/reference cone or backtracks "
+              "(obstacle_detour=%s current=%s forward=%s).",
+              flag_randomPolyTraj
+                  ? "unguided fallback"
+                  : "guided reference",
+              allow_bounded_obstacle_detour ? "true" : "false",
+              current_dynamic_obstacle ? "blocked" : "clear",
+              forward_dynamic_obstacle ? "blocked" : "clear");
+        }
+
+        validated_yaw_schedule.clear();
+        validated_yaw_dt = 0.0;
+        const bool use_explicit_verified_leg_yaw =
+            use_verified_b2_recovery_leg ||
+            used_verified_reference_rejoin_leg;
+        const bool execution_safe =
+            direction_safe &&
+            isTrajectorySafeForExecution(
+                info->position_traj_,
+                &validated_yaw_schedule,
+                &validated_yaw_dt,
+                use_explicit_verified_leg_yaw,
+                used_verified_reference_rejoin_leg
+                    ? reference_rejoin_start_yaw
+                    : b2_recovery_leg_start_yaw_,
+                used_verified_reference_rejoin_leg
+                    ? reference_rejoin_end_yaw
+                    : b2_recovery_leg_end_yaw_,
+                used_verified_reference_rejoin_leg
+                    ? reference_rejoin_simultaneous_yaw
+                    : b2_recovery_leg_simultaneous_yaw_);
+        if (direction_safe && execution_safe)
+        {
+          candidate_accepted = true;
+          break;
+        }
+
+        // The guided optimizer may report success and only be rejected by
+        // the downstream direction/footprint sweep.  Give that case the same
+        // deterministic reference-rejoin path as an optimizer failure;
+        // otherwise the next FSM tick switches to random A* and can spin for
+        // hundreds of attempts despite a verified forward arc being present.
+        if (!tryVerifiedReferenceRejoin(
+                direction_safe
+                    ? "execution safety rejection"
+                    : "direction guard rejection"))
+        {
+          break;
+        }
+      }
+
+      if (!candidate_accepted)
       {
         // Do not replace a potentially usable active trajectory with one
         // that the downstream double-circle safety sweep will immediately
-        // freeze. Restore it before the caller retries with random/A* init.
+        // freeze.
         planner_manager_->local_data_ = previous_local_traj;
         return false;
       }
 
+      if (used_verified_reference_rejoin_leg)
+      {
+        RCLCPP_INFO_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 1000,
+            "[reference path] %s; execute deterministic %s reference "
+            "rejoin leg toward guide[%zu] at (%.2f, %.2f), route=%zu poses, "
+            "after the full direction and configured execution-safety sweep.",
+            reference_rejoin_reason,
+            reference_rejoin_motion,
+            reference_rejoin_target_index,
+            local_target_pt_.x(),
+            local_target_pt_.y(),
+            reference_rejoin_route_pose_count);
+      }
+
       /* publish traj */
+      auto info = &planner_manager_->local_data_;
       scan_planner::msg::Bspline bspline;
       bspline.order = 3;
       bspline.start_time = toMsgTime(info->start_time_);
@@ -2416,6 +2673,12 @@ namespace scan_planner
     if (targetOccupancy(local_target_pt_, target_segment) != 0)
     {
       bool found_free_target = false;
+      const double occupied_target_yaw = estimateYawFromSegment(
+          active_waypoints_[target_segment],
+          active_waypoints_[target_segment + 1]);
+      const bool target_dynamically_occupied =
+          isExecutionPoseDynamicallyOccupied(
+              local_target_pt_, occupied_target_yaw);
 
       auto distanceFromProgressToWaypoint = [&](size_t waypoint_index) {
         if (waypoint_index <= best_segment)
@@ -2500,66 +2763,72 @@ namespace scan_planner
         return true;
       };
 
-      // First shorten the lookahead, but never select the beginning of the
-      // current progress segment: that point is behind the robot whenever
-      // best_ratio > 0 and previously made SCAN reverse into the obstacle.
-      for (int i = static_cast<int>(target_segment); i >= static_cast<int>(best_segment); --i)
+      // Always look beyond an occupied target first.  The old earlier-point
+      // preference repeatedly moved B2 to the last free sample immediately
+      // in front of a dynamic obstacle, where its long footprint no longer
+      // had enough steering room.  A target on the far side gives local A*
+      // and the heading-aware recovery lattice an actual bypass objective.
+      const double max_forward_distance =
+          std::max(1.0, 2.0 * planning_horizon_);
+      for (size_t waypoint_index = target_segment + 1;
+           waypoint_index < active_waypoints_.size();
+           ++waypoint_index)
       {
-        const size_t waypoint_index = static_cast<size_t>(i);
-        if (waypoint_index <= best_segment ||
-            distanceFromProgressToWaypoint(waypoint_index) < 0.4)
+        const double forward_distance =
+            distanceFromProgressToWaypoint(waypoint_index);
+        if (forward_distance > max_forward_distance)
+          break;
+
+        const size_t candidate_segment =
+            std::min(waypoint_index, segment_count - 1);
+        const Eigen::Vector3d &candidate =
+            active_waypoints_[waypoint_index];
+        if (targetOccupancy(candidate, candidate_segment) != 0 ||
+            !hasFreeApproachRun(waypoint_index))
           continue;
-        const Eigen::Vector3d &candidate = active_waypoints_[waypoint_index];
-        if (targetOccupancy(candidate, static_cast<size_t>(i)) == 0)
+
+        local_target_pt_ = candidate;
+        target_segment = candidate_segment;
+        target_ratio =
+            waypoint_index == active_waypoints_.size() - 1 ? 1.0 : 0.0;
+        reached_end =
+            waypoint_index == active_waypoints_.size() - 1;
+        found_free_target = true;
+        RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 1000,
+            "[reference path] Bounded lookahead is occupied; use the first "
+            "forward collision-free point beyond the obstacle.");
+        break;
+      }
+
+      // Retain the conservative shorter-target fallback only for occupancy
+      // that is not present in the live dynamic obstacle layer.  A dynamic
+      // blocker must be bypassed or waited out; it must never become an
+      // instruction to creep closer.
+      if (!found_free_target && !target_dynamically_occupied)
+      {
+        for (int i = static_cast<int>(target_segment);
+             i >= static_cast<int>(best_segment);
+             --i)
         {
+          const size_t waypoint_index = static_cast<size_t>(i);
+          if (waypoint_index <= best_segment ||
+              distanceFromProgressToWaypoint(waypoint_index) < 0.4)
+            continue;
+          const Eigen::Vector3d &candidate =
+              active_waypoints_[waypoint_index];
+          if (targetOccupancy(candidate, waypoint_index) != 0)
+            continue;
+
           local_target_pt_ = candidate;
-          target_segment = static_cast<size_t>(i);
+          target_segment = waypoint_index;
           target_ratio = 0.0;
           reached_end = false;
           found_free_target = true;
           RCLCPP_WARN_THROTTLE(
               node_->get_logger(), *node_->get_clock(), 1000,
-              "[reference path] Lookahead target occupied; use earlier collision-free point on original path.");
-          break;
-        }
-      }
-
-      // If the obstacle covers the whole bounded lookahead, aim at the first
-      // free point just beyond it. This gives the local A* a point on the far
-      // side to route around instead of declaring the open surrounding area
-      // unreachable. Keep the extended target inside two planning horizons.
-      if (!found_free_target)
-      {
-        const double max_forward_distance =
-            std::max(1.0, 2.0 * planning_horizon_);
-        for (size_t waypoint_index = target_segment + 1;
-             waypoint_index < active_waypoints_.size();
-             ++waypoint_index)
-        {
-          const double forward_distance =
-              distanceFromProgressToWaypoint(waypoint_index);
-          if (forward_distance > max_forward_distance)
-            break;
-
-          const size_t candidate_segment =
-              std::min(waypoint_index, segment_count - 1);
-          const Eigen::Vector3d &candidate =
-              active_waypoints_[waypoint_index];
-          if (targetOccupancy(candidate, candidate_segment) != 0 ||
-              !hasFreeApproachRun(waypoint_index))
-            continue;
-
-          local_target_pt_ = candidate;
-          target_segment = candidate_segment;
-          target_ratio =
-              waypoint_index == active_waypoints_.size() - 1 ? 1.0 : 0.0;
-          reached_end =
-              waypoint_index == active_waypoints_.size() - 1;
-          found_free_target = true;
-          RCLCPP_WARN_THROTTLE(
-              node_->get_logger(), *node_->get_clock(), 1000,
-              "[reference path] Bounded lookahead is occupied; use the first "
-              "forward collision-free point beyond the obstacle.");
+              "[reference path] Non-dynamic lookahead occupancy has no "
+              "bounded bypass target; use an earlier collision-free point.");
           break;
         }
       }

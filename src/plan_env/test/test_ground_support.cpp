@@ -33,6 +33,54 @@ void addPlane(
       index.addPoint(x, y, z);
 }
 
+void addExactFootprintProbes(
+    plan_env::GroundSupportIndex & index,
+    const plan_env::GroundSupportConfig & config,
+    const std::vector<std::vector<int>> & missing_outer_samples)
+{
+  constexpr double kTwoPi = 6.283185307179586476925286766559;
+  const double ground_z = -0.60;
+  const double probe_radius =
+      config.circle_radius + config.footprint_probe_margin;
+  const double offsets[2] = {
+    config.circle_offset,
+    -config.circle_offset};
+
+  for (std::size_t circle = 0; circle < 2; ++circle)
+  {
+    const double circle_x =
+        config.circle_center_offset + offsets[circle];
+    index.addPoint(circle_x, 0.0, ground_z);
+    for (int ring = 1; ring <= config.radial_samples; ++ring)
+    {
+      const double ring_radius =
+          probe_radius * static_cast<double>(ring) /
+          static_cast<double>(config.radial_samples);
+      const int ring_samples =
+          ring == config.radial_samples
+            ? config.perimeter_samples
+            : std::max(4, config.perimeter_samples / 2);
+      for (int sample = 0; sample < ring_samples; ++sample)
+      {
+        if (ring == config.radial_samples &&
+            circle < missing_outer_samples.size() &&
+            std::find(
+              missing_outer_samples[circle].begin(),
+              missing_outer_samples[circle].end(),
+              sample) != missing_outer_samples[circle].end())
+          continue;
+        const double angle =
+            kTwoPi * static_cast<double>(sample) /
+            static_cast<double>(ring_samples);
+        index.addPoint(
+            circle_x + ring_radius * std::cos(angle),
+            ring_radius * std::sin(angle),
+            ground_z);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 TEST(GroundSupportIndex, OpenPlaneSupportsCompleteDoubleCircle)
@@ -87,6 +135,17 @@ TEST(GroundSupportIndex, TenCentimeterGroundSamplingIsSupported)
   EXPECT_TRUE(index.isPoseSupported(0.0, 0.0, -0.28, 1.21));
 }
 
+TEST(GroundSupportIndex, FiveMillimeterBoundaryAllowanceStillUsesNearestSample)
+{
+  plan_env::GroundSupportConfig config = testConfig();
+  config.xy_tolerance = 0.155;
+  plan_env::GroundSupportIndex index(config);
+  index.addPoint(0.0, 0.0, -0.60);
+
+  EXPECT_TRUE(index.hasSupport(0.150394, 0.0, -0.60));
+  EXPECT_FALSE(index.hasSupport(0.1551, 0.0, -0.60));
+}
+
 TEST(GroundSupportIndex, MissingInnerRingIsUnsupported)
 {
   plan_env::GroundSupportConfig config = testConfig();
@@ -119,13 +178,46 @@ TEST(GroundSupportIndex, MissingInnerRingIsUnsupported)
   EXPECT_FALSE(index.isPoseSupported(body_x, body_y, -0.28, 0.0));
 }
 
-TEST(GroundSupportIndex, FootprintCannotHangOverGroundEdge)
+TEST(GroundSupportIndex, AllowsThreeMissingOuterProbesPerCircle)
 {
-  plan_env::GroundSupportIndex index(testConfig());
+  plan_env::GroundSupportConfig config = testConfig();
+  config.bucket_size = 0.05;
+  config.xy_tolerance = 0.01;
+  config.circle_offset = 0.80;
+  config.circle_center_offset = 0.0;
+  config.outer_ring_max_missing_per_circle = 3;
+  plan_env::GroundSupportIndex index(config);
+  addExactFootprintProbes(
+      index, config, {{0, 5, 11}, {2, 7, 13}});
+
+  EXPECT_TRUE(index.isPoseSupported(0.0, 0.0, -0.28, 0.0));
+}
+
+TEST(GroundSupportIndex, RejectsFourMissingOuterProbesOnEitherCircle)
+{
+  plan_env::GroundSupportConfig config = testConfig();
+  config.bucket_size = 0.05;
+  config.xy_tolerance = 0.01;
+  config.circle_offset = 0.80;
+  config.circle_center_offset = 0.0;
+  config.outer_ring_max_missing_per_circle = 3;
+  plan_env::GroundSupportIndex index(config);
+  addExactFootprintProbes(
+      index, config, {{0, 4, 8, 12}, {}});
+
+  EXPECT_FALSE(index.isPoseSupported(0.0, 0.0, -0.28, 0.0));
+}
+
+TEST(GroundSupportIndex, StrictModeCannotHangOverGroundEdge)
+{
+  plan_env::GroundSupportConfig config = testConfig();
+  config.outer_ring_max_missing_per_circle = 0;
+  plan_env::GroundSupportIndex index(config);
   addPlane(index, -2.0, 0.0, -2.0, 2.0, -0.60);
 
   // The body origin still lies on ground, but the front of the double-circle
-  // footprint extends beyond the x=0 edge.
+  // footprint extends beyond the x=0 edge. Strict mode remains available for
+  // maps dense enough to require every outer probe.
   EXPECT_FALSE(index.isPoseSupported(0.0, 0.0, -0.28, 0.0));
   EXPECT_TRUE(index.isPoseSupported(-0.20, 0.0, -0.28, 0.0));
 }

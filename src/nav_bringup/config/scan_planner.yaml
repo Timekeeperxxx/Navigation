@@ -102,21 +102,24 @@ scan_planner_node:
     "grid_map/self_filter_padding": 0.0
     "grid_map/self_filter_z_min_offset": -0.15
     "grid_map/self_filter_z_max_above_sensor": 0.05
-    # Hard negative-obstacle constraint.  Positive LiDAR returns still handle
-    # walls/people/objects; the static ground layer only answers whether the
-    # complete double-circle footprint has same-floor support.
-    "grid_map/ground_support_enabled": true
+    # Static ground ownership is global-only. SCAN keeps checking live LiDAR
+    # obstacles, but must not reject a local curve because sparse /mapground
+    # probes are missing while the robot is moving.
+    "grid_map/ground_support_enabled": false
     "grid_map/ground_support_fail_closed": true
     "grid_map/ground_support_bucket_size": 0.15
-    "grid_map/ground_support_xy_tolerance": 0.15
+    # 0.15 m matching radius + 5 mm voxel-centroid/numeric boundary allowance.
+    "grid_map/ground_support_xy_tolerance": 0.155
     "grid_map/ground_support_z_tolerance": 0.20
     "grid_map/ground_support_planning_height": 0.32
-    # Probe 0.14 m matching tolerance + 0.05 m tracking margin outside the
+    # Probe 0.155 m matching tolerance + 0.035 m tracking margin outside the
     # physical circle. This erodes the allowed ground by the real 0.27 m
     # footprint while tolerating normal 0.10 m point-cloud sampling gaps.
     "grid_map/ground_support_footprint_probe_margin": 0.19
     "grid_map/ground_support_perimeter_samples": 16
     "grid_map/ground_support_radial_samples": 2
+    # Each B2 circle may miss at most 3 outer probes; centre/inner probes remain strict.
+    "grid_map/ground_support_outer_ring_max_missing_per_circle": 3
     "grid_map/resolution": 0.05
     "grid_map/sliding_map_size_x": 10.0
     "grid_map/sliding_map_size_y": 10.0

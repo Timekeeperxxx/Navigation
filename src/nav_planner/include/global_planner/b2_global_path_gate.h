@@ -19,6 +19,7 @@ enum class B2GlobalPathGateStatus
   TERMINAL_SWEEP_UNSUPPORTED,
   PATH_TURN_UNSUPPORTED,
   START_BLOCKED,
+  LOCAL_SAFETY_HANDOFF,
   INVALID,
 };
 
@@ -27,6 +28,7 @@ struct B2GlobalPathGateConfig
   B2StartManeuverConfig start_maneuver;
   double endpoint_xy_tolerance{1e-3};
   double endpoint_z_tolerance{1e-3};
+  bool delegate_pose_safety_to_local_planner{false};
 };
 
 struct B2GlobalPathGateResult
@@ -63,6 +65,19 @@ inline B2GlobalPathGateResult prepareB2GlobalPath(
           std::max(0.0, config.endpoint_z_tolerance))
   {
     result.status = B2GlobalPathGateStatus::ENDPOINT_MISMATCH;
+    return result;
+  }
+
+  // The global route has already passed graph/ground edge and turn checks.
+  // When this handoff mode is enabled, do not reinterpret every raw polyline
+  // vertex as a mandatory in-place rotation and veto the connected route a
+  // second time. SCAN may smooth those vertices; its continuous safety check
+  // remains responsible for live obstacles, not static ground support.
+  if (config.delegate_pose_safety_to_local_planner)
+  {
+    result.path = candidate;
+    result.path.back() = exact_goal;
+    result.status = B2GlobalPathGateStatus::LOCAL_SAFETY_HANDOFF;
     return result;
   }
 

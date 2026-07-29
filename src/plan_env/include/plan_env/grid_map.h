@@ -118,6 +118,7 @@ struct MappingParameters {
   double ground_support_footprint_probe_margin_;
   int ground_support_perimeter_samples_;
   int ground_support_radial_samples_;
+  int ground_support_outer_ring_max_missing_per_circle_;
   Eigen::Matrix4d lidar_extrinsic_;
   Eigen::Matrix4d depth_extrinsic_;
 

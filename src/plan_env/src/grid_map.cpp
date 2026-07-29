@@ -204,7 +204,7 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
       mp_.ground_support_bucket_size_, 0.15);
   getParam(
       node_, "grid_map/ground_support_xy_tolerance",
-      mp_.ground_support_xy_tolerance_, 0.15);
+      mp_.ground_support_xy_tolerance_, 0.155);
   getParam(
       node_, "grid_map/ground_support_z_tolerance",
       mp_.ground_support_z_tolerance_, 0.20);
@@ -234,6 +234,9 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   getParam(
       node_, "grid_map/ground_support_radial_samples",
       mp_.ground_support_radial_samples_, 2);
+  getParam(
+      node_, "grid_map/ground_support_outer_ring_max_missing_per_circle",
+      mp_.ground_support_outer_ring_max_missing_per_circle_, 3);
 
   mp_.lidar_extrinsic_ <<
       1.0, 0.0, 0.0, -0.01100,
@@ -282,6 +285,8 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
       mp_.ground_support_perimeter_samples_;
   ground_support_config.radial_samples =
       mp_.ground_support_radial_samples_;
+  ground_support_config.outer_ring_max_missing_per_circle =
+      mp_.ground_support_outer_ring_max_missing_per_circle_;
   ground_support_index_.configure(ground_support_config);
   ground_support_ready_ = false;
   ground_support_source_point_count_ = 0;

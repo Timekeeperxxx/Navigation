@@ -47,18 +47,22 @@ dynamic_avoidance_monitor:
     footprint_center_offsets: [-0.22, -0.63]
     footprint_sweep_max_step: 0.05
     footprint_sweep_max_yaw_step: 0.0872664626
-    # Independent negative-obstacle guard.  /mapground is the allowed support
-    # surface; map.pcd is intentionally not consumed by local planning.
-    require_ground_support: true
+    # Static ground ownership is global-only. This monitor continuously checks
+    # the live obstacle cloud and execution path, but never freezes motion
+    # because a /mapground footprint probe is missing.
+    require_ground_support: false
     ground_topic: "/mapground"
     ground_body_height: 0.32
-    ground_support_xy_tolerance: 0.15
+    # 0.15 m matching radius + 5 mm voxel-centroid/numeric boundary allowance.
+    ground_support_xy_tolerance: 0.155
     ground_support_z_tolerance: 0.20
     ground_footprint_radius: 0.27
-    # 0.14 m sampling compensation + 0.05 m execution tracking margin.
+    # 0.155 m sampling compensation + 0.035 m execution tracking margin.
     ground_footprint_probe_margin: 0.19
     ground_perimeter_samples: 16
     ground_radial_samples: 2
+    # Match global planning and SCAN: tolerance applies to each outer ring only.
+    ground_outer_ring_max_missing_per_circle: 3
     ground_map_static: true
     # The SCAN path is at the lifted body planning height.  Keep floor voxels
     # below it out of the independent 2D safety check (downward tolerance).

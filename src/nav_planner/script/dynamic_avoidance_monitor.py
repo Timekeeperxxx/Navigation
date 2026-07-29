@@ -205,15 +205,21 @@ class DynamicAvoidanceMonitor(Node):
         self.declare_parameter(
             "footprint_sweep_max_yaw_step", math.radians(5.0)
         )
-        self.declare_parameter("require_ground_support", True)
+        # Static ground support belongs to the global planner. Keep the local
+        # execution monitor obstacle-only unless an explicit deployment opts
+        # back into the legacy ground guard.
+        self.declare_parameter("require_ground_support", False)
         self.declare_parameter("ground_topic", "/mapground")
         self.declare_parameter("ground_body_height", 0.32)
-        self.declare_parameter("ground_support_xy_tolerance", 0.15)
+        self.declare_parameter("ground_support_xy_tolerance", 0.155)
         self.declare_parameter("ground_support_z_tolerance", 0.20)
         self.declare_parameter("ground_footprint_radius", 0.27)
         self.declare_parameter("ground_footprint_probe_margin", 0.19)
         self.declare_parameter("ground_perimeter_samples", 16)
         self.declare_parameter("ground_radial_samples", 2)
+        self.declare_parameter(
+            "ground_outer_ring_max_missing_per_circle", 3
+        )
         self.declare_parameter("ground_map_static", True)
         # The execution path is lifted to the body planning height.  A broad
         # band BELOW the path includes traversable floor voxels and permanently
@@ -335,6 +341,17 @@ class DynamicAvoidanceMonitor(Node):
         )
         self.ground_radial_samples = max(
             int(self.get_parameter("ground_radial_samples").value), 1
+        )
+        self.ground_outer_ring_max_missing_per_circle = min(
+            max(
+                int(
+                    self.get_parameter(
+                        "ground_outer_ring_max_missing_per_circle"
+                    ).value
+                ),
+                0,
+            ),
+            self.ground_perimeter_samples,
         )
         self.ground_map_static = bool(
             self.get_parameter("ground_map_static").value
@@ -922,7 +939,7 @@ class DynamicAvoidanceMonitor(Node):
         self.get_logger().info(
             "ground 硬约束索引就绪："
             f"points={self.ground_source_point_count}, "
-            f"xy_tolerance={self.ground_support_xy_tolerance:.2f}m, "
+            f"xy_tolerance={self.ground_support_xy_tolerance:.3f}m, "
             f"z_tolerance={self.ground_support_z_tolerance:.2f}m"
         )
 
@@ -1472,10 +1489,16 @@ class DynamicAvoidanceMonitor(Node):
         )
         probes: list[tuple[float, float, float]] = []
         probe_distances: list[float] = []
+        # Each tuple contains the strict centre/inner probe indices followed
+        # by the tolerant outer-ring indices for one circle at one path pose.
+        probe_groups: list[tuple[list[int], list[int]]] = []
         two_pi = 2.0 * math.pi
         for circle_path in footprint_paths:
             for center in circle_path:
                 ground_z = center.z - path_height_offset
+                strict_indices: list[int] = []
+                outer_indices: list[int] = []
+                strict_indices.append(len(probes))
                 probes.append((center.x, center.y, ground_z))
                 probe_distances.append(
                     max(
@@ -1495,6 +1518,7 @@ class DynamicAvoidanceMonitor(Node):
                     )
                     for sample in range(ring_samples):
                         angle = two_pi * sample / ring_samples
+                        probe_index = len(probes)
                         probes.append(
                             (
                                 center.x + ring_radius * math.cos(angle),
@@ -1509,15 +1533,48 @@ class DynamicAvoidanceMonitor(Node):
                                 - self.ground_footprint_radius,
                             )
                         )
+                        if ring == self.ground_radial_samples:
+                            outer_indices.append(probe_index)
+                        else:
+                            strict_indices.append(probe_index)
+                probe_groups.append((strict_indices, outer_indices))
+
+        if not probes:
+            return GroundSupportCheck(
+                False, 0, 1, 0.0, Point3(robot.x, robot.y, robot.z),
+                "双圆轨迹中没有可检查的探针",
+            )
 
         probe_array = np.asarray(probes, dtype=np.float64)
         supported = ground_support.supported_mask(probe_array)
         unsupported_indices = np.flatnonzero(~supported)
-        if len(unsupported_indices) == 0:
+        failed = False
+        for strict_indices, outer_indices in probe_groups:
+            if any(not supported[index] for index in strict_indices):
+                failed = True
+                break
+            outer_missing = sum(
+                not supported[index] for index in outer_indices
+            )
+            if (
+                outer_missing
+                > self.ground_outer_ring_max_missing_per_circle
+            ):
+                failed = True
+                break
+
+        if not failed:
             return GroundSupportCheck(
-                True, len(probes), 0, None, None
+                True,
+                len(probes),
+                int(len(unsupported_indices)),
+                None,
+                None,
+                ground_support.error,
             )
 
+        # A rejected circle is reported using the closest raw unsupported
+        # probe so RViz/status diagnostics still point at the relevant area.
         first_index = min(
             (int(index) for index in unsupported_indices),
             key=lambda index: probe_distances[index],

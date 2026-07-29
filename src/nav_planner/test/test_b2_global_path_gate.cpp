@@ -232,6 +232,34 @@ TEST(B2GlobalPathGate, AcceptsSupportedPathAndRestoresExactEndpoint)
 
 TEST(
   B2GlobalPathGate,
+  LocalSafetyHandoffPublishesConnectedRouteWithoutStaticPoseVeto)
+{
+  auto candidate = straightPath();
+  const B2StartManeuverPoint exact_goal = candidate.back();
+  candidate.back().x -= 5e-4;
+  B2GlobalPathGateConfig config = testConfig();
+  config.delegate_pose_safety_to_local_planner = true;
+
+  const auto result = global_planner::prepareB2GlobalPath(
+      candidate,
+      kStartYaw,
+      exact_goal,
+      kPi,
+      config,
+      [](const B2StartManeuverPoint &, double) { return false; },
+      constantGroundHeight);
+
+  ASSERT_EQ(
+      result.status, B2GlobalPathGateStatus::LOCAL_SAFETY_HANDOFF);
+  ASSERT_EQ(result.path.size(), candidate.size());
+  EXPECT_DOUBLE_EQ(result.path.front().x, candidate.front().x);
+  EXPECT_DOUBLE_EQ(result.path.back().x, exact_goal.x);
+  EXPECT_DOUBLE_EQ(result.path.back().y, exact_goal.y);
+  EXPECT_DOUBLE_EQ(result.path.back().z, exact_goal.z);
+}
+
+TEST(
+  B2GlobalPathGate,
   RepairsBlockedStartWithForwardOnlyEscapeAndKeepsExactGoal)
 {
   const auto candidate = boundaryPath();

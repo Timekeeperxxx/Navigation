@@ -195,6 +195,11 @@ if(BUILD_TESTING)
     test/test_b2_global_path_gate.cpp
   )
   target_include_directories(test_b2_global_path_gate PRIVATE include)
+  ament_add_gtest(
+    test_ground_goal_snap
+    test/test_ground_goal_snap.cpp
+  )
+  target_include_directories(test_ground_goal_snap PRIVATE include)
   ament_add_pytest_test(
     test_goal_queue_contract
     test/test_goal_queue_contract.py

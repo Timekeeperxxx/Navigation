@@ -66,6 +66,11 @@ global_planner:
     planground_search_radius: 0.2
     planground_fallback_ratio: 0.3
     planground_downsample_leaf_size: 0.2
+    rviz_goal_ground_snap_enabled: true
+    rviz_goal_ground_snap_xy_radius: 0.50
+    rviz_goal_ground_snap_max_layer_distance: 0.75
+    rviz_goal_ground_snap_xy_layer_tie_distance: 0.15
+    rviz_goal_unspecified_z_tolerance: 0.001
 
     use_hybrid_planner: true
     hybrid_planground_bias: 15.0
@@ -87,13 +92,15 @@ global_planner:
     hybrid_edge_penalty_weight: 200.0
     hybrid_edge_penalty_falloff_rate: 2.0
 
+    # Global planning is the sole /mapground safety authority.
     global_ground_support_enabled: true
     global_ground_support_edge_step: 0.05
     global_ground_support_turn_validation_enabled: true
     global_ground_support_turn_angle_step: 0.0872664626
     global_ground_support_turn_min_angle: 0.0
     global_ground_support_bucket_size: 0.15
-    global_ground_support_xy_tolerance: 0.15
+    # 0.15 m matching radius + 5 mm voxel-centroid/numeric boundary allowance.
+    global_ground_support_xy_tolerance: 0.155
     global_ground_support_z_tolerance: 0.20
     global_ground_support_planning_height: 0.32
     global_ground_support_circle_radius: 0.27
@@ -102,8 +109,13 @@ global_planner:
     global_ground_support_footprint_probe_margin: 0.19
     global_ground_support_perimeter_samples: 16
     global_ground_support_radial_samples: 2
+    # Sparse-map tolerance only: each circle centre and inner ring stay strict.
+    global_ground_support_outer_ring_max_missing_per_circle: 3
     global_start_maneuver_max_forward_distance: 2.0
     global_start_maneuver_forward_step: 0.05
     global_start_maneuver_path_sample_step: 0.05
     global_start_maneuver_yaw_sample_step: 0.0872664626
     global_start_maneuver_max_join_distance: 12.0
+    # Route edges/turns were already checked by Hybrid A*. Avoid treating
+    # every raw polyline vertex as a mandatory in-place rotation.
+    global_delegate_pose_safety_to_local_planner: true

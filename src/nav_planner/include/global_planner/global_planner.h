@@ -51,6 +51,7 @@ type edge_t is inside here
 */
 #include <global_planner/a_star_on_pc.h>
 #include <global_planner/a_star_on_pre_graph.h>
+#include <global_planner/ground_goal_snap.h>
 #include <global_planner/hybrid_a_star.h>
 #include <plan_env/ground_support.h>
 #include <atomic>
@@ -242,6 +243,9 @@ class GlobalPlanner : public rclcpp::Node {
       double planground_search_radius_;
       double planground_fallback_ratio_;
       double planground_downsample_leaf_size_;
+      bool rviz_goal_ground_snap_enabled_;
+      double rviz_goal_unspecified_z_tolerance_;
+      GroundGoalSnapConfig rviz_goal_ground_snap_config_;
 
       //@ Hybrid planning parameters (v23 - Ultra-Strong Planground Preference with Maximum Anti-Detour)
       bool use_hybrid_planner_;
@@ -275,6 +279,7 @@ class GlobalPlanner : public rclcpp::Node {
       double global_start_maneuver_path_sample_step_;
       double global_start_maneuver_yaw_sample_step_;
       double global_start_maneuver_max_join_distance_;
+      bool global_delegate_pose_safety_to_local_planner_;
 
       rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_planning_status_;
       struct PendingGoal

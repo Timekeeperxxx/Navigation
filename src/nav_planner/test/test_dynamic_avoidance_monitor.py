@@ -80,6 +80,7 @@ class GroundMonitorHarness(MonitorHarness):
     ground_footprint_probe_margin = 0.19
     ground_perimeter_samples = 16
     ground_radial_samples = 2
+    ground_outer_ring_max_missing_per_circle = 3
     ground_error = ""
 
     def __init__(self, ground: "np.ndarray") -> None:
@@ -271,6 +272,52 @@ def ground_plane(
     )
 
 
+def exact_circle_ground(
+    centers: list[Point3],
+    missing_outer_samples: list[list[int]],
+):
+    import numpy as np
+
+    radius = (
+        GroundMonitorHarness.ground_footprint_radius
+        + GroundMonitorHarness.ground_footprint_probe_margin
+    )
+    points: list[tuple[float, float, float]] = []
+    for circle_index, center in enumerate(centers):
+        ground_z = center.z - GroundMonitorHarness.ground_body_height
+        points.append((center.x, center.y, ground_z))
+        for ring in range(
+            1, GroundMonitorHarness.ground_radial_samples + 1
+        ):
+            ring_radius = (
+                radius
+                * ring
+                / GroundMonitorHarness.ground_radial_samples
+            )
+            ring_samples = (
+                GroundMonitorHarness.ground_perimeter_samples
+                if ring == GroundMonitorHarness.ground_radial_samples
+                else max(
+                    4, GroundMonitorHarness.ground_perimeter_samples // 2
+                )
+            )
+            for sample in range(ring_samples):
+                if (
+                    ring == GroundMonitorHarness.ground_radial_samples
+                    and sample in missing_outer_samples[circle_index]
+                ):
+                    continue
+                angle = 2.0 * math.pi * sample / ring_samples
+                points.append(
+                    (
+                        center.x + ring_radius * math.cos(angle),
+                        center.y + ring_radius * math.sin(angle),
+                        ground_z,
+                    )
+                )
+    return np.asarray(points, dtype=np.float64)
+
+
 def _planning_status(
     status: str, generation: int, message: str = ""
 ):
@@ -439,6 +486,38 @@ def test_dense_same_floor_ground_supports_complete_execution_footprint() -> None
     assert result.ground_probe_count > 0
 
 
+def test_three_missing_outer_probes_per_circle_remain_supported() -> None:
+    centers = [Point3(-1.0, 0.0, 0.30), Point3(1.0, 0.0, 0.30)]
+    ground = exact_circle_ground(
+        centers, [[0, 5, 11], [2, 7, 13]]
+    )
+    monitor = GroundMonitorHarness(ground)
+    monitor.ground_support = GroundSupportIndex(0.01, 0.20)
+    assert monitor.ground_support.set_points(ground)
+
+    result = monitor._check_ground_support(
+        ROBOT, [[centers[0]], [centers[1]]]
+    )
+
+    assert result.supported is True
+    assert result.unsupported_probe_count == 6
+
+
+def test_four_missing_outer_probes_on_one_circle_are_rejected() -> None:
+    centers = [Point3(-1.0, 0.0, 0.30), Point3(1.0, 0.0, 0.30)]
+    ground = exact_circle_ground(centers, [[0, 4, 8, 12], []])
+    monitor = GroundMonitorHarness(ground)
+    monitor.ground_support = GroundSupportIndex(0.01, 0.20)
+    assert monitor.ground_support.set_points(ground)
+
+    result = monitor._check_ground_support(
+        ROBOT, [[centers[0]], [centers[1]]]
+    )
+
+    assert result.supported is False
+    assert result.unsupported_probe_count == 4
+
+
 def test_execution_path_crossing_ground_hole_is_blocked() -> None:
     import numpy as np
 
@@ -494,6 +573,24 @@ def test_ground_xy_and_z_tolerances_match_cpp_rectangular_rule() -> None:
     )
 
     assert supported.tolist() == [True, False, False]
+
+
+def test_five_millimeter_ground_boundary_allowance_is_bounded() -> None:
+    import numpy as np
+
+    index = GroundSupportIndex(0.155, 0.20)
+    assert index.set_points(np.asarray([[0.0, 0.0, 0.0]]))
+
+    supported = index.supported_mask(
+        np.asarray(
+            [
+                [0.150394, 0.0, 0.0],
+                [0.1551, 0.0, 0.0],
+            ]
+        )
+    )
+
+    assert supported.tolist() == [True, False]
 
 
 def test_global_path_uses_ground_height_without_body_offset() -> None:

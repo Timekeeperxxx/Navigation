@@ -235,6 +235,107 @@ TEST(B2MotionPolicy, RevalidatesCachedLegFromLivePose)
       }));
 }
 
+TEST(B2MotionPolicy, ChoosesFarthestSweptSafeReferenceRejoin)
+{
+  const Eigen::Vector3d start(0.0, 0.0, 0.32);
+  const std::vector<Eigen::Vector3d> guide{
+      start,
+      Eigen::Vector3d(0.20, 0.0, 0.32),
+      Eigen::Vector3d(0.40, 0.0, 0.32),
+      Eigen::Vector3d(0.80, 0.0, 0.32)};
+  Eigen::Vector3d selected = Eigen::Vector3d::Zero();
+  std::size_t selected_index = 0;
+
+  ASSERT_TRUE(scan_planner::findFarthestSafeB2ReferenceLeg(
+      start,
+      0.0,
+      guide,
+      0.20,
+      0.05,
+      0.05,
+      [](const Eigen::Vector3d &position, double) {
+        return position.x() <= 0.55;
+      },
+      selected,
+      &selected_index));
+  EXPECT_EQ(selected_index, 2U);
+  EXPECT_TRUE(selected.isApprox(guide[2], 1e-12));
+}
+
+TEST(B2MotionPolicy, DetectsDynamicBlockageBetweenReferenceVertices)
+{
+  const std::vector<Eigen::Vector3d> guide{
+      Eigen::Vector3d(0.0, 0.0, 0.32),
+      Eigen::Vector3d(1.0, 0.0, 0.32),
+      Eigen::Vector3d(2.0, 0.0, 0.32)};
+  std::size_t first_blocked_segment = 99;
+  std::size_t last_blocked_segment = 99;
+
+  ASSERT_TRUE(scan_planner::findB2ReferenceDynamicBlockage(
+      guide,
+      0.05,
+      [](const Eigen::Vector3d &position, double yaw) {
+        return std::abs(position.x() - 0.50) < 0.03 &&
+            std::abs(yaw) < 1e-9;
+      },
+      &first_blocked_segment,
+      &last_blocked_segment));
+  EXPECT_EQ(first_blocked_segment, 0U);
+  EXPECT_EQ(last_blocked_segment, 0U);
+}
+
+TEST(B2MotionPolicy, ReportsCompleteDynamicBlockageSegmentRange)
+{
+  const std::vector<Eigen::Vector3d> guide{
+      Eigen::Vector3d(0.0, 0.0, 0.32),
+      Eigen::Vector3d(1.0, 0.0, 0.32),
+      Eigen::Vector3d(2.0, 0.0, 0.32),
+      Eigen::Vector3d(3.0, 0.0, 0.32)};
+  std::size_t first_blocked_segment = 99;
+  std::size_t last_blocked_segment = 99;
+
+  ASSERT_TRUE(scan_planner::findB2ReferenceDynamicBlockage(
+      guide,
+      0.05,
+      [](const Eigen::Vector3d &position, double) {
+        return std::abs(position.x() - 0.50) < 0.03 ||
+            std::abs(position.x() - 1.50) < 0.03;
+      },
+      &first_blocked_segment,
+      &last_blocked_segment));
+  EXPECT_EQ(first_blocked_segment, 0U);
+  EXPECT_EQ(last_blocked_segment, 1U);
+
+  EXPECT_FALSE(scan_planner::findB2ReferenceDynamicBlockage(
+      guide,
+      0.05,
+      [](const Eigen::Vector3d &, double) {
+        return false;
+      }));
+}
+
+TEST(B2MotionPolicy, ReferenceRejoinStillChecksIntermediateYawSweep)
+{
+  const Eigen::Vector3d start(0.0, 0.0, 0.32);
+  const std::vector<Eigen::Vector3d> guide{
+      start,
+      Eigen::Vector3d(0.0, 0.40, 0.32)};
+  Eigen::Vector3d selected = Eigen::Vector3d::Zero();
+
+  EXPECT_FALSE(scan_planner::findFarthestSafeB2ReferenceLeg(
+      start,
+      0.0,
+      guide,
+      0.20,
+      0.05,
+      0.05,
+      [](const Eigen::Vector3d &position, double yaw) {
+        return position.head<2>().norm() > 1e-6 ||
+            std::abs(yaw - 0.75) > 0.08;
+      },
+      selected));
+}
+
 TEST(B2MotionPolicy, RejectsWrongWayOrBacktrackingCandidate)
 {
   scan_planner::B2DirectionGuardConfig config;
@@ -371,7 +472,9 @@ TEST(B2MotionPolicy, StartsSteeringFromExactLiveYawWithoutQuantizedPivot)
 
   const auto exact_live_yaw_only_at_start =
       [live_yaw](const Eigen::Vector3d &position, double yaw) {
-        if (position.head<2>().norm() >= 0.04)
+        // Reject a quantized in-place pivot at the exact start pose, while
+        // allowing yaw to evolve as soon as forward motion has begun.
+        if (position.head<2>().norm() > 1e-9)
           return true;
         const double error = std::atan2(
             std::sin(yaw - live_yaw),
@@ -393,6 +496,35 @@ TEST(B2MotionPolicy, StartsSteeringFromExactLiveYawWithoutQuantizedPivot)
   ASSERT_EQ(path.size(), simultaneous_yaw.size());
   EXPECT_NEAR(yaws.front(), live_yaw, 1e-12);
   EXPECT_TRUE(simultaneous_yaw[1]);
+}
+
+TEST(B2MotionPolicy, DetourChecksBetweenFiveCentimeterLatticeStates)
+{
+  scan_planner::B2ForwardDetourSearchConfig config;
+  config.position_resolution = 0.05;
+  config.maximum_position_step = 0.025;
+  config.translation_step = 0.15;
+  config.maximum_search_extent = 1.5;
+  config.maximum_expansions = 5000;
+
+  std::vector<Eigen::Vector3d> path;
+  const auto narrow_unsupported_ring = [](
+      const Eigen::Vector3d &position, double) {
+    const double distance = position.head<2>().norm();
+    return distance < 0.015 || distance > 0.035;
+  };
+
+  // Every translation out of the origin crosses r=0.025.  A search that
+  // checks only 5 cm lattice endpoints would miss it and return an unsafe
+  // route; the execution-density sweep must fail closed.
+  EXPECT_FALSE(scan_planner::searchB2ForwardDetour(
+      Eigen::Vector3d(0.0, 0.0, 0.32),
+      0.0,
+      Eigen::Vector3d(0.8, 0.0, 0.32),
+      config,
+      narrow_unsupported_ring,
+      path));
+  EXPECT_TRUE(path.empty());
 }
 
 TEST(B2MotionPolicy, RejectsFlatGuidedLoopButAllowsForwardDetour)

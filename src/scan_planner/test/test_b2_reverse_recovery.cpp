@@ -74,6 +74,18 @@ TEST(B2ReverseRecoveryTrigger, ContinuesConfirmedTrapAfterProbeClears)
       true, 2, 2, true, false, false));
 }
 
+TEST(
+    B2ReverseRecoveryTrigger,
+    ConfirmedGuideBlockageIgnoresCollapsedExecutionPathClear)
+{
+  // A one-point execution path can report safety_execution_frozen=false
+  // after the last short detour leg. Once SCAN's full reference-footprint
+  // sweep has latched a real obstacle, a blocked forward probe remains
+  // sufficient evidence for the existing straight-only reverse preflight.
+  EXPECT_TRUE(scan_planner::shouldContinueLatchedB2ObstacleRecovery(
+      true, 2, 2, false, true, false));
+}
+
 TEST(B2ReverseRecovery, FreshSafetyApprovalStillWaitsForFullPreflight)
 {
   auto policy = makePolicy();

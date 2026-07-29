@@ -106,15 +106,13 @@ def test_all_reference_candidates_are_direction_guarded_before_publish() -> None
         "bool SCANReplanFSM::callReboundReplan",
     )
 
-    direction_guard = dispatch.index(
-        "!isB2TrajectoryDirectionSafe("
-    )
+    direction_guard = dispatch.index("isB2TrajectoryDirectionSafe(")
     execution_safety = dispatch.index("isTrajectorySafeForExecution(")
     publish = dispatch.index("bspline_pub_->publish")
     assert direction_guard < execution_safety < publish
     assert (
-        "navi_mode_ == NAVI_MODE::REFERENCE_PATH &&\n"
-        "          !isB2TrajectoryDirectionSafe"
+        "navi_mode_ != NAVI_MODE::REFERENCE_PATH ||\n"
+        "            isB2TrajectoryDirectionSafe"
     ) in dispatch
     assert (
         "flag_randomPolyTraj &&\n"
@@ -184,6 +182,125 @@ def test_reference_attraction_is_removed_when_obstacle_intersects_guide() -> Non
     )
     assert occupancy_check < clear_reference < init_astar
     assert "setReboundReference(point_set)" in rebound
+
+
+def test_failed_guided_optimizer_uses_swept_reference_rejoin() -> None:
+    dispatch = function_body(
+        SOURCE,
+        "bool SCANReplanFSM::callReboundReplan",
+    )
+
+    fallback = dispatch.index(
+        "bool used_verified_reference_rejoin_leg = false;"
+    )
+    fallback_gate = dispatch.index("reference_guide == nullptr", fallback)
+    dynamic_blockage = dispatch.index(
+        "findB2ReferenceDynamicBlockage(",
+        fallback_gate,
+    )
+    fallback_plan = dispatch.index(
+        "findFarthestSafeB2ReferenceLeg(",
+        dynamic_blockage,
+    )
+    direction_guard = dispatch.index(
+        "isB2TrajectoryDirectionSafe(",
+        fallback_plan,
+    )
+    execution_sweep = dispatch.index(
+        "isTrajectorySafeForExecution(",
+        direction_guard,
+    )
+    publish = dispatch.index(
+        "bspline_pub_->publish",
+        execution_sweep,
+    )
+
+    assert fallback < fallback_gate < dynamic_blockage < fallback_plan
+    assert fallback_plan < direction_guard < execution_sweep < publish
+    assert 'tryVerifiedReferenceRejoin("guided planner failure")' in dispatch
+    assert "use_explicit_verified_leg_yaw" in dispatch
+    assert "reference_rejoin_start_yaw" in dispatch
+    assert "reference_rejoin_end_yaw" in dispatch
+
+
+def test_reference_rejoin_uses_forward_steering_and_catches_late_rejection() -> None:
+    dispatch = function_body(
+        SOURCE,
+        "bool SCANReplanFSM::callReboundReplan",
+    )
+
+    dynamic_blockage = dispatch.index(
+        "findB2ReferenceDynamicBlockage("
+    )
+    straight_only_when_clear = dispatch.index(
+        "if (!reference_dynamically_blocked)",
+        dynamic_blockage,
+    )
+    obstacle_recovery_latch = dispatch.index(
+        "b2_obstacle_recovery_latched_ = true;",
+        dynamic_blockage,
+    )
+    straight_rejoin = dispatch.index(
+        "findFarthestSafeB2ReferenceLeg(",
+        straight_only_when_clear,
+    )
+    steering_rejoin = dispatch.index(
+        "searchB2ForwardDetour(",
+        straight_rejoin,
+    )
+    direction_guard = dispatch.index(
+        "isB2TrajectoryDirectionSafe(",
+        steering_rejoin,
+    )
+    execution_sweep = dispatch.index(
+        "isTrajectorySafeForExecution(",
+        direction_guard,
+    )
+    late_retry = dispatch.index(
+        "tryVerifiedReferenceRejoin(",
+        execution_sweep,
+    )
+    publish = dispatch.index(
+        "bspline_pub_->publish",
+        late_retry,
+    )
+
+    assert dynamic_blockage < obstacle_recovery_latch
+    assert obstacle_recovery_latch < straight_only_when_clear < straight_rejoin
+    assert straight_rejoin < steering_rejoin
+    assert steering_rejoin < direction_guard < execution_sweep
+    assert execution_sweep < late_retry < publish
+    assert "reference_rejoin_simultaneous_yaw" in dispatch
+    assert "b2_recovery_subgoal_active_ = true" in dispatch
+    assert "maximum_position_step" in dispatch
+    assert (
+        "candidate_index <= last_dynamically_blocked_segment"
+        in dispatch
+    )
+    assert "skip the last-safe-point" in dispatch
+    assert "no longer depends on a reduced" in dispatch
+
+
+def test_dynamic_occupied_lookahead_prefers_a_target_after_the_obstacle() -> None:
+    target = function_body(
+        SOURCE,
+        "bool SCANReplanFSM::getReferencePathLocalTarget",
+    )
+
+    dynamic_check = target.index(
+        "const bool target_dynamically_occupied ="
+    )
+    beyond_search = target.index(
+        "for (size_t waypoint_index = target_segment + 1;",
+        dynamic_check,
+    )
+    earlier_gate = target.index(
+        "if (!found_free_target && !target_dynamically_occupied)",
+        beyond_search,
+    )
+
+    assert dynamic_check < beyond_search < earlier_gate
+    assert "instruction to creep closer" in target
 
 
 def test_every_new_reference_path_publishes_handoff_before_generation() -> None:

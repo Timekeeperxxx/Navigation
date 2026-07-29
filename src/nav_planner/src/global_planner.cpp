@@ -125,6 +125,40 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("planground_downsample_leaf_size", planground_downsample_leaf_size_);
   RCLCPP_INFO(this->get_logger(), "planground_downsample_leaf_size: %.2f", planground_downsample_leaf_size_);
 
+  declare_parameter("rviz_goal_ground_snap_enabled", rclcpp::ParameterValue(true));
+  this->get_parameter(
+    "rviz_goal_ground_snap_enabled", rviz_goal_ground_snap_enabled_);
+  declare_parameter(
+    "rviz_goal_ground_snap_xy_radius", rclcpp::ParameterValue(0.50));
+  this->get_parameter(
+    "rviz_goal_ground_snap_xy_radius",
+    rviz_goal_ground_snap_config_.maximum_xy_distance);
+  declare_parameter(
+    "rviz_goal_ground_snap_max_layer_distance",
+    rclcpp::ParameterValue(0.75));
+  this->get_parameter(
+    "rviz_goal_ground_snap_max_layer_distance",
+    rviz_goal_ground_snap_config_.maximum_layer_distance);
+  declare_parameter(
+    "rviz_goal_ground_snap_xy_layer_tie_distance",
+    rclcpp::ParameterValue(0.15));
+  this->get_parameter(
+    "rviz_goal_ground_snap_xy_layer_tie_distance",
+    rviz_goal_ground_snap_config_.xy_layer_tie_distance);
+  declare_parameter(
+    "rviz_goal_unspecified_z_tolerance", rclcpp::ParameterValue(0.001));
+  this->get_parameter(
+    "rviz_goal_unspecified_z_tolerance",
+    rviz_goal_unspecified_z_tolerance_);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "RViz goal ground snap: %s xy_radius=%.2fm layer_limit=%.2fm "
+    "xy_layer_tie=%.2fm",
+    rviz_goal_ground_snap_enabled_ ? "enabled" : "disabled",
+    rviz_goal_ground_snap_config_.maximum_xy_distance,
+    rviz_goal_ground_snap_config_.maximum_layer_distance,
+    rviz_goal_ground_snap_config_.xy_layer_tie_distance);
+
   //@ Hybrid planning parameters (v24 - Ultra-Strong Planground Preference with Maximum Anti-Detour 加强版)
   declare_parameter("use_hybrid_planner", rclcpp::ParameterValue(true));
   this->get_parameter("use_hybrid_planner", use_hybrid_planner_);
@@ -218,7 +252,7 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter(
     "global_ground_support_bucket_size",
     global_ground_support_config_.bucket_size);
-  declare_parameter("global_ground_support_xy_tolerance", rclcpp::ParameterValue(0.15));
+  declare_parameter("global_ground_support_xy_tolerance", rclcpp::ParameterValue(0.155));
   this->get_parameter(
     "global_ground_support_xy_tolerance",
     global_ground_support_config_.xy_tolerance);
@@ -255,6 +289,12 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
     "global_ground_support_radial_samples",
     global_ground_support_config_.radial_samples);
   declare_parameter(
+    "global_ground_support_outer_ring_max_missing_per_circle",
+    rclcpp::ParameterValue(3));
+  this->get_parameter(
+    "global_ground_support_outer_ring_max_missing_per_circle",
+    global_ground_support_config_.outer_ring_max_missing_per_circle);
+  declare_parameter(
     "global_start_maneuver_max_forward_distance",
     rclcpp::ParameterValue(2.0));
   this->get_parameter(
@@ -284,6 +324,12 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter(
     "global_start_maneuver_max_join_distance",
     global_start_maneuver_max_join_distance_);
+  declare_parameter(
+    "global_delegate_pose_safety_to_local_planner",
+    rclcpp::ParameterValue(true));
+  this->get_parameter(
+    "global_delegate_pose_safety_to_local_planner",
+    global_delegate_pose_safety_to_local_planner_);
 
   RCLCPP_INFO(
     this->get_logger(),
@@ -743,6 +789,8 @@ bool GlobalPlanner::finalizeB2GlobalPath(
     global_start_maneuver_max_join_distance_;
   gate_config.endpoint_xy_tolerance = 1e-3;
   gate_config.endpoint_z_tolerance = 1e-3;
+  gate_config.delegate_pose_safety_to_local_planner =
+    global_delegate_pose_safety_to_local_planner_;
 
   const B2GlobalPathGateResult gate_result = prepareB2GlobalPath(
     candidate, live_start_yaw, goal_point, exact_goal_yaw,
@@ -819,6 +867,13 @@ bool GlobalPlanner::finalizeB2GlobalPath(
       "[B2 path gate] Added %.2fm forward-only start escape before "
       "the normal turn; no reverse or lateral motion.",
       gate_result.forward_escape_distance);
+  }
+  if (gate_result.status == B2GlobalPathGateStatus::LOCAL_SAFETY_HANDOFF) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[B2 path handoff] Published the connected global route without "
+      "a duplicate vertex-as-in-place-turn veto; global planning owns "
+      "static ground safety and local execution owns live-obstacle safety.");
   }
   return true;
 }
@@ -1053,6 +1108,56 @@ void GlobalPlanner::planGoalPose(
     }
   }
 
+  // RViz's 2D Goal Pose tool publishes z=0 even when the selected floor is
+  // elsewhere in the map frame. Snap only PoseStamped goals here; BotDog's
+  // /clicked_point contract carries an explicit saved ground z and keeps that
+  // layer hint unchanged. A non-zero PoseStamped z is also respected as its
+  // preferred layer and merely adjusted to the actual ground sample.
+  if (
+    enforce_goal_yaw &&
+    rviz_goal_ground_snap_enabled_ &&
+    !ground_cloud->points.empty())
+  {
+    const double published_z = goal.pose.position.z;
+    const bool z_is_unspecified =
+      std::abs(published_z) <=
+      std::max(0.0, rviz_goal_unspecified_z_tolerance_);
+    const double preferred_z =
+      z_is_unspecified ? start.pose.position.z : published_z;
+    const GroundGoalSnapResult snapped = findGroundGoalSnap(
+      ground_cloud->points,
+      goal.pose.position.x,
+      goal.pose.position.y,
+      preferred_z,
+      rviz_goal_ground_snap_config_);
+    if (!snapped.valid)
+    {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "[RViz ground snap] No same-layer ground within %.2fm XY and "
+        "%.2fm of preferred z %.3f for goal (%.3f, %.3f).",
+        rviz_goal_ground_snap_config_.maximum_xy_distance,
+        rviz_goal_ground_snap_config_.maximum_layer_distance,
+        preferred_z,
+        goal.pose.position.x,
+        goal.pose.position.y);
+      return;
+    }
+
+    goal.pose.position.z = snapped.snapped_z;
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[RViz ground snap] Goal z %.3f -> %.3f using %s layer hint %.3f "
+      "(ground_xy=%.3fm layer_delta=%.3fm index=%zu).",
+      published_z,
+      goal.pose.position.z,
+      z_is_unspecified ? "robot" : "explicit",
+      preferred_z,
+      snapped.xy_distance,
+      snapped.layer_distance,
+      snapped.index);
+  }
+
   unsigned int start_id, goal_id;
   unsigned int ground_start_id, ground_goal_id;
   std::vector<unsigned int> path;
@@ -1076,9 +1181,10 @@ void GlobalPlanner::planGoalPose(
               static_cast<double>(from.x) - start_x,
               static_cast<double>(from.y) - start_y) <= 0.02 &&
             std::abs(static_cast<double>(from.z) - start_z) <= 0.20;
-          // This exemption only obtains a private position candidate. The
-          // final B2 gate must either replace this edge with a supported
-          // straight-forward escape or reject the whole path.
+          // The exact live pose is physically occupied by the robot and can
+          // sit a few millimetres outside a sparse static-cloud lookup. This
+          // exemption obtains the position route; SCAN and the execution
+          // monitor validate the time-parameterized local trajectory.
           return leaves_exact_live_start ||
                  !strict_edge_validator ||
                  strict_edge_validator(from, to);
