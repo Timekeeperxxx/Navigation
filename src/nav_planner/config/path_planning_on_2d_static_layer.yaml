@@ -52,10 +52,25 @@ global_planner:
   ros__parameters:
     turning_weight: 0.1 #Punish the zig-zag path
     a_star_expanding_radius: 0.2
+    path_smoothing_resolution: 0.1
+    path_smoothing_iterations: 3
+    path_smoothing_data_weight: 0.25
+    path_smoothing_smooth_weight: 0.35
+    path_smoothing_max_deviation: 0.25
+    anti_backtrack_weight: 1.0
+    hybrid_planground_bias: 0.45
+    hybrid_max_ground_bridge_length: 2.0
+    hybrid_max_ground_cost: 2.0
+    hybrid_min_ground_cost: 0.02
+    hybrid_detour_ratio_threshold: 1.1
+    hybrid_distance_balance_threshold: 6.0
+    hybrid_ground_path_length_penalty: 0.0
+    hybrid_path_detour_limit: 1.6
+    hybrid_planground_path_margin: 1.05
     use_pre_graph: true
       #if we want global planner to use pre-static graph, remember to set generate_static_graph to true under perception_3d::StaticLayer
 
     #@ v25 Edge penalty parameters - penalize ground points near cloud edges
     hybrid_edge_penalty_radius: 0.5
-    hybrid_edge_penalty_weight: 200.0
+    hybrid_edge_penalty_weight: 5.0
     hybrid_edge_penalty_falloff_rate: 2.0

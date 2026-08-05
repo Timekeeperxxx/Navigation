@@ -87,14 +87,15 @@ bash adapters/legacy_scripts/restart_navigation_localization.sh /path/to/scene
 
 [Unitree B2 官方页面](https://www.unitree.com/cn/b2) 公布的站立尺寸约为 `1.098m x 0.450m x 0.645m`。SCAN 使用双圆柱近似水平轮廓：
 
-- `grid_map/double_cylinder_radius: 0.25`
-- `grid_map/double_cylinder_offset: 0.225`
-- `grid_map/double_cylinder_center_offset: -0.45`
+- `lidar_mount_x_m: 0.425`
+- `grid_map/double_cylinder_radius: 0.27`
+- `grid_map/double_cylinder_offset: 0.205`
+- `grid_map/double_cylinder_center_offset: 0.0`
 - `grid_map/body_height: 0.32`
 - `grid_map/obstacles_inflation_z_up: 0.10`
 - `grid_map/obstacles_inflation_z_down: 0.33`
 
-以 `map -> base_footprint` 的 XY 原点为基准，两个圆柱中心沿机器人航向分别位于后方约 `0.225m` 和 `0.675m`，半径为 `0.25m`。全局规划的 `inscribed_radius` 保持为 `0.23m`。替换前的 **Unitree Go2** 尺寸参数保存在 `src/nav_bringup/config/robot_size_pre_b2_20260710.yaml`，仅用于恢复 Go2 部署。
+前置 Mid360 相对 B2 平面旋转中心的纵向安装偏移为 `+0.425m`。该偏移由 LIO 与 `base_link -> base_footprint` TF 共同处理，使 `base_footprint` 落在真实机体中心；两个圆柱中心沿机器人航向位于 `±0.205m`，半径为 `0.27m`。不能再把 `-0.425m` 重复写进碰撞圆中心，否则 SCAN 的几何位置虽然看似接近机身，闭环控制使用的旋转中心却仍在雷达下方，原地转向会产生虚假的 XY 跟踪误差。全局规划的 `inscribed_radius` 保持为 `0.23m`。替换前的 **Unitree Go2** 尺寸参数保存在 `src/nav_bringup/config/robot_size_pre_b2_20260710.yaml`，仅用于恢复 Go2 部署。
 
 ## 当前边界
 

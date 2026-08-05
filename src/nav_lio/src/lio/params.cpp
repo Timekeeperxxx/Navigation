@@ -25,9 +25,19 @@ namespace LI2Sup{
   float  g_loop_keyframe_min_distance = 0.5f;
   int    g_loop_keyframe_min_gap = 80;
   float  g_loop_search_radius = 5.0f;
+  float  g_loop_internal_search_radius = 1.5f;
   float  g_loop_icp_max_distance = 2.0f;
   float  g_loop_icp_score_threshold = 1.0f;
   float  g_loop_map_ds_size = 0.1f;
+  int    g_loop_candidate_limit = 30;
+  int    g_loop_local_window_size = 10;
+  float  g_loop_max_correction_rotation_deg = 5.0f;
+  float  g_loop_min_overlap_ratio = 0.35f;
+  float  g_loop_translation_drift_ratio = 0.02f;
+  float  g_loop_rotation_drift_deg_per_m = 0.02f;
+  float  g_loop_min_consistency_weight = 0.25f;
+  double g_loop_max_finalize_seconds = 30.0;
+  bool   g_loop_prefer_earliest_candidate = false;
   
   string g_imu_topic;
   string g_lidar_topic;

@@ -28,13 +28,7 @@ namespace scan_planner
 
     /* main planning interface */
     bool reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
-                       Eigen::Vector3d end_pt, Eigen::Vector3d end_vel,
-                       bool flag_polyInit, bool flag_randomPolyTraj,
-                       const std::vector<Eigen::Vector3d> *reference_guide = nullptr,
-                       bool allow_short_verified_recovery_leg = false);
-    bool planVerifiedB2RecoveryLeg(
-        const Eigen::Vector3d &start_pt,
-        const Eigen::Vector3d &target_pt);
+                       Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit, bool flag_randomPolyTraj);
     bool EmergencyStop(Eigen::Vector3d stop_pos);
     bool planGlobalTraj(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                         const Eigen::Vector3d &end_pos, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc);
@@ -56,9 +50,14 @@ namespace scan_planner
     BsplineOptimizer::Ptr bspline_optimizer_rebound_;
 
     int continuous_failures_count_{0};
-    bool planar_motion_{false};
+    double collision_check_corridor_radius_{0.0};
+    double collision_check_z_tolerance_{0.0};
+    double collision_check_z_tolerance_down_{0.0};
+    double collision_check_z_tolerance_up_{0.0};
+    double collision_check_start_clear_radius_{0.0};
 
     void updateTrajInfo(const UniformBspline &position_traj, const rclcpp::Time time_now);
+    bool checkCollisionFree(UniformBspline position_traj);
     bool checkDynamicFeasibility(UniformBspline position_traj);
 
     void reparamBspline(UniformBspline &bspline, vector<Eigen::Vector3d> &start_end_derivative, double ratio, Eigen::MatrixXd &ctrl_pts, double &dt,

@@ -42,9 +42,19 @@ namespace LI2Sup{
   extern float g_loop_keyframe_min_distance;
   extern int   g_loop_keyframe_min_gap;
   extern float g_loop_search_radius;
+  extern float g_loop_internal_search_radius;
   extern float g_loop_icp_max_distance;
   extern float g_loop_icp_score_threshold;
   extern float g_loop_map_ds_size;
+  extern int   g_loop_candidate_limit;
+  extern int   g_loop_local_window_size;
+  extern float g_loop_max_correction_rotation_deg;
+  extern float g_loop_min_overlap_ratio;
+  extern float g_loop_translation_drift_ratio;
+  extern float g_loop_rotation_drift_deg_per_m;
+  extern float g_loop_min_consistency_weight;
+  extern double g_loop_max_finalize_seconds;
+  extern bool  g_loop_prefer_earliest_candidate;
   
   extern std::string g_imu_topic;
   extern std::string g_lidar_topic;

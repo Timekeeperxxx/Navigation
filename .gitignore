@@ -8,6 +8,7 @@ maps/
 .agents/
 .codex/
 launch_params_*
+symlink_install_manifest.txt
 __pycache__/
 *.py[cod]
 .pytest_cache/

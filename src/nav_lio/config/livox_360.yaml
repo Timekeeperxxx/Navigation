@@ -6,17 +6,44 @@
     lio.map.map_name: "map.pcd"
     lio.map.ds_size: 0.2
     lio.map.save_interval: -1
-    lio.loop.enable: false
+    # Save-time SE(3) closure. Candidate lookup is horizontal, while ICP still
+    # estimates and validates full XYZ + rotation, so real ramps are preserved.
+    lio.loop.enable: true
     lio.loop.map_name: "map_loop.pcd"
     lio.loop.keyframe_min_distance: 0.5
     lio.loop.keyframe_min_gap: 80
+    # A stop command does not imply that the robot returned to its start.
+    # Keep endpoint lookup conservative and validate internal revisits within
+    # an even smaller radius to avoid matching repetitive parallel corridors.
     lio.loop.search_radius: 5.0
+    lio.loop.internal_search_radius: 1.5
     lio.loop.icp_max_distance: 2.0
     lio.loop.icp_score_threshold: 1.0
     lio.loop.map_ds_size: 0.1
+    lio.loop.candidate_limit: 30
+    lio.loop.local_window_size: 10
+    lio.loop.max_correction_rotation_deg: 5.0
+    lio.loop.min_overlap_ratio: 0.35
+    # Graph-consistency noise model. Translation grows with travelled path;
+    # it is not an absolute XYZ/Z height gate, so ramps and floor changes stay valid.
+    lio.loop.translation_drift_ratio: 0.02
+    lio.loop.rotation_drift_deg_per_m: 0.02
+    lio.loop.min_consistency_weight: 0.25
+    # Raw map is committed first. If loop finalization exceeds this budget,
+    # keep the raw map instead of delaying shutdown indefinitely.
+    lio.loop.max_finalize_seconds: 30.0
+    # Evaluate every plausible endpoint candidate and retain the best fit.
+    # Stopping mapping is not itself evidence of a return-to-start closure.
+    lio.loop.prefer_earliest_candidate: false
 
     lio.ros.lidar_topic: "/livox/lidar"
     lio.ros.imu_topic: "/livox/imu"
+    # A 10 Hz Livox frame is large; retain enough callback backlog for short
+    # scheduling stalls. Same-host delivery uses FastDDS shared memory.
+    lio.ros.lidar_qos_depth: 100
+    # Stop freezes LiDAR admission, drains all admitted scans through one
+    # sensor-time cutoff, then saves an immutable snapshot.
+    lio.ros.pause_drain_timeout_seconds: 5.0
 
     lio.sensor.lidar_type: 1
     lio.sensor.blind: 0.1
@@ -47,7 +74,10 @@
     lio.extrinsic.lidar_imu_roll_deg: 0.0
     lio.extrinsic.lidar_imu_pitch_deg: 0.0
     lio.extrinsic.lidar_imu_yaw_deg: 0.0
-    lio.extrinsic.odom_robo: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Mid360 pose in the B2 body-centred base_footprint frame. Runtime
+    # mapping/localization launch files additionally supply the measured
+    # height and pitch through the explicit override parameters.
+    lio.extrinsic.odom_robo: [0.425, 0.0, 0.0, 0.0, 0.0, 0.0]
 
     lio.hash_map.hash_capacity: 2000000
     lio.hash_map.vox_resolution: 0.5

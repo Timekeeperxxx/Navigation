@@ -11,7 +11,6 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <iostream>
-#include <mutex>
 #include <random>
 #include <nav_msgs/msg/odometry.hpp>
 #include <queue>
@@ -21,6 +20,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tuple>
 #include <tf2_ros/transform_broadcaster.h>
+#include <unordered_set>
 #include <visualization_msgs/msg/marker.hpp>
 #include <vector>
 
@@ -34,7 +34,6 @@
 #include <message_filters/time_synchronizer.h>
 
 #include <plan_env/raycast.h>
-#include <plan_env/ground_support.h>
 
 #define logit(x) (log((x) / (1 - (x))))
 
@@ -71,10 +70,9 @@ struct MappingParameters {
   Eigen::Vector3i map_origin_idx_;
   Eigen::Vector3d local_update_range_;
   double resolution_, resolution_inv_;
-  double obstacles_inflation_z_up, obstacles_inflation_z_down;
+  double obstacles_inflation_radius_, obstacles_inflation_z_up, obstacles_inflation_z_down;
   double double_cylinder_radius_, double_cylinder_offset_;
   double double_cylinder_center_offset_;
-  double collision_inflation_margin_xy_;
   bool map_sliding_en_;
   double map_sliding_thresh_;
   int map_sliding_thresh_vox_;
@@ -94,10 +92,18 @@ struct MappingParameters {
   double prob_hit_log_, prob_miss_log_, clamp_min_log_, clamp_max_log_,
       min_occupancy_log_;                   // logit of occupancy probability
   double min_ray_length_, max_ray_length_;  // range of doing raycasting
+  bool occupancy_decay_enabled_;
+  double occupancy_decay_miss_log_;
+  int occupancy_decay_period_;
 
   /* visualization and computation time display */
   double vis_height_, ground_height_;
   bool show_occ_time_;
+  bool timing_log_enabled_;
+  double timing_log_period_;
+  bool publish_inflate_sparse_;
+  double inflate_sparse_leaf_size_;
+  string inflate_sparse_topic_;
 
   /* mapping sensor input */
   string sensor_type_;
@@ -109,16 +115,6 @@ struct MappingParameters {
   double self_filter_padding_;
   double self_filter_z_min_offset_;
   double self_filter_z_max_above_sensor_;
-  bool ground_support_enabled_;
-  bool ground_support_fail_closed_;
-  double ground_support_bucket_size_;
-  double ground_support_xy_tolerance_;
-  double ground_support_z_tolerance_;
-  double ground_support_planning_height_;
-  double ground_support_footprint_probe_margin_;
-  int ground_support_perimeter_samples_;
-  int ground_support_radial_samples_;
-  int ground_support_outer_ring_max_missing_per_circle_;
   Eigen::Matrix4d lidar_extrinsic_;
   Eigen::Matrix4d depth_extrinsic_;
 
@@ -142,7 +138,6 @@ struct MappingData {
   Eigen::Quaterniond ray_q_;
   Eigen::Vector3d sliding_map_frame_pos_;
   double body_yaw_;
-  bool has_body_pose_;
 
   // depth image data
 
@@ -155,7 +150,7 @@ struct MappingData {
   bool occ_need_update_;
   bool use_cloud_update_;
   bool has_first_depth_;
-  bool has_ray_pose_, has_cloud_;
+  bool has_ray_pose_, has_body_pose_, has_cloud_;
 
   // depth image projected point cloud
 
@@ -177,7 +172,30 @@ struct MappingData {
 
   double fuse_time_, max_fuse_time_;
   int update_num_;
-  uint64_t obstacle_observation_count_;
+  double last_timing_log_time_;
+  double latest_cloud_receive_time_;
+  double latest_cloud_callback_done_time_;
+  int latest_cloud_raw_points_;
+  int latest_cloud_kept_points_;
+  int latest_cloud_self_filtered_points_;
+  double last_cloud_convert_ms_;
+  double last_cloud_filter_ms_;
+  double last_cloud_callback_ms_;
+  double last_update_wait_ms_;
+  double last_update_raycast_ms_;
+  double last_update_publish_inflate_ms_;
+  double last_update_total_ms_;
+  double last_raycast_slide_ms_;
+  double last_raycast_trace_ms_;
+  double last_raycast_cache_ms_;
+  double last_raycast_decay_ms_;
+  int last_raycast_input_points_;
+  int last_cache_voxels_;
+  double last_publish_inflate_ms_;
+  int last_publish_inflate_points_;
+  int last_publish_inflate_sparse_points_;
+  int last_publish_inflate_voxels_;
+  bool last_publish_inflate_all_info_;
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
@@ -204,10 +222,7 @@ public:
   inline void setOccupied(Eigen::Vector3d pos);
   inline int getOccupancy(Eigen::Vector3d pos);
   inline int getOccupancy(Eigen::Vector3i id);
-  int getInflateOccupancy(Eigen::Vector3d pos, double yaw);
-  int getDynamicInflateOccupancy(Eigen::Vector3d pos, double yaw);
-  bool isGroundSupported(const Eigen::Vector3d& pos, double yaw);
-  bool isGroundSupportReady();
+  inline int getInflateOccupancy(Eigen::Vector3d pos, double yaw);
 
   inline void boundIndex(Eigen::Vector3i& id);
   inline bool isUnknown(const Eigen::Vector3i& id);
@@ -225,10 +240,10 @@ public:
   void publishDepthCloud();
   void publishSlidingMapBBox();
   void publishSlidingMapFrame();
+  void logTimingIfNeeded();
 
   bool hasDepthObservation();
   bool odomValid();
-  uint64_t getObstacleObservationCount();
   void getRegion(Eigen::Vector3d& ori, Eigen::Vector3d& size);
   inline double getResolution();
   Eigen::Vector3d getOrigin();
@@ -248,7 +263,6 @@ private:
   void sensorPoseCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& pose);
   void slidingMapFrameCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& pose);
   void cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& img);
-  void groundCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud);
 
   // update occupancy by raycasting
   void updateOccupancyCallback();
@@ -257,8 +271,6 @@ private:
   // main update process
   void projectDepthImage();
   void raycastProcess();
-  void clearRobotSelfOccupancy();
-  bool isInsideRobotSelfMask(const Eigen::Vector3d& point) const;
 
   inline void inflatePoint(const Eigen::Vector3i& pt, int inf_step_xy, int inf_step_z_up, int inf_step_z_down, vector<Eigen::Vector3i>& pts);
   inline int getInflateOccupancyFromBuffer(Eigen::Vector3d pos, const std::vector<char>& buffer);
@@ -274,6 +286,9 @@ private:
   void resetCellByAddressForSliding(int addr, const std::vector<char>& clear_mask);
   void hashIdToGlobalIndex(int addr, Eigen::Vector3i& id_g) const;
   void applyOccupancyUpdate(const Eigen::Vector3i& id, double new_log_odds);
+  void decayUnobservedOccupancy(const Eigen::Vector3i& min_id, const Eigen::Vector3i& max_id);
+  bool isInsideRobotSelfMask(const Eigen::Vector3d& point) const;
+  void clearRobotSelfOccupancy();
   void rebuildInflationOffsets();
   void updateInflation(const Eigen::Vector3i& id, int delta, const std::vector<char>* ignore_mask = nullptr);
   void updateInflationLayer(const Eigen::Vector3i& id, int delta,
@@ -297,18 +312,12 @@ private:
   SynchronizerImagePose sync_image_pose_;
 
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr lidar_pose_sub_, sliding_map_frame_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_, ground_sub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_, map_inf_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_, map_inf_pub_, map_inf_sparse_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr sliding_map_bbox_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr unknown_pub_, depth_cloud_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr extrinsic_pose_pub_;
   rclcpp::TimerBase::SharedPtr occ_timer_, vis_timer_;
-
-  plan_env::GroundSupportIndex ground_support_index_;
-  std::mutex ground_support_mutex_;
-  bool ground_support_ready_ = false;
-  std::size_t ground_support_source_point_count_ = 0;
-  std::uint64_t ground_support_source_signature_ = 0;
 
   //
   uniform_real_distribution<double> rand_noise_;
@@ -411,6 +420,21 @@ inline int GridMap::getOccupancy(Eigen::Vector3d pos) {
   posToIndex(pos, id);
 
   return md_.occupancy_buffer_[toAddress(id)] > mp_.min_occupancy_log_ ? 1 : 0;
+}
+
+inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos, double yaw) {
+  Eigen::Vector3d heading(std::cos(yaw), std::sin(yaw), 0.0);
+  Eigen::Vector3d center = pos + mp_.double_cylinder_center_offset_ * heading;
+  if (std::abs(mp_.double_cylinder_offset_) <= 1e-6)
+    return getInflateOccupancyFromBuffer(center, md_.occupancy_buffer_inflate_);
+
+  Eigen::Vector3d front = center + mp_.double_cylinder_offset_ * heading;
+  Eigen::Vector3d rear = center - mp_.double_cylinder_offset_ * heading;
+
+  int front_occ = getInflateOccupancyFromBuffer(front, md_.occupancy_buffer_inflate_);
+  if (front_occ != 0) return front_occ;
+
+  return getInflateOccupancyFromBuffer(rear, md_.occupancy_buffer_inflate_);
 }
 
 inline int GridMap::getInflateOccupancyFromBuffer(Eigen::Vector3d pos, const std::vector<char>& buffer) {

@@ -19,6 +19,7 @@ LAUNCH_LOG="$SCENE_DIR/mapping.log"
 BAG_LOG="$SCENE_DIR/bag_play.log"
 LAUNCH_PID=""
 PAUSE_RESPONSE=""
+SUPERLIO_PID=""
 
 case "$PLAY_RATE" in
   ''|*[!0-9.]*)
@@ -52,6 +53,26 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT INT TERM
+
+find_descendant_by_cmdline() {
+  local parent_pid="$1"
+  local needle="$2"
+  local child_pid=""
+  local match=""
+
+  while IFS= read -r child_pid; do
+    [ -n "$child_pid" ] || continue
+    match="$(tr '\0' ' ' < "/proc/$child_pid/cmdline" 2>/dev/null || true)"
+    if [[ "$match" == *"$needle"* ]]; then
+      printf '%s\n' "$child_pid"
+      return 0
+    fi
+    if find_descendant_by_cmdline "$child_pid" "$needle"; then
+      return 0
+    fi
+  done < <(pgrep -P "$parent_pid" 2>/dev/null || true)
+  return 1
+}
 
 expected_lidar="$(
   ros2 bag info "$BAG_DIR" |
@@ -120,7 +141,6 @@ PAUSE_RESPONSE="$(
 )"
 printf '%s\n' "$PAUSE_RESPONSE" >>"$LAUNCH_LOG"
 sleep 2
-ros2 service call /save_terrain_map std_srvs/srv/Trigger "{}" >>"$LAUNCH_LOG" 2>&1
 
 received_lidar="$(
   printf '%s\n' "$PAUSE_RESPONSE" |
@@ -139,8 +159,28 @@ fi
 # source_gaps may already exist in the recording. Equality between the bag
 # topic count and received_lidar is the transport-completeness criterion.
 
-kill -INT -- "-$LAUNCH_PID" 2>/dev/null || true
+SUPERLIO_PID="$(find_descendant_by_cmdline "$LAUNCH_PID" "super_lio_node" || true)"
+if [ -z "$SUPERLIO_PID" ]; then
+  echo "无法定位 SuperLIO 进程，不能在 terrain 保存前生成闭环校正" >&2
+  exit 1
+fi
+kill -INT "$SUPERLIO_PID" 2>/dev/null || true
 for _ in $(seq 1 180); do
+  kill -0 "$SUPERLIO_PID" 2>/dev/null || break
+  sleep 1
+done
+if kill -0 "$SUPERLIO_PID" 2>/dev/null; then
+  echo "SuperLIO 保存闭环地图超时" >&2
+  exit 1
+fi
+
+# SuperLIO writes loop_correction.txt before exiting. Terrain must save after
+# that point so ground/footprint receive the exact same time-varying SE(3)
+# correction as the canonical map.pcd.
+ros2 service call /save_terrain_map std_srvs/srv/Trigger "{}" >>"$LAUNCH_LOG" 2>&1
+
+kill -INT -- "-$LAUNCH_PID" 2>/dev/null || true
+for _ in $(seq 1 60); do
   kill -0 "$LAUNCH_PID" 2>/dev/null || break
   sleep 1
 done

@@ -187,8 +187,6 @@ def generate_launch_description():
         parameters=[
             dynamic_avoidance_config,
             {
-                "sensor_heartbeat_topic": scan_cloud_topic,
-                "ground_topic": scan_ground_topic,
                 "require_nav_start": ParameterValue(
                     dynamic_require_nav_start, value_type=bool
                 ),
@@ -224,13 +222,8 @@ def generate_launch_description():
             {
                 "input_path_topic": scan_raw_path_topic,
                 "output_path_topic": scan_initial_path_topic,
-                # /global_path has already been checked continuously with the
-                # full double-circle ground footprint.  Geometric
-                # downsampling creates new chords which can cut across an
-                # inner corner or unsupported ground, invalidating that
-                # guarantee.  Keep the verified polyline unchanged for SCAN.
-                "min_point_spacing": 0.0,
-                "max_points": 0,
+                "min_point_spacing": 0.5,
+                "max_points": 120,
             }
         ],
         condition=IfCondition(
@@ -254,7 +247,6 @@ def generate_launch_description():
             "robot_frame": scan_robot_frame,
             "output_topic": scan_body_pose_topic,
             "publish_rate_hz": scan_tf_pose_rate,
-            "execution_frozen_topic": "/planning/b2_execution_frozen",
         }],
         condition=IfCondition(
             PythonExpression([
@@ -285,7 +277,6 @@ def generate_launch_description():
             ("/grid_map/body_pose", scan_body_pose_topic),
             ("/grid_map/sensor_pose", scan_sensor_pose_topic),
             ("/grid_map/cloud", scan_cloud_topic),
-            ("/grid_map/ground", scan_ground_topic),
         ],
         condition=IfCondition(enable_scan_planner),
     )

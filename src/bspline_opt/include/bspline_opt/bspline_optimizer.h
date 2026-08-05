@@ -74,8 +74,6 @@ namespace scan_planner
 
     // optional inputs
     void setGuidePath(const vector<Eigen::Vector3d> &guide_pt);
-    void setReboundReference(const vector<Eigen::Vector3d> &reference_points);
-    void clearReboundReference();
     void setWaypoints(const vector<Eigen::Vector3d> &waypts,
                       const vector<int> &waypt_idx); // N-2 constraints at most
 
@@ -122,21 +120,10 @@ namespace scan_planner
     double lambda2_, new_lambda2_; // distance weight
     double lambda3_;               // feasibility weight
     double lambda4_;               // curve fitting
-    double lambda_reference_;       // global-polyline tracking in rebound mode
-    bool rebound_reference_enabled_{false};
     int a;
     //
     double dist0_;             // safe distance
     double max_vel_, max_acc_; // dynamic limits
-    // Occupancy hits this close to the trajectory start are the robot's own
-    // standing position inside the inflated shell, not a plan defect.
-    double start_collision_exempt_radius_;
-    // The original aerial planner only checked the first two thirds because
-    // it replanned before reaching the tail.  Ground vehicles publish the
-    // whole local trajectory to a full-path safety gate, so the optimizer
-    // must use the same horizon or it can repeatedly "succeed" with an
-    // unsafe final third.
-    bool full_trajectory_collision_check_{true};
 
     int variable_num_;              // optimization variables
     int iter_num_;                  // iteration of the solver
@@ -158,9 +145,6 @@ namespace scan_planner
                              Eigen::MatrixXd &gradient);
     void calcDistanceCostRebound(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient, int iter_num, double smoothness_cost);
     void calcFitnessCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);
-    void calcReferenceCostXY(
-        const Eigen::MatrixXd &q, double &cost,
-        Eigen::MatrixXd &gradient);
     bool check_collision_and_rebound(void);
     double estimateSegmentYaw(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const;
     double estimateControlPointYaw(const Eigen::MatrixXd &q, int id) const;

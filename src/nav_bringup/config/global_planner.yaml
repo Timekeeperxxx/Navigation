@@ -17,31 +17,21 @@ pcl_publisher:
     ground_translate_y: 0.0
     ground_translate_z: 0.0
     map_down_sample: 0.2
-    # Keep this consistent with planning.launch.py and the strict 0.15 m
-    # footprint-support probe.  A 0.3 m voxel grid can create 0.21 m holes.
-    ground_down_sample: 0.1
+    ground_down_sample: 0.3
     planground_down_sample: 0.1
-    # fill_footprint 录制时可能因采样间隔留下很小的三维断口；只连接近邻的
-    # 有效点云分量，避免把相距较远的楼层或独立区域误连。
-    planground_bridge_enabled: true
-    planground_bridge_neighbor_radius: 0.2
-    planground_bridge_max_gap: 0.35
-    planground_bridge_point_spacing: 0.05
-    planground_bridge_min_component_points: 20
-    planground_bridge_max_bridges: 64
+    max_input_bytes: 67108864
+    max_input_points: 4000000
 
 perception_3d_global:
   ros__parameters:
     global_frame: "map"
     robot_base_frame: "base_footprint"
     max_obstacle_distance: 9999.0
-    # Half of the Unitree B2 standing width (0.450m), rounded up to 0.23m.
-    inscribed_radius: 0.23
+    # Humanoid robot footprint modeled as a single 0.27m radius cylinder.
+    inscribed_radius: 0.27
     inflation_descending_rate: 2.0
     inflation_radius: 1.5
-    # Static map/ground are latched. Reprocessing 484k static points at 5 Hz
-    # competes directly with goal planning on Jetson without adding freshness.
-    sensors_collected_frequency: 1.0
+    sensors_collected_frequency: 5.0
     plugins: ["map"]
     map:
       plugin: "perception_3d::StaticLayer"
@@ -55,19 +45,22 @@ perception_3d_global:
       ground_topic: "mapground"
       support:
         mapping_mode: false
-        # Global routing is constrained directly by dense ground/fill support;
-        # SCAN handles live obstacle clearance. Building the legacy static
-        # dGraph duplicated that work and delayed Scene5 startup by ~54 s.
-        enable_edge_detection: false
+        enable_edge_detection: true
         generate_static_graph: false
 
 global_planner:
   ros__parameters:
-    turning_weight: 0.1
+    turning_weight: 0.8
+    goal_directness_weight: 0.6
     enable_detail_log: false
-    # 与 0.20m hybrid 搜索副本和 0.10m dense ground 匹配；0.05m 会让
+    # 与 0.15m hybrid voxel 和 0.3m ground voxel 匹配；0.05m 会让
     # 距离地图约 0.18m 的 B2 起点成为孤立点，导致目标已收到却无全局路径。
     a_star_expanding_radius: 0.2
+    path_smoothing_resolution: 0.1
+    path_smoothing_iterations: 5
+    path_smoothing_data_weight: 0.20
+    path_smoothing_smooth_weight: 0.40
+    path_smoothing_max_deviation: 0.20
     use_pre_graph: false
     roi_file_path: ""
     roi_radius: 1.0
@@ -76,78 +69,25 @@ global_planner:
     planground_search_radius: 0.2
     planground_fallback_ratio: 0.3
     planground_downsample_leaf_size: 0.2
-    # RViz 2D Goal Pose always publishes z=0. Select ground by XY and use the
-    # robot's current z to disambiguate overlapping floors. BotDog's
-    # /clicked_point goal keeps using its explicitly saved ground z.
-    rviz_goal_ground_snap_enabled: true
-    rviz_goal_ground_snap_xy_radius: 0.50
-    rviz_goal_ground_snap_max_layer_distance: 0.75
-    rviz_goal_ground_snap_xy_layer_tie_distance: 0.15
-    rviz_goal_unspecified_z_tolerance: 0.001
 
     use_hybrid_planner: true
-    hybrid_planground_bias: 15.0
-    # The raw /mapground remains at 0.10 m for SCAN's hard safety mask.  The
-    # global search may safely use this coarser copy because every returned
-    # edge is independently checked against the dense ground footprint.
-    hybrid_downsample_leaf_size: 0.20
-    hybrid_reference_planning_time: 2.0
-    # No arbitrary failure deadline; a newer goal still preempts immediately.
-    hybrid_max_planning_time: 0.0
-    # Ground nodes carry 150+ cost per ~0.2m step. A small Euclidean heuristic
-    # is drowned out by that scale and expands nearly the full 67k-node graph.
-    # This deliberately weighted search is goal-directed; every output edge is
-    # still independently checked by the exact double-circle ground validator.
-    hybrid_heuristic_weight: 300.0
-    hybrid_max_ground_bridge_length: 0.25
-    hybrid_max_ground_cost: 250.0
-    hybrid_min_ground_cost: 150.0
-    hybrid_detour_ratio_threshold: 4.0
-    hybrid_distance_balance_threshold: 1.5
-    hybrid_ground_path_length_penalty: 5.0
-    hybrid_detour_balance_factor_lower_bound: 0.5
-    hybrid_detour_balance_factor_upper_bound: 3.0
+    # Shortest-path first: planground is only a soft preference, not a lane.
+    hybrid_planground_bias: 0.03
+    hybrid_downsample_leaf_size: 0.15
+    hybrid_max_ground_bridge_length: 20.0
+    hybrid_max_ground_cost: 0.2
+    hybrid_min_ground_cost: 0.0
+    hybrid_detour_ratio_threshold: 1.0
+    hybrid_distance_balance_threshold: 20.0
+    hybrid_ground_path_length_penalty: 0.0
+    hybrid_detour_balance_factor_lower_bound: 0.05
+    hybrid_detour_balance_factor_upper_bound: 1.05
+    hybrid_planground_exit_penalty: 0.0
+    hybrid_ground_step_penalty: 0.0
+    anti_backtrack_weight: 1.0
+    hybrid_path_detour_limit: 1.15
+    hybrid_planground_path_margin: 1.0
 
     hybrid_edge_penalty_radius: 0.1
-    hybrid_edge_penalty_weight: 200.0
+    hybrid_edge_penalty_weight: 0.5
     hybrid_edge_penalty_falloff_rate: 2.0
-
-    # The global planner is the sole static-ground authority. It validates the
-    # complete B2 double-circle footprint along candidate edges and turns;
-    # SCAN and the execution monitor do not repeat /mapground probes.
-    global_ground_support_enabled: true
-    global_ground_support_edge_step: 0.05
-    # Validate turns only on complete A* candidates. An unsupported incoming
-    # edge is blocked lazily so A* can approach the pivot from another side.
-    # This also covers the last turn into the exact-goal connector.
-    global_ground_support_turn_validation_enabled: true
-    global_ground_support_turn_angle_step: 0.0872664626
-    global_ground_support_turn_min_angle: 0.0
-    # 0.155 m absorbs the worst observed 0.1 m voxel-centroid quantization
-    # (Scene5 missed raw support by 1.29 mm at 0.14 m). Combined with the
-    # 0.19 m probe margin, this still checks 0.035 m outside the B2 circles.
-    global_ground_support_bucket_size: 0.15
-    # 0.15 m matching radius + 5 mm voxel-centroid/numeric boundary allowance.
-    global_ground_support_xy_tolerance: 0.155
-    global_ground_support_z_tolerance: 0.20
-    global_ground_support_planning_height: 0.32
-    global_ground_support_circle_radius: 0.27
-    global_ground_support_circle_offset: 0.205
-    global_ground_support_circle_center_offset: -0.425
-    global_ground_support_footprint_probe_margin: 0.19
-    global_ground_support_perimeter_samples: 16
-    global_ground_support_radial_samples: 2
-    # Sparse-map tolerance only: each circle centre and inner ring stay strict.
-    global_ground_support_outer_ring_max_missing_per_circle: 3
-    # If the exact live yaw cannot rotate directly onto the nominal path,
-    # search only straight ahead for a supported pivot, then turn and rejoin.
-    # This is forward motion, not reverse recovery.
-    global_start_maneuver_max_forward_distance: 2.0
-    global_start_maneuver_forward_step: 0.05
-    global_start_maneuver_path_sample_step: 0.05
-    global_start_maneuver_yaw_sample_step: 0.0872664626
-    global_start_maneuver_max_join_distance: 12.0
-    # Hybrid A* has already validated the route edges and turns above. Hand the
-    # connected route to SCAN without a second vertex-as-in-place-turn veto;
-    # SCAN may smooth those vertices while retaining live-obstacle avoidance.
-    global_delegate_pose_safety_to_local_planner: true

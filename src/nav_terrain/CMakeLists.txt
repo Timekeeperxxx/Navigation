@@ -43,6 +43,7 @@ ament_target_dependencies(
 add_executable(nav_save_terrain_map src/nav_save_terrain_map.cpp)
 ament_target_dependencies(
   nav_save_terrain_map
+  nav_msgs
   pcl_conversions
   pcl_ros
   rclcpp

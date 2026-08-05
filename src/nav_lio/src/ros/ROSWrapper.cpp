@@ -83,6 +83,22 @@ void LoadParamFromRos(rclcpp::Node& node)
   double loop_search_radius = 5.0;
   node.get_parameter("lio.loop.search_radius", loop_search_radius);
   g_loop_search_radius = static_cast<float>(loop_search_radius);
+  if (g_loop_search_radius <= 0.0f) {
+    throw std::invalid_argument("lio.loop.search_radius must be positive");
+  }
+
+  node.declare_parameter<double>("lio.loop.internal_search_radius", 1.5);
+  double loop_internal_search_radius = 1.5;
+  node.get_parameter(
+      "lio.loop.internal_search_radius",
+      loop_internal_search_radius);
+  g_loop_internal_search_radius =
+      static_cast<float>(loop_internal_search_radius);
+  if (g_loop_internal_search_radius <= 0.0f ||
+      g_loop_internal_search_radius > g_loop_search_radius) {
+    throw std::invalid_argument(
+        "lio.loop.internal_search_radius must be positive and no greater than lio.loop.search_radius");
+  }
 
   node.declare_parameter<double>("lio.loop.icp_max_distance", 2.0);
   double loop_icp_max_distance = 2.0;
@@ -98,6 +114,97 @@ void LoadParamFromRos(rclcpp::Node& node)
   double loop_map_ds_size = 0.1;
   node.get_parameter("lio.loop.map_ds_size", loop_map_ds_size);
   g_loop_map_ds_size = static_cast<float>(loop_map_ds_size);
+
+  node.declare_parameter<int>("lio.loop.candidate_limit", 30);
+  node.get_parameter("lio.loop.candidate_limit", g_loop_candidate_limit);
+  if (g_loop_candidate_limit < 1) {
+    throw std::invalid_argument("lio.loop.candidate_limit must be positive");
+  }
+
+  node.declare_parameter<int>("lio.loop.local_window_size", 10);
+  node.get_parameter("lio.loop.local_window_size", g_loop_local_window_size);
+  if (g_loop_local_window_size < 2) {
+    throw std::invalid_argument("lio.loop.local_window_size must be at least 2");
+  }
+
+  node.declare_parameter<double>("lio.loop.max_correction_rotation_deg", 5.0);
+  double loop_max_correction_rotation_deg = 5.0;
+  node.get_parameter(
+      "lio.loop.max_correction_rotation_deg",
+      loop_max_correction_rotation_deg);
+  g_loop_max_correction_rotation_deg =
+      static_cast<float>(loop_max_correction_rotation_deg);
+  if (g_loop_max_correction_rotation_deg <= 0.0f ||
+      g_loop_max_correction_rotation_deg > 180.0f) {
+    throw std::invalid_argument(
+        "lio.loop.max_correction_rotation_deg must be in (0, 180]");
+  }
+
+  node.declare_parameter<double>("lio.loop.min_overlap_ratio", 0.35);
+  double loop_min_overlap_ratio = 0.35;
+  node.get_parameter("lio.loop.min_overlap_ratio", loop_min_overlap_ratio);
+  g_loop_min_overlap_ratio = static_cast<float>(loop_min_overlap_ratio);
+  if (g_loop_min_overlap_ratio <= 0.0f ||
+      g_loop_min_overlap_ratio > 1.0f) {
+    throw std::invalid_argument(
+        "lio.loop.min_overlap_ratio must be in (0, 1]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.translation_drift_ratio", 0.02);
+  double loop_translation_drift_ratio = 0.02;
+  node.get_parameter(
+      "lio.loop.translation_drift_ratio",
+      loop_translation_drift_ratio);
+  g_loop_translation_drift_ratio =
+      static_cast<float>(loop_translation_drift_ratio);
+  if (g_loop_translation_drift_ratio <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.translation_drift_ratio must be positive");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.rotation_drift_deg_per_m", 0.02);
+  double loop_rotation_drift_deg_per_m = 0.02;
+  node.get_parameter(
+      "lio.loop.rotation_drift_deg_per_m",
+      loop_rotation_drift_deg_per_m);
+  g_loop_rotation_drift_deg_per_m =
+      static_cast<float>(loop_rotation_drift_deg_per_m);
+  if (g_loop_rotation_drift_deg_per_m <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.rotation_drift_deg_per_m must be positive");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.min_consistency_weight", 0.25);
+  double loop_min_consistency_weight = 0.25;
+  node.get_parameter(
+      "lio.loop.min_consistency_weight",
+      loop_min_consistency_weight);
+  g_loop_min_consistency_weight =
+      static_cast<float>(loop_min_consistency_weight);
+  if (g_loop_min_consistency_weight <= 0.0f ||
+      g_loop_min_consistency_weight > 1.0f) {
+    throw std::invalid_argument(
+        "lio.loop.min_consistency_weight must be in (0, 1]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.max_finalize_seconds", 30.0);
+  node.get_parameter(
+      "lio.loop.max_finalize_seconds",
+      g_loop_max_finalize_seconds);
+  if (g_loop_max_finalize_seconds <= 0.0) {
+    throw std::invalid_argument(
+        "lio.loop.max_finalize_seconds must be positive");
+  }
+
+  node.declare_parameter<bool>(
+      "lio.loop.prefer_earliest_candidate", false);
+  node.get_parameter(
+      "lio.loop.prefer_earliest_candidate",
+      g_loop_prefer_earliest_candidate);
 
   node.declare_parameter<std::string>("lio.ros.lidar_topic", "/lidar");
   node.get_parameter("lio.ros.lidar_topic", g_lidar_topic);
@@ -732,12 +839,18 @@ void ROSWrapper::setupIO(){
 
   const bool offline_reliable_qos =
       this->declare_parameter<bool>("lio.ros.offline_reliable_qos", false);
+  pause_drain_timeout_seconds_ = this->declare_parameter<double>(
+      "lio.ros.pause_drain_timeout_seconds", 5.0);
+  if (pause_drain_timeout_seconds_ <= 0.0) {
+    throw std::invalid_argument(
+        "lio.ros.pause_drain_timeout_seconds must be positive");
+  }
   const int imu_qos_depth =
       this->declare_parameter<int>(
           "lio.ros.imu_qos_depth", offline_reliable_qos ? 2048 : 512);
   const int lidar_qos_depth =
       this->declare_parameter<int>(
-          "lio.ros.lidar_qos_depth", offline_reliable_qos ? 100 : 5);
+          "lio.ros.lidar_qos_depth", 100);
   if (imu_qos_depth < 2 || lidar_qos_depth < 2) {
     throw std::invalid_argument("sensor QoS depth must be at least 2");
   }
@@ -824,23 +937,74 @@ void ROSWrapper::pauseMapping(
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
   (void)request;
-  mapping_paused_.store(true);
+  // Freeze new LiDAR admission first. Frames already admitted before this
+  // point define the requested sensor-time cutoff. IMU is allowed to continue
+  // only until it brackets that last scan, so the cutoff frame can be
+  // synchronized and processed instead of being silently discarded.
+  input_frozen_.store(true);
+  std::size_t pending_lidar_at_freeze = 0;
+  double target_cutoff = -1.0;
   {
     std::lock_guard<std::mutex> lock(sensor_buffer_mutex_);
-    lidar_buffer_.clear();
-    imu_buffer_.clear();
-    lidar_pushed_ = false;
+    if (!lidar_buffer_.empty()) {
+      target_cutoff = lidar_buffer_.back().end_time;
+    }
+    target_cutoff = std::max(target_cutoff, last_timestamp_lidar_);
+    snapshot_target_cutoff_ = target_cutoff;
+    pending_lidar_at_freeze = lidar_buffer_.size();
   }
 
+  const auto drain_deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(pause_drain_timeout_seconds_));
+  bool drained = false;
+  std::size_t dropped_at_timeout = 0;
+  {
+    std::unique_lock<std::mutex> lock(sensor_buffer_mutex_);
+    auto snapshot_drained = [this]() {
+      return lidar_buffer_.empty() &&
+             !lidar_pushed_ &&
+             !processing_measure_.load();
+    };
+    while (!(drained = snapshot_drained()) &&
+           std::chrono::steady_clock::now() < drain_deadline) {
+      sensor_buffer_cv_.wait_until(lock, drain_deadline);
+    }
+
+    // Recheck and transition under the same queue mutex used by sync_measure.
+    // This prevents a timer callback from claiming another frame after the
+    // snapshot has been declared immutable.
+    drained = snapshot_drained();
+    mapping_paused_.store(true);
+    if (!drained) {
+      dropped_at_timeout = lidar_buffer_.size();
+      lidar_buffer_.clear();
+      lidar_pushed_ = false;
+    }
+  }
+
+  const double committed_cutoff = last_timestamp_lidar_;
   response->success = true;
   response->message =
-      "SuperLIO input frozen; received_lidar=" +
+      "SuperLIO snapshot frozen; target_cutoff=" +
+      std::to_string(target_cutoff) +
+      " committed_cutoff=" + std::to_string(committed_cutoff) +
+      " drained=" + std::string(drained ? "true" : "false") +
+      " received_lidar=" +
       std::to_string(received_lidar_count_) +
-      " source_gaps=" + std::to_string(lidar_source_gap_count_);
-  LOG(INFO) << GREEN
-            << " ---> [SuperLIO]: mapping input frozen, pending sensor buffers cleared. "
-            << "received_lidar=" << received_lidar_count_
+      " source_gaps=" + std::to_string(lidar_source_gap_count_) +
+      " estimated_missing_lidar=" +
+      std::to_string(lidar_estimated_missing_count_);
+  LOG(INFO) << (drained ? GREEN : YELLOW)
+            << " ---> [SuperLIO]: mapping snapshot frozen. "
+            << "target_cutoff=" << target_cutoff
+            << " committed_cutoff=" << committed_cutoff
+            << " pending_lidar_at_freeze=" << pending_lidar_at_freeze
+            << " drained=" << drained
+            << " dropped_at_timeout=" << dropped_at_timeout
+            << " received_lidar=" << received_lidar_count_
             << " source_gaps=" << lidar_source_gap_count_
+            << " estimated_missing_lidar=" << lidar_estimated_missing_count_
             << RESET;
 }
 
@@ -861,6 +1025,13 @@ void ROSWrapper::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg){
   // LIO processing callback; running forward prediction here would create a
   // data race once sensor ingestion and scan matching use separate threads.
   std::lock_guard<std::mutex> lock(sensor_buffer_mutex_);
+
+  if (mapping_paused_.load() ||
+      (input_frozen_.load() && snapshot_target_cutoff_ >= 0.0 &&
+       last_timestamp_imu_ + kSensorTimeEpsilon >=
+           snapshot_target_cutoff_)) {
+    return;
+  }
 
   if (last_timestamp_imu_ >= 0.0) {
     const double timestamp_delta = data.secs - last_timestamp_imu_;
@@ -894,6 +1065,7 @@ void ROSWrapper::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg){
 
   imu_buffer_.push_back(data);
   last_timestamp_imu_ = data.secs;
+  sensor_buffer_cv_.notify_all();
 
   // Bound application memory by sensor time rather than by an arbitrary point
   // count. Three seconds is well above a normal scan-matching spike while
@@ -907,7 +1079,7 @@ void ROSWrapper::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg){
 
 
 void ROSWrapper::livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg){
-  if (mapping_paused_.load()) return;
+  if (mapping_paused_.load() || input_frozen_.load()) return;
   if(msg->point_num < 10) return;
 
   ++received_lidar_count_;
@@ -942,9 +1114,17 @@ void ROSWrapper::livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
                    << RESET;
     } else if (source_interval < 0.08 || source_interval > 0.12) {
       ++lidar_source_gap_count_;
+      if (source_interval > 0.12) {
+        const auto expected_frames =
+            static_cast<std::uint64_t>(std::llround(source_interval / 0.1));
+        if (expected_frames > 1) {
+          lidar_estimated_missing_count_ += expected_frames - 1;
+        }
+      }
       LOG(WARNING) << YELLOW
                    << " ---> [SuperLIO]: lidar source timestamp gap. source_dt="
                    << source_interval << "s arrival_dt=" << arrival_interval << "s"
+                   << " estimated_missing_total=" << lidar_estimated_missing_count_
                    << RESET;
     }
   }
@@ -980,13 +1160,17 @@ void ROSWrapper::livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
   lidar_data.end_time   = lidar_data.start_time + offset_time;
   {
     std::lock_guard<std::mutex> lock(sensor_buffer_mutex_);
+    if (mapping_paused_.load() || input_frozen_.load()) {
+      return;
+    }
     lidar_buffer_.push_back(std::move(lidar_data));
+    sensor_buffer_cv_.notify_all();
   }
 }
 
 
 void ROSWrapper::stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
-  if (mapping_paused_.load()) return;
+  if (mapping_paused_.load() || input_frozen_.load()) return;
   if(msg->data.size() < 10) return;
   
   LidarData lidar_data;
@@ -1072,7 +1256,11 @@ void ROSWrapper::stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr ms
   
   {
     std::lock_guard<std::mutex> lock(sensor_buffer_mutex_);
+    if (mapping_paused_.load() || input_frozen_.load()) {
+      return;
+    }
     lidar_buffer_.push_back(std::move(lidar_data));
+    sensor_buffer_cv_.notify_all();
   }
 }
 
@@ -1086,6 +1274,10 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
   // expensive undistortion and scan matching, so sensor callbacks remain
   // responsive while the LIO thread processes the copied MeasureGroup.
   std::lock_guard<std::mutex> lock(sensor_buffer_mutex_);
+
+  if (mapping_paused_.load()) {
+    return false;
+  }
 
   if (lidar_buffer_.empty() || imu_buffer_.empty()) {
     return false;
@@ -1138,6 +1330,7 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
   if(last_timestamp_lidar_ > meas.lidar.end_time){
     lidar_buffer_.pop_front();
     lidar_pushed_ = false;
+    sensor_buffer_cv_.notify_all();
     return false;
   }
 
@@ -1159,6 +1352,7 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
       lidar_buffer_.pop_front();
       lidar_pushed_ = false;
       record_sync_result(true);
+      sensor_buffer_cv_.notify_all();
       return false;
     };
 
@@ -1236,6 +1430,25 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
               << " gap_end=" << current->secs
               << " dt=" << dt
               << " limit=" << g_max_imu_integration_dt;
+
+      // The samples before this discontinuity can never provide continuous
+      // coverage for a later scan. Leaving them at the queue front makes every
+      // subsequent LiDAR frame rediscover the same historical gap and be
+      // dropped until the generic three-second queue retention finally evicts
+      // it. During that interval map->base_footprint is stale; when processing
+      // resumes SCAN sees the accumulated correction as a pose jump.
+      //
+      // Keep the first sample after the gap as the new integration anchor. The
+      // current LiDAR frame is still rejected, and ESKF::Predict independently
+      // refuses to integrate the missing interval. A following scan can then
+      // resume from real post-gap IMU samples instead of replaying the defect.
+      const std::size_t discarded_imu_samples =
+          static_cast<std::size_t>(
+              std::distance(imu_buffer_.begin(), current));
+      const double recovery_anchor_time = current->secs;
+      imu_buffer_.erase(imu_buffer_.begin(), current);
+      details << " recovery_anchor=" << recovery_anchor_time
+              << " discarded_imu=" << discarded_imu_samples;
       return drop_lidar_for_imu(
         lidar_imu_gap_count_, "discontinuous IMU coverage", details.str());
     }
@@ -1279,6 +1492,8 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
   lidar_buffer_.pop_front();
   lidar_pushed_ = false;
   record_sync_result(false);
+  processing_measure_.store(true);
+  sensor_buffer_cv_.notify_all();
 
   const double processing_lag = this->now().seconds() - meas.lidar.end_time;
   const auto warning_time = std::chrono::steady_clock::now();
@@ -1292,6 +1507,16 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
                  << " imu_buffer=" << imu_buffer_.size() << RESET;
   }
   return true;
+}
+
+
+void ROSWrapper::finish_measure()
+{
+  {
+    std::lock_guard<std::mutex> lock(sensor_buffer_mutex_);
+    processing_measure_.store(false);
+  }
+  sensor_buffer_cv_.notify_all();
 }
 
 

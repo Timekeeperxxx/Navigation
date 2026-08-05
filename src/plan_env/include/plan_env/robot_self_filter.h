@@ -43,10 +43,8 @@ inline bool insideRobotSelfMask(
     return dx * dx + dy * dy <= radius_sq;
   };
 
-  // The configured double cylinder covers the main body behind the tracking
-  // origin.  The origin cap covers the front shoulders/legs around the LiDAR
-  // projection, which otherwise appear as a vertical obstacle beside the
-  // planning start.
+  // Include the body origin as a centre cap.  The other two circles follow
+  // the same B2 footprint geometry used by collision queries.
   return inside_circle(body_x, body_y) ||
          inside_circle(
              center_x + cylinder_offset * heading_x,

@@ -15,6 +15,8 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/search/kdtree.h>
+#include <pcl/registration/gicp.h>
 #include <pcl/registration/icp.h>
 
 #include "basic/alias.h"

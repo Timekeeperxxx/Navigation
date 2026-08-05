@@ -29,30 +29,26 @@
 
     <!-- planning fsm -->
     <param name="fsm/navi_mode" value="$(arg navi_mode)" type="int"/>
-    <param name="fsm/thresh_replan" value="1.0" type="double"/>
+    <param name="fsm/thresh_replan" value="0.5" type="double"/>
     <param name="fsm/thresh_no_replan" value="0.1" type="double"/>
     <param name="fsm/planning_horizon" value="$(arg planning_horizon)" type="double"/>
     <param name="fsm/emergency_time_" value="1.0" type="double"/>
     <param name="fsm/fail_safe" value="true" type="bool"/>
     <param name="fsm/max_replan_fail_count" value="1000" type="int"/>
-    <param name="fsm/b2_reverse_recovery_enabled" value="true" type="bool"/>
-    <param name="fsm/b2_reverse_recovery_request_period" value="0.50" type="double"/>
     <param name="fsm/is_real_world" value="$(arg is_real_world)" type="bool"/>
 
     <!-- sliding map -->
-    <param name="grid_map/resolution" value="0.05" />
+    <param name="grid_map/resolution" value="0.03" />
     <param name="grid_map/sliding_map_size_x" value="10.0" />
     <param name="grid_map/sliding_map_size_y" value="10.0" />
     <param name="grid_map/sliding_map_size_z" value="5.0" />
     <param name="grid_map/map_sliding_thresh" value="0.2"/>
     <param name="grid_map/double_cylinder_radius" value="0.27" />
-    <param name="grid_map/double_cylinder_offset" value="0.205" />
-    <param name="grid_map/double_cylinder_center_offset" value="-0.425" />
-    <param name="grid_map/collision_inflation_margin_xy" value="0.0" />
-    <param name="grid_map/self_filter_radius" value="0.27" />
-    <param name="grid_map/self_filter_padding" value="0.0" />
-    <param name="grid_map/obstacles_inflation_z_up" value="0.1" />
-    <param name="grid_map/obstacles_inflation_z_down" value="0.4" />
+    <param name="grid_map/obstacles_inflation_radius" value="0.20" />
+    <param name="grid_map/double_cylinder_offset" value="0.0" />
+    <param name="grid_map/double_cylinder_center_offset" value="0.0" />
+    <param name="grid_map/obstacles_inflation_z_up" value="1.65" />
+    <param name="grid_map/obstacles_inflation_z_down" value="0.0" />
 
     <!-- depth camera intrinsics -->
     <param name="grid_map/cx" value="$(arg cx)"/>
@@ -86,11 +82,10 @@
 
     <!-- trajectory optimization -->
     <param name="optimization/lambda_smooth" value="1.0" type="double"/>
-    <param name="optimization/lambda_collision" value="5.0" type="double"/>
+    <param name="optimization/lambda_collision" value="1.0" type="double"/>
     <param name="optimization/lambda_feasibility" value="0.1" type="double"/>
     <param name="optimization/lambda_fitness" value="1.0" type="double"/>
-    <param name="optimization/lambda_reference" value="3.0" type="double"/>
-    <param name="optimization/dist0" value="0.3" type="double"/>
+    <param name="optimization/dist0" value="0.2" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="optimization/vel_tolerance" value="1.0" type="double"/>
     <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>
@@ -101,12 +96,19 @@
   <!-- trajectory tracking -->
   <param name="closed_loop_controller/time_forward" value="0.8" type="double"/>
   <param name="closed_loop_controller/heading_error_threshold" value="0.8" type="double"/>
-  <param name="closed_loop_controller/heading_resume_threshold" value="0.55" type="double"/>
   <param name="closed_loop_controller/kp_pos" value="0.8" type="double"/>
   <param name="closed_loop_controller/kp_yaw" value="1.5" type="double"/>
   <param name="closed_loop_controller/max_vx" value="$(arg max_vel)" type="double"/>
   <param name="closed_loop_controller/max_vy" value="0.35" type="double"/>
   <param name="closed_loop_controller/max_vyaw" value="1.0" type="double"/>
+  <param name="closed_loop_controller/min_forward_x_speed" value="0.25" type="double"/>
   <param name="closed_loop_controller/finish_dist" value="0.15" type="double"/>
+  <param name="closed_loop_controller/enable_final_yaw" value="true" type="bool"/>
+  <param name="closed_loop_controller/final_yaw_start_dist" value="0.50" type="double"/>
+  <param name="closed_loop_controller/final_yaw_tolerance" value="0.40" type="double"/>
+  <param name="closed_loop_controller/final_yaw_kp" value="0.6" type="double"/>
+  <param name="closed_loop_controller/final_yaw_max_vyaw" value="0.25" type="double"/>
+  <param name="closed_loop_controller/approach_slowdown_dist" value="1.5" type="double"/>
+  <param name="closed_loop_controller/approach_min_speed_scale" value="0.25" type="double"/>
 
 </launch>

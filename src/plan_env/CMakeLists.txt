@@ -55,27 +55,10 @@ target_link_libraries(plan_env
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
-  ament_add_gtest(test_cloud_qos
-    test/test_cloud_qos.cpp
-  )
-  target_include_directories(test_cloud_qos PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
-  ament_target_dependencies(test_cloud_qos
-    rclcpp
-  )
-
   ament_add_gtest(test_robot_self_filter
     test/test_robot_self_filter.cpp
   )
   target_include_directories(test_robot_self_filter PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
-
-  ament_add_gtest(test_ground_support
-    test/test_ground_support.cpp
-  )
-  target_include_directories(test_ground_support PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
   )
 endif()

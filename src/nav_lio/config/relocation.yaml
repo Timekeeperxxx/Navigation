@@ -50,7 +50,10 @@
     lio.output.dense: true
     lio.output.pub_step: 1
 
-    lio.relocation.update_map: true
+    # Localization must keep the surveyed PCD immutable.  Feeding each live
+    # scan back into the reference hash map makes an ambiguous match
+    # self-reinforcing, especially while the robot rotates in place.
+    lio.relocation.update_map: false
     lio.relocation.init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
     lio.eva.timer: true

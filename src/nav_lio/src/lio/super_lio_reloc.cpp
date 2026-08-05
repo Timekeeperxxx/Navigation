@@ -299,19 +299,38 @@ bool SuperLIOReLoc::kf_init(){
 
 
 void SuperLIOReLoc::UpdateMap() {
-  if(g_update_map){
-    static int __update_delay = 100;
-    if(__update_delay > 0){
-      __update_delay--;
-      std::cout << "Update map Delay: " << 100 - __update_delay << " %" << std::endl;
-      return;
-    }
+  // Observe() can roll an aliased scan match back to the IMU prediction (or
+  // to the last accepted state).  The relocation override used to ignore
+  // that decision and, unlike SuperLIO::UpdateMap(), never committed a last
+  // accepted pose.  Consequently the frame-motion guard stayed disabled for
+  // the whole localization run and rejected scans could still be written
+  // into the reference map.  During an in-place turn this lets a repetitive
+  // wall/corridor pull the map and pose together by metres.
+  if (!observation_valid_)
+    return;
+
+  // State acceptance is independent from map mutation.  A localization map
+  // is normally read-only, but the next observation still needs the accepted
+  // pose/state as its consistency reference and rollback anchor.
+  last_pose_ = kf_->GetSE3();
+  has_last_accepted_pose_ = true;
+  last_accepted_state_ = kf_->GetSysState();
+  last_accepted_covariance_ = kf_->GetCov();
+  has_last_accepted_state_ = true;
+
+  if (!g_update_map)
+    return;
+
+  static int update_delay = 100;
+  if (update_delay > 0) {
+    --update_delay;
+    return;
   }
 
   const size_t ptsize = ds_undistort_->size();
-  if (ptsize == 0) return;
-  
-  last_pose_ = kf_->GetSE3();
+  if (ptsize == 0)
+    return;
+
   points_world_v3_.resize(ptsize);
   
   const auto R = last_pose_.R_;
@@ -323,7 +342,6 @@ void SuperLIOReLoc::UpdateMap() {
   }
   
   ivox_->insert(points_world_v3_);
-
 }
 
 

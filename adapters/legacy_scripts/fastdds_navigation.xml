@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
   <transport_descriptors>
+    <!--
+      LiDAR frames are about 400 KiB.  Keep same-host traffic in shared
+      memory so it is not fragmented through the small kernel UDP buffers.
+      UDP remains enabled for the Livox/network-facing ROS graph.
+    -->
+    <transport_descriptor>
+      <transport_id>navigation_shm</transport_id>
+      <type>SHM</type>
+    </transport_descriptor>
     <transport_descriptor>
       <transport_id>navigation_udp</transport_id>
       <type>UDPv4</type>
@@ -15,6 +24,7 @@
   <participant profile_name="navigation_participant" is_default_profile="true">
     <rtps>
       <userTransports>
+        <transport_id>navigation_shm</transport_id>
         <transport_id>navigation_udp</transport_id>
       </userTransports>
       <useBuiltinTransports>false</useBuiltinTransports>

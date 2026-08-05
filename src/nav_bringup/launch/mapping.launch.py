@@ -198,6 +198,7 @@ def generate_launch_description():
                 "lio.sensor.imu_nbg": imu_nbg,
                 "lio.sensor.use_query_time_undistort": use_query_time_undistort,
                 "lio.ros.offline_reliable_qos": offline_bag,
+                "lio.ros.lidar_qos_depth": 100,
                 "lio.kf.estimate_gravity": estimate_gravity,
                 "lio.extrinsic.lidar_imu_roll_deg": lidar_imu_roll_deg,
                 "lio.extrinsic.lidar_imu_pitch_deg": lidar_imu_pitch_deg,
@@ -259,7 +260,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument("fastdds_builtin_transports", default_value="UDPv4"),
+        DeclareLaunchArgument("fastdds_builtin_transports", default_value="DEFAULT"),
         SetEnvironmentVariable(
             "FASTDDS_BUILTIN_TRANSPORTS", fastdds_builtin_transports),
         # Large Livox and PointCloud2 messages must be handed to the FastDDS
@@ -274,7 +275,7 @@ def generate_launch_description():
         DeclareLaunchArgument("launch_terrain", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="false"),
         DeclareLaunchArgument("publish_base_footprint_tf", default_value="false"),
-        DeclareLaunchArgument("lidar_mount_x_m", default_value="0.0"),
+        DeclareLaunchArgument("lidar_mount_x_m", default_value="0.425"),
         DeclareLaunchArgument("lidar_mount_y_m", default_value="0.0"),
         DeclareLaunchArgument("lidar_mount_z_m", default_value="0.90"),
         DeclareLaunchArgument("lidar_mount_roll_deg", default_value="0.0"),
@@ -302,7 +303,7 @@ def generate_launch_description():
         DeclareLaunchArgument("lidar_imu_roll_deg", default_value="0.0"),
         DeclareLaunchArgument("lidar_imu_pitch_deg", default_value="0.0"),
         DeclareLaunchArgument("lidar_imu_yaw_deg", default_value="0.0"),
-        DeclareLaunchArgument("loop_closure", default_value="false"),
+        DeclareLaunchArgument("loop_closure", default_value="true"),
         DeclareLaunchArgument("loop_search_radius", default_value="5.0"),
         DeclareLaunchArgument("loop_icp_score_threshold", default_value="1.0"),
         DeclareLaunchArgument("loop_map_ds_size", default_value="0.1"),

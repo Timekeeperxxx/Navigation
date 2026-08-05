@@ -54,6 +54,15 @@ class ScanInitialPathAdapter(Node):
             filtered = self._limit_points(filtered, self.max_points)
 
         self.publisher.publish(filtered)
+        start = filtered.poses[0].pose.position
+        end = filtered.poses[-1].pose.position
+        self.get_logger().info(
+            "SCAN initial path published: "
+            f"in={len(msg.poses)} out={len(filtered.poses)} "
+            f"frame={filtered.header.frame_id} "
+            f"start=({start.x:.2f},{start.y:.2f},{start.z:.2f}) "
+            f"end=({end.x:.2f},{end.y:.2f},{end.z:.2f})"
+        )
         if len(filtered.poses) != len(msg.poses):
             self.get_logger().info(
                 f"SCAN initial path downsampled: {len(msg.poses)} -> {len(filtered.poses)}"

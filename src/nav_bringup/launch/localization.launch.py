@@ -218,7 +218,7 @@ def generate_launch_description():
         DeclareLaunchArgument("launch_relocation", default_value="true"),
         DeclareLaunchArgument("lidar_ip", default_value="192.168.123.179"),
         DeclareLaunchArgument("host_ip", default_value=""),
-        DeclareLaunchArgument("lidar_mount_x_m", default_value="0.0"),
+        DeclareLaunchArgument("lidar_mount_x_m", default_value="0.425"),
         DeclareLaunchArgument("lidar_mount_y_m", default_value="0.0"),
         DeclareLaunchArgument("lidar_mount_z_m", default_value="0.90"),
         DeclareLaunchArgument("lidar_mount_roll_deg", default_value="0.0"),

@@ -1,13 +1,12 @@
 #include <algorithm>
 #include <chrono>
-#include <cinttypes>
 #include <cmath>
 #include <limits>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <Eigen/Eigen>
+#include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -15,18 +14,13 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
-#include <std_msgs/msg/float64_multi_array.hpp>
-#include <std_msgs/msg/u_int8.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include "bspline_opt/uniform_bspline.h"
-#include "plan_manage/b2_reverse_recovery.h"
-#include "plan_manage/b2_yaw_schedule.h"
-#include "plan_manage/final_yaw_latch.h"
-#include "plan_manage/goal_yaw_handoff.h"
-#include "plan_manage/heading_alignment_latch.h"
+#include "plan_manage/b2_yaw_control.h"
 #include "scan_planner/msg/bspline.hpp"
 
 namespace
@@ -38,98 +32,105 @@ constexpr double kMaxVYawLimit = 1.0;
 rclcpp::Node::SharedPtr node;
 rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub;
 rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr execution_frozen_pub;
-rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr legacy_execution_frozen_pub;
-rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr
-    reverse_recovery_status_pub;
 rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr execution_path_pub;
 rclcpp::Subscription<scan_planner::msg::Bspline>::SharedPtr bspline_sub;
 rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
+rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_position_sub;
 rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr goal_yaw_sub;
-rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub;
+rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr safety_speed_scale_sub;
 rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr safety_execution_frozen_sub;
-rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr
-    reverse_recovery_request_sub;
-rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr
-    final_yaw_validation_sub;
+rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr controller_reset_sub;
+std::vector<rclcpp::Subscription<std_msgs::msg::String>::SharedPtr> task_start_subs;
 rclcpp::TimerBase::SharedPtr cmd_timer;
 
 bool receive_traj = false;
 bool have_odom = false;
 std::vector<UniformBspline> traj;
-std::vector<double> b2_yaw_schedule;
 double traj_duration = 0.0;
-int64_t traj_id = 0;
-bool emergency_stop_trajectory = false;
-bool terminal_goal_trajectory = false;
+int traj_id = 0;
 
 Eigen::Vector3d odom_pos = Eigen::Vector3d::Zero();
 double odom_yaw = 0.0;
+Eigen::Vector3d goal_position = Eigen::Vector3d::Zero();
 
 double exec_time = 0.0;
 rclcpp::Time last_update_time;
 rclcpp::Time traj_start_time;
 rclcpp::Time last_execution_path_publish_time;
-rclcpp::Time last_odom_time;
-rclcpp::Time reverse_recovery_generation_time;
-rclcpp::Time last_safety_execution_frozen_time;
 
 double time_forward;
 double heading_error_threshold;
 double heading_resume_threshold;
 double kp_pos;
 double kp_yaw;
-double yaw_feedforward_gain;
 double max_vx;
 double max_vy;
 double max_vyaw;
+double yaw_prediction_horizon;
+double yaw_rate_filter_time_constant;
+double yaw_rate_settle_threshold;
+double yaw_reversal_neutral_time;
+double desired_yaw_filter_time_constant;
+double maximum_measured_yaw_rate;
 double min_translation_speed;
-double min_in_place_vyaw;
+double min_forward_x_speed;
 double finish_dist;
+double final_position_tolerance;
+double final_position_kp;
+double final_position_max_vx;
+double final_position_max_vy;
 double final_yaw_tolerance;
+double final_yaw_start_dist;
+double final_yaw_kp;
+double final_yaw_min_vyaw;
+double final_yaw_max_vyaw;
+double final_yaw_timeout;
+double final_yaw_progress_timeout;
+double final_yaw_progress_epsilon;
+double final_yaw_reversal_hold_time;
+double final_yaw_reversal_hold_speed_scale;
+double approach_slowdown_dist;
+double approach_min_speed_scale;
 bool enable_final_yaw;
 bool allow_reverse;
-double reverse_recovery_speed;
-double reverse_recovery_max_distance;
-double reverse_recovery_max_duration;
-double reverse_recovery_path_height_offset;
-double reverse_recovery_path_sample_step;
+bool final_position_allow_reverse;
+bool final_yaw_timeout_mark_reached;
+bool have_goal_position = false;
 bool have_goal_yaw = false;
 bool safety_execution_frozen = false;
+bool have_safety_speed_scale = false;
+bool final_yaw_aligning = false;
+bool final_goal_reached = false;
+bool execution_path_cleared_after_goal = false;
+bool have_last_final_yaw_error = false;
+bool have_last_final_yaw_cmd = false;
+bool final_yaw_reversal_pending = false;
 double goal_yaw = 0.0;
-scan_planner::FinalYawLatch final_yaw_latch;
-scan_planner::GoalYawHandoff goal_yaw_handoff;
-scan_planner::HeadingAlignmentLatch heading_alignment_latch;
-scan_planner::B2ReverseRecoveryPolicy reverse_recovery_policy;
+double last_final_yaw_error = 0.0;
+double last_final_yaw_cmd = 0.0;
+double safety_speed_scale = 1.0;
+double safety_speed_scale_timeout = 1.0;
+double best_abs_final_yaw_error = std::numeric_limits<double>::infinity();
 std::string body_pose_topic;
-std::string goal_pose_topic;
 std::string execution_path_topic;
 std::string execution_path_frame;
 std::string safety_execution_frozen_topic;
-std::string execution_frozen_topic;
-std::string legacy_execution_frozen_topic;
-std::string reverse_recovery_request_topic;
-std::string reverse_recovery_status_topic;
+std::string safety_speed_scale_topic;
+std::string controller_reset_topic;
+std::string goal_position_topic;
+std::vector<std::string> task_start_reset_topics;
 double execution_path_publish_period;
 double execution_path_sample_dt;
-double goal_yaw_coalesce_window;
-double final_yaw_sweep_max_step;
-double final_yaw_validation_timeout;
-double final_yaw_preflight_started_at = -1.0;
-bool final_yaw_safety_aborted = false;
-bool force_execution_path_publish = false;
-std::string final_yaw_validation_topic;
+rclcpp::Time last_safety_speed_scale_time;
+rclcpp::Time last_bspline_receive_time;
+rclcpp::Time last_controller_reset_time;
+rclcpp::Time final_yaw_align_start_time;
+rclcpp::Time final_yaw_last_progress_time;
+rclcpp::Time final_yaw_reversal_start_time;
 
-enum class FinalYawValidationState
-{
-  IDLE,
-  WAITING,
-  APPROVED,
-  DENIED,
-};
-
-FinalYawValidationState final_yaw_validation_state =
-    FinalYawValidationState::IDLE;
-double final_yaw_validation_generation = 0.0;
+scan_planner::B2YawRateEstimator yaw_rate_estimator;
+scan_planner::B2DesiredYawFilter desired_yaw_filter;
+scan_planner::B2PathYawControl path_yaw_control;
 
 template <typename T>
 T getParamWithDefault(const std::string &name, const T &default_value)
@@ -152,88 +153,90 @@ bool loadParams()
 {
   bool ok = true;
   body_pose_topic = getParamWithDefault<std::string>("body_pose_topic", "/quad_0/body_pose");
-  goal_pose_topic = getParamWithDefault<std::string>("goal_pose_topic", "/goal_pose");
   execution_path_topic = getParamWithDefault<std::string>("execution_path_topic", "/scan/execution_path");
   execution_path_frame = getParamWithDefault<std::string>("execution_path_frame", "map");
   safety_execution_frozen_topic = getParamWithDefault<std::string>(
       "safety_execution_frozen_topic", "/planning/safety_execution_frozen");
-  final_yaw_validation_topic = getParamWithDefault<std::string>(
-      "final_yaw_validation_topic", "/planning/final_yaw_validation");
-  execution_frozen_topic = getParamWithDefault<std::string>(
-      "execution_frozen_topic", "/planning/b2_execution_frozen");
-  legacy_execution_frozen_topic = getParamWithDefault<std::string>(
-      "legacy_execution_frozen_topic", "/planning/go2_execution_frozen");
-  reverse_recovery_request_topic = getParamWithDefault<std::string>(
-      "reverse_recovery_request_topic",
-      "/planning/b2_reverse_recovery_request");
-  reverse_recovery_status_topic = getParamWithDefault<std::string>(
-      "reverse_recovery_status_topic",
-      "/planning/b2_reverse_recovery_status");
+  safety_speed_scale_topic = getParamWithDefault<std::string>(
+      "safety_speed_scale_topic", "/planning/safety_speed_scale");
+  controller_reset_topic = getParamWithDefault<std::string>(
+      "controller_reset_topic", "/planning/controller_reset");
+  goal_position_topic = getParamWithDefault<std::string>(
+      "goal_position_topic", "/clicked_point");
+  task_start_reset_topics = getParamWithDefault<std::vector<std::string>>(
+      "task_start_reset_topics",
+      std::vector<std::string>{"/nav_start", "/scheduled_task_start", "/patrol_task_start"});
+  safety_speed_scale_timeout = std::max(
+      getParamWithDefault<double>("safety_speed_scale_timeout", 1.0), 0.0);
   execution_path_publish_period = std::max(
       getParamWithDefault<double>("execution_path_publish_period", 0.1), 0.02);
   execution_path_sample_dt = std::max(
       getParamWithDefault<double>("execution_path_sample_dt", 0.1), 0.02);
-  goal_yaw_coalesce_window = std::max(
-      getParamWithDefault<double>("goal_yaw_coalesce_window", 0.5), 0.0);
-  scan_planner::GoalYawHandoffConfig goal_yaw_handoff_config;
-  goal_yaw_handoff_config.coalesce_window = goal_yaw_coalesce_window;
-  goal_yaw_handoff.configure(goal_yaw_handoff_config);
-  final_yaw_sweep_max_step = std::max(
-      getParamWithDefault<double>(
-          "final_yaw_sweep_max_step", 5.0 * M_PI / 180.0),
-      1.0 * M_PI / 180.0);
-  final_yaw_validation_timeout = std::max(
-      getParamWithDefault<double>("final_yaw_validation_timeout", 2.0), 0.2);
   ok &= loadRequiredParam("time_forward", time_forward);
   ok &= loadRequiredParam("heading_error_threshold", heading_error_threshold);
   heading_resume_threshold = std::max(
-      0.0, getParamWithDefault<double>("heading_resume_threshold", 0.35));
+      0.0,
+      std::min(
+          getParamWithDefault<double>("heading_resume_threshold", 0.35),
+          heading_error_threshold));
   ok &= loadRequiredParam("kp_pos", kp_pos);
   ok &= loadRequiredParam("kp_yaw", kp_yaw);
-  yaw_feedforward_gain = std::max(
-      0.0, getParamWithDefault<double>("yaw_feedforward_gain", 1.0));
   ok &= loadRequiredParam("max_vx", max_vx);
   ok &= loadRequiredParam("max_vy", max_vy);
   ok &= loadRequiredParam("max_vyaw", max_vyaw);
+  yaw_prediction_horizon = std::max(
+      0.0, getParamWithDefault<double>("yaw_prediction_horizon", 1.0));
+  yaw_rate_filter_time_constant = std::max(
+      0.0, getParamWithDefault<double>("yaw_rate_filter_time_constant", 0.15));
+  yaw_rate_settle_threshold = std::max(
+      0.0, getParamWithDefault<double>("yaw_rate_settle_threshold", 0.06));
+  yaw_reversal_neutral_time = std::max(
+      0.0, getParamWithDefault<double>("yaw_reversal_neutral_time", 0.35));
+  desired_yaw_filter_time_constant = std::max(
+      0.0, getParamWithDefault<double>("desired_yaw_filter_time_constant", 0.20));
+  maximum_measured_yaw_rate = std::max(
+      0.1, getParamWithDefault<double>("maximum_measured_yaw_rate", 2.0));
   min_translation_speed = std::max(
       0.0, getParamWithDefault<double>("min_translation_speed", 0.0));
-  min_in_place_vyaw = std::max(
-      0.0, getParamWithDefault<double>("min_in_place_vyaw", 0.0));
+  min_forward_x_speed = std::max(
+      0.0, getParamWithDefault<double>("min_forward_x_speed", 0.25));
   ok &= loadRequiredParam("finish_dist", finish_dist);
-  enable_final_yaw = getParamWithDefault<bool>("enable_final_yaw", true);
   allow_reverse = getParamWithDefault<bool>("allow_reverse", false);
-  reverse_recovery_speed = std::max(
-      0.01,
-      getParamWithDefault<double>("reverse_recovery_speed", 0.15));
-  reverse_recovery_path_height_offset = std::max(
-      0.0,
-      getParamWithDefault<double>(
-          "reverse_recovery_path_height_offset", 0.32));
-  reverse_recovery_path_sample_step = std::max(
-      0.02,
-      getParamWithDefault<double>(
-          "reverse_recovery_path_sample_step", 0.05));
-  scan_planner::B2ReverseRecoveryConfig reverse_config;
-  reverse_recovery_max_distance = std::max(
-      0.05, getParamWithDefault<double>(
-      "reverse_recovery_max_distance", 0.50));
-  reverse_recovery_max_duration = std::max(
-      0.10, getParamWithDefault<double>(
-      "reverse_recovery_max_duration", 2.0));
-  reverse_config.maximum_distance = reverse_recovery_max_distance;
-  reverse_config.maximum_duration = reverse_recovery_max_duration;
-  reverse_config.minimum_preflight_duration =
-      getParamWithDefault<double>(
-          "reverse_recovery_minimum_preflight_duration", 0.40);
-  reverse_config.safety_approval_timeout = getParamWithDefault<double>(
-      "reverse_recovery_safety_approval_timeout", 1.5);
-  reverse_config.odometry_timeout = getParamWithDefault<double>(
-      "reverse_recovery_odometry_timeout", 0.50);
-  reverse_config.maximum_yaw_drift = getParamWithDefault<double>(
-      "reverse_recovery_max_yaw_drift", 0.15);
-  reverse_recovery_policy.configure(reverse_config);
-  final_yaw_tolerance = std::max(
-      0.0, getParamWithDefault<double>("final_yaw_tolerance", 0.15));
+  final_position_tolerance = std::max(
+      0.02, getParamWithDefault<double>("final_position_tolerance", finish_dist));
+  final_position_kp = std::max(
+      0.0, getParamWithDefault<double>("final_position_kp", 0.8));
+  final_position_max_vx = std::max(
+      0.0, getParamWithDefault<double>("final_position_max_vx", 0.10));
+  final_position_max_vy = std::max(
+      0.0, getParamWithDefault<double>("final_position_max_vy", 0.06));
+  final_position_allow_reverse = getParamWithDefault<bool>(
+      "final_position_allow_reverse", true);
+  enable_final_yaw = getParamWithDefault<bool>("enable_final_yaw", true);
+  final_yaw_tolerance = getParamWithDefault<double>("final_yaw_tolerance", 0.5);
+  final_yaw_start_dist = std::max(
+      getParamWithDefault<double>("final_yaw_start_dist", 0.5), finish_dist);
+  final_yaw_kp = std::max(0.0, getParamWithDefault<double>("final_yaw_kp", 0.6));
+  final_yaw_min_vyaw = std::max(
+      0.0, getParamWithDefault<double>("final_yaw_min_vyaw", 0.25));
+  final_yaw_max_vyaw = std::max(
+      0.05, getParamWithDefault<double>("final_yaw_max_vyaw", 0.25));
+  final_yaw_timeout = std::max(
+      0.0, getParamWithDefault<double>("final_yaw_timeout", 8.0));
+  final_yaw_progress_timeout = std::max(
+      0.0, getParamWithDefault<double>("final_yaw_progress_timeout", 5.0));
+  final_yaw_progress_epsilon = std::max(
+      0.0, getParamWithDefault<double>("final_yaw_progress_epsilon", 0.05));
+  final_yaw_reversal_hold_time = std::max(
+      0.0, getParamWithDefault<double>("final_yaw_reversal_hold_time", 0.35));
+  final_yaw_reversal_hold_speed_scale = clamp(
+      getParamWithDefault<double>("final_yaw_reversal_hold_speed_scale", 0.35), 0.0, 1.0);
+  final_yaw_timeout_mark_reached = getParamWithDefault<bool>(
+      "final_yaw_timeout_mark_reached", false);
+  approach_slowdown_dist = std::max(
+      final_yaw_start_dist, getParamWithDefault<double>("approach_slowdown_dist", 1.5));
+  approach_min_speed_scale = clamp(
+      getParamWithDefault<double>("approach_min_speed_scale", 0.25), 0.05, 1.0);
 
   if (ok && max_vyaw > kMaxVYawLimit)
   {
@@ -242,9 +245,6 @@ bool loadParams()
     max_vyaw = kMaxVYawLimit;
   }
   if (ok) {
-    heading_alignment_latch.configure(
-        heading_error_threshold, heading_resume_threshold);
-    heading_resume_threshold = heading_alignment_latch.resumeThreshold();
     const double max_translation_speed = std::hypot(max_vx, max_vy);
     if (min_translation_speed > max_translation_speed) {
       RCLCPP_WARN(
@@ -253,43 +253,70 @@ bool loadParams()
           min_translation_speed, max_translation_speed);
       min_translation_speed = max_translation_speed;
     }
-    min_in_place_vyaw = std::min(min_in_place_vyaw, max_vyaw);
+    if (min_forward_x_speed > max_vx) {
+      RCLCPP_WARN(
+          node->get_logger(),
+          "[closed_loop_controller] cap min_forward_x_speed %.3f to max_vx %.3f m/s.",
+          min_forward_x_speed, max_vx);
+      min_forward_x_speed = max_vx;
+    }
+    if (final_yaw_max_vyaw > max_vyaw) {
+      RCLCPP_WARN(
+          node->get_logger(),
+          "[closed_loop_controller] cap final_yaw_max_vyaw %.3f to max_vyaw %.3f rad/s.",
+          final_yaw_max_vyaw, max_vyaw);
+      final_yaw_max_vyaw = max_vyaw;
+    }
+    if (final_yaw_min_vyaw > final_yaw_max_vyaw) {
+      RCLCPP_WARN(
+          node->get_logger(),
+          "[closed_loop_controller] cap final_yaw_min_vyaw %.3f to "
+          "final_yaw_max_vyaw %.3f rad/s.",
+          final_yaw_min_vyaw, final_yaw_max_vyaw);
+      final_yaw_min_vyaw = final_yaw_max_vyaw;
+    }
+    final_position_max_vx = std::min(final_position_max_vx, max_vx);
+    final_position_max_vy = std::min(final_position_max_vy, max_vy);
+    yaw_rate_estimator.configure(
+        yaw_rate_filter_time_constant, maximum_measured_yaw_rate);
+    desired_yaw_filter.configure(desired_yaw_filter_time_constant);
+    path_yaw_control.configure(
+        heading_error_threshold,
+        heading_resume_threshold,
+        yaw_prediction_horizon,
+        yaw_rate_settle_threshold,
+        yaw_reversal_neutral_time);
     RCLCPP_INFO(
         node->get_logger(),
-        "[closed_loop_controller] B2 translation: min=%.3f max_x=%.3f "
-        "max_y=%.3f m/s reverse=%s.",
-        min_translation_speed, max_vx, max_vy,
+        "[closed_loop_controller] translation speed range: min_norm=%.3f min_forward_x=%.3f max_x=%.3f max_y=%.3f m/s; final pose: start_dist=%.3f position_tolerance=%.3f position_kp=%.3f position_max=(%.3f,%.3f) position_reverse=%d yaw_tolerance=%.3f yaw_kp=%.3f yaw_speed=[%.3f,%.3f] rad/s; approach slowdown: dist=%.3f min_scale=%.3f.",
+        min_translation_speed, min_forward_x_speed, max_vx, max_vy,
+        final_yaw_start_dist, final_position_tolerance, final_position_kp,
+        final_position_max_vx, final_position_max_vy,
+        final_position_allow_reverse, final_yaw_tolerance, final_yaw_kp,
+        final_yaw_min_vyaw, final_yaw_max_vyaw,
+        approach_slowdown_dist, approach_min_speed_scale);
+    RCLCPP_INFO(
+        node->get_logger(),
+        "[closed_loop_controller] B2 path yaw: stop=%.3f resume=%.3f prediction=%.3fs "
+        "rate_filter=%.3fs settle_rate=%.3frad/s reversal_neutral=%.3fs "
+        "desired_filter=%.3fs reverse=%s.",
+        heading_error_threshold,
+        heading_resume_threshold,
+        yaw_prediction_horizon,
+        yaw_rate_filter_time_constant,
+        yaw_rate_settle_threshold,
+        yaw_reversal_neutral_time,
+        desired_yaw_filter_time_constant,
         allow_reverse ? "enabled" : "disabled");
     RCLCPP_INFO(
         node->get_logger(),
-        "[closed_loop_controller] B2 heading gate: stop=%.3f resume=%.3f rad, "
-        "minimum in-place yaw=%.3f rad/s.",
-        heading_alignment_latch.stopThreshold(),
-        heading_alignment_latch.resumeThreshold(),
-        min_in_place_vyaw);
-    RCLCPP_INFO(
-        node->get_logger(),
-        "[closed_loop_controller] B2 yaw rate feed-forward gain=%.3f.",
-        yaw_feedforward_gain);
-    RCLCPP_INFO(
-        node->get_logger(),
-        "[closed_loop_controller] final-yaw footprint preflight: "
-        "ack_timeout=%.2fs yaw_step=%.3frad topic=%s.",
-        final_yaw_validation_timeout, final_yaw_sweep_max_step,
-        final_yaw_validation_topic.c_str());
-    RCLCPP_INFO(
-        node->get_logger(),
-        "[closed_loop_controller] goal-yaw handoff protocol: "
-        "coalesce_window=%.3fs.",
-        goal_yaw_coalesce_window);
-    RCLCPP_INFO(
-        node->get_logger(),
-        "[closed_loop_controller] B2 reverse recovery: straight-only "
-        "vx=-%.3fm/s; each round ends at %.2fm or %.2fs, with no "
-        "retry-count limit.",
-        reverse_recovery_speed,
-        reverse_recovery_max_distance,
-        reverse_recovery_max_duration);
+        "[closed_loop_controller] reset topic=%s task_start_topics=%zu; final yaw watchdog timeout=%.3f progress_timeout=%.3f progress_epsilon=%.3f mark_reached=%d.",
+        controller_reset_topic.c_str(),
+        task_start_reset_topics.size(),
+        final_yaw_timeout,
+        final_yaw_progress_timeout,
+        final_yaw_progress_epsilon,
+        final_yaw_timeout_mark_reached);
   }
   return ok;
 }
@@ -303,16 +330,33 @@ double normalizeAngle(double angle)
   return angle;
 }
 
+double normalizeAngleNear(double angle, double reference)
+{
+  angle = normalizeAngle(angle);
+  while (angle - reference > M_PI)
+    angle -= 2.0 * M_PI;
+  while (angle - reference < -M_PI)
+    angle += 2.0 * M_PI;
+  return angle;
+}
+
+double finalYawError()
+{
+  if (!have_goal_yaw)
+    return 0.0;
+
+  const double raw_error = goal_yaw - odom_yaw;
+  const double error = have_last_final_yaw_error
+                           ? normalizeAngleNear(raw_error, last_final_yaw_error)
+                           : normalizeAngle(raw_error);
+  last_final_yaw_error = error;
+  have_last_final_yaw_error = true;
+  return error;
+}
+
 double clamp(double value, double min_value, double max_value)
 {
   return std::max(min_value, std::min(max_value, value));
-}
-
-double enforceMinimumSignedMagnitude(double value, double minimum)
-{
-  if (std::abs(value) <= 1e-9 || std::abs(value) >= minimum)
-    return value;
-  return std::copysign(minimum, value);
 }
 
 Eigen::Vector2d clampNorm(const Eigen::Vector2d &value, double max_norm)
@@ -332,46 +376,8 @@ double yawFromQuaternion(const geometry_msgs::msg::Quaternion &msg)
   return yaw;
 }
 
-geometry_msgs::msg::Quaternion quaternionFromYaw(double yaw)
-{
-  tf2::Quaternion q;
-  q.setRPY(0.0, 0.0, yaw);
-  return tf2::toMsg(q);
-}
-
-void rebuildB2YawSchedule()
-{
-  b2_yaw_schedule.clear();
-  if (!have_odom || traj.empty() || traj_duration <= 1e-6)
-    return;
-
-  const std::size_t interval_count =
-      scan_planner::b2YawSampleIntervalCount(
-          traj_duration, execution_path_sample_dt);
-  if (interval_count == 0)
-    return;
-
-  std::vector<Eigen::Vector3d> path;
-  path.reserve(interval_count + 1);
-  for (std::size_t index = 0; index <= interval_count; ++index)
-  {
-    const double time =
-        traj_duration * static_cast<double>(index) /
-        static_cast<double>(interval_count);
-    path.push_back(traj[0].evaluateDeBoorT(time));
-  }
-  b2_yaw_schedule =
-      scan_planner::makeB2YawSchedule(path, odom_yaw);
-}
-
 double estimateDesiredYaw(double t_cur, const Eigen::Vector3d &pos_des)
 {
-  if (b2_yaw_schedule.size() >= 2)
-  {
-    return scan_planner::interpolateB2YawSchedule(
-        b2_yaw_schedule, traj_duration, t_cur);
-  }
-
   const double t_look = std::min(traj_duration, t_cur + time_forward);
   Eigen::Vector3d dir = traj[0].evaluateDeBoorT(t_look) - pos_des;
 
@@ -387,10 +393,42 @@ double estimateDesiredYaw(double t_cur, const Eigen::Vector3d &pos_des)
   return std::atan2(dir(1), dir(0));
 }
 
+double effectiveSafetySpeedScale(const rclcpp::Time &now)
+{
+  if (!have_safety_speed_scale)
+    return 1.0;
+  if (safety_speed_scale_timeout > 0.0 &&
+      last_safety_speed_scale_time.nanoseconds() > 0 &&
+      (now - last_safety_speed_scale_time).seconds() > safety_speed_scale_timeout)
+    return 1.0;
+  return clamp(safety_speed_scale, 0.0, 1.0);
+}
+
+void applySafetySpeedScale(geometry_msgs::msg::Twist &cmd, const rclcpp::Time &now)
+{
+  const double scale = effectiveSafetySpeedScale(now);
+  if (scale >= 0.999)
+    return;
+
+  cmd.linear.x *= scale;
+  cmd.linear.y *= scale;
+  cmd.angular.z *= scale;
+  RCLCPP_INFO_THROTTLE(
+      node->get_logger(),
+      *node->get_clock(),
+      1000,
+      "[closed_loop_controller] apply safety speed scale=%.3f cmd_linear=(%.3f, %.3f) cmd_vyaw=%.3f.",
+      scale,
+      cmd.linear.x,
+      cmd.linear.y,
+      cmd.angular.z);
+}
+
 void publishStop(double vyaw = 0.0)
 {
   geometry_msgs::msg::Twist cmd;
   cmd.angular.z = clamp(vyaw, -max_vyaw, max_vyaw);
+  applySafetySpeedScale(cmd, node->now());
   cmd_vel_pub->publish(cmd);
 }
 
@@ -399,88 +437,13 @@ void publishExecutionFrozen(bool frozen)
   std_msgs::msg::Bool msg;
   msg.data = frozen;
   execution_frozen_pub->publish(msg);
-  if (legacy_execution_frozen_pub)
-    legacy_execution_frozen_pub->publish(msg);
-}
-
-void publishReverseRecoveryStatus(
-    scan_planner::B2ReverseRecoveryStatus status)
-{
-  if (!reverse_recovery_status_pub)
-    return;
-  std_msgs::msg::UInt8 msg;
-  msg.data = static_cast<std::uint8_t>(status);
-  reverse_recovery_status_pub->publish(msg);
-}
-
-void publishReverseRecoveryPath(const rclcpp::Time &now)
-{
-  if (!reverse_recovery_policy.active() || !have_odom)
-    return;
-  if (
-      last_execution_path_publish_time.nanoseconds() > 0 &&
-      (now - last_execution_path_publish_time).seconds() <
-          execution_path_publish_period)
-  {
-    return;
-  }
-
-  const std::size_t intervals = std::max<std::size_t>(
-      1,
-      static_cast<std::size_t>(
-          std::ceil(
-              reverse_recovery_max_distance /
-              reverse_recovery_path_sample_step)));
-  const double yaw = reverse_recovery_policy.startYaw();
-  const double cos_yaw = std::cos(yaw);
-  const double sin_yaw = std::sin(yaw);
-  // Latch the recovery round's base height. Using live odometry here creates
-  // a positive feedback loop in simulation: TerrainZTracker subtracts body
-  // height from this path, the next publication reads that lowered odometry,
-  // and the robot sinks again on every publication.
-  const double path_z =
-      reverse_recovery_policy.startZ() +
-      reverse_recovery_path_height_offset;
-
-  nav_msgs::msg::Path path;
-  path.header.frame_id = execution_path_frame;
-  path.header.stamp = reverse_recovery_generation_time;
-  path.poses.reserve(intervals + 1);
-  for (std::size_t index = 0; index <= intervals; ++index)
-  {
-    const double distance =
-        reverse_recovery_max_distance * static_cast<double>(index) /
-        static_cast<double>(intervals);
-    geometry_msgs::msg::PoseStamped pose;
-    pose.header = path.header;
-    pose.pose.position.x =
-        reverse_recovery_policy.startX() - distance * cos_yaw;
-    pose.pose.position.y =
-        reverse_recovery_policy.startY() - distance * sin_yaw;
-    pose.pose.position.z = path_z;
-    pose.pose.orientation = quaternionFromYaw(yaw);
-    path.poses.push_back(pose);
-  }
-
-  execution_path_pub->publish(path);
-  last_execution_path_publish_time = now;
-}
-
-void resetFinalYawValidation()
-{
-  final_yaw_preflight_started_at = -1.0;
-  final_yaw_safety_aborted = false;
-  final_yaw_validation_state = FinalYawValidationState::IDLE;
-  final_yaw_validation_generation = 0.0;
-  force_execution_path_publish = true;
 }
 
 void publishExecutionPath(const rclcpp::Time &now)
 {
-  if (!receive_traj || traj.empty())
+  if (!receive_traj || traj.empty() || final_goal_reached)
     return;
-  if (!force_execution_path_publish &&
-      last_execution_path_publish_time.nanoseconds() > 0 &&
+  if (last_execution_path_publish_time.nanoseconds() > 0 &&
       (now - last_execution_path_publish_time).seconds() < execution_path_publish_period)
     return;
 
@@ -491,84 +454,91 @@ void publishExecutionPath(const rclcpp::Time &now)
   path.header.stamp = traj_start_time;
   path.header.frame_id = execution_path_frame;
 
-  auto append_point_with_yaw =
-      [&](const Eigen::Vector3d &point, double yaw) {
+  const double start = std::min(exec_time, traj_duration);
+  auto append_pose = [&](double t) {
+    const Eigen::Vector3d point = traj[0].evaluateDeBoorT(t);
     geometry_msgs::msg::PoseStamped pose;
     pose.header = path.header;
     pose.pose.position.x = point(0);
     pose.pose.position.y = point(1);
     pose.pose.position.z = point(2);
-    pose.pose.orientation = quaternionFromYaw(yaw);
+    pose.pose.orientation.w = 1.0;
     path.poses.push_back(pose);
   };
 
-  const double start = std::min(exec_time, traj_duration);
-  const Eigen::Vector3d final_point =
-      traj[0].evaluateDeBoorT(traj_duration);
-  const double terminal_xy_error =
-      (final_point - odom_pos).head<2>().norm();
-  const double remaining_final_yaw =
-      normalizeAngle(goal_yaw - odom_yaw);
-  Eigen::Vector3d live_rotation_point = final_point;
-  live_rotation_point.x() = odom_pos.x();
-  live_rotation_point.y() = odom_pos.y();
-  const bool terminal_position_reached =
-      have_odom &&
-      start >= traj_duration - 1e-6 &&
-      terminal_xy_error <= finish_dist;
-  const bool publish_final_yaw_sweep =
-      terminal_position_reached &&
-      terminal_goal_trajectory &&
-      !emergency_stop_trajectory &&
-      enable_final_yaw &&
-      have_goal_yaw &&
-      !final_yaw_safety_aborted &&
-      std::abs(remaining_final_yaw) > final_yaw_tolerance;
-
-  if (publish_final_yaw_sweep)
-  {
-    const auto yaw_sweep = scan_planner::makeB2InPlaceYawSchedule(
-        odom_yaw, goal_yaw, final_yaw_sweep_max_step);
-    for (double yaw : yaw_sweep)
-      append_point_with_yaw(live_rotation_point, yaw);
-    if (
-        !yaw_sweep.empty() &&
-        final_yaw_validation_state == FinalYawValidationState::IDLE)
-    {
-      final_yaw_preflight_started_at = now.seconds();
-      final_yaw_validation_generation = traj_start_time.seconds();
-      final_yaw_validation_state = FinalYawValidationState::WAITING;
-      RCLCPP_INFO(
-          node->get_logger(),
-          "[closed_loop_controller] published full final-yaw footprint "
-          "sweep (%zu samples, generation=%.6f); waiting for safety ACK.",
-          yaw_sweep.size(), final_yaw_validation_generation);
-    }
-  }
-  else if (
-      terminal_position_reached &&
-      terminal_goal_trajectory &&
-      (final_yaw_latch.isComplete() || final_yaw_safety_aborted))
-  {
-    // Keep the safety layer aligned with the actual stationary B2 footprint.
-    // A completed/denied final yaw is held at live odometry, not at the
-    // position-spline tangent or its ideal endpoint.
-    append_point_with_yaw(live_rotation_point, odom_yaw);
-  }
-  else
-  {
-    auto append_trajectory_pose = [&](double t) {
-      const Eigen::Vector3d point = traj[0].evaluateDeBoorT(t);
-      append_point_with_yaw(point, estimateDesiredYaw(t, point));
-    };
-    for (double t = start; t < traj_duration; t += execution_path_sample_dt)
-      append_trajectory_pose(t);
-    append_trajectory_pose(traj_duration);
-  }
+  for (double t = start; t < traj_duration; t += execution_path_sample_dt)
+    append_pose(t);
+  append_pose(traj_duration);
 
   execution_path_pub->publish(path);
   last_execution_path_publish_time = now;
-  force_execution_path_publish = false;
+}
+
+void clearExecutionPathAfterGoal(const rclcpp::Time &now)
+{
+  if (execution_path_cleared_after_goal)
+    return;
+
+  nav_msgs::msg::Path path;
+  path.header.stamp = now;
+  path.header.frame_id = execution_path_frame;
+  execution_path_pub->publish(path);
+  last_execution_path_publish_time = now;
+  execution_path_cleared_after_goal = true;
+}
+
+void publishEmptyExecutionPath(const rclcpp::Time &now)
+{
+  if (!execution_path_pub)
+    return;
+
+  nav_msgs::msg::Path path;
+  path.header.stamp = now;
+  path.header.frame_id = execution_path_frame;
+  execution_path_pub->publish(path);
+  last_execution_path_publish_time = now;
+  execution_path_cleared_after_goal = true;
+}
+
+void resetControllerState(const std::string &reason)
+{
+  const rclcpp::Time now = node->now();
+  last_controller_reset_time = now;
+  traj.clear();
+  receive_traj = false;
+  traj_duration = 0.0;
+  traj_id = 0;
+  exec_time = 0.0;
+  traj_start_time = rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
+  last_update_time = now;
+
+  final_yaw_aligning = false;
+  final_goal_reached = false;
+  have_last_final_yaw_error = false;
+  have_last_final_yaw_cmd = false;
+  final_yaw_reversal_pending = false;
+  last_final_yaw_error = 0.0;
+  last_final_yaw_cmd = 0.0;
+  best_abs_final_yaw_error = std::numeric_limits<double>::infinity();
+  final_yaw_align_start_time = rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
+  final_yaw_last_progress_time = rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
+  final_yaw_reversal_start_time = rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
+  desired_yaw_filter.reset();
+  path_yaw_control.reset();
+
+  safety_execution_frozen = false;
+  safety_speed_scale = 1.0;
+  have_safety_speed_scale = false;
+  last_safety_speed_scale_time = rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
+
+  publishExecutionFrozen(false);
+  publishEmptyExecutionPath(now);
+  publishStop();
+
+  RCLCPP_WARN(
+      node->get_logger(),
+      "[closed_loop_controller] controller state reset: reason=%s.",
+      reason.c_str());
 }
 
 void bsplineCallback(const scan_planner::msg::Bspline::ConstSharedPtr &msg)
@@ -588,395 +558,160 @@ void bsplineCallback(const scan_planner::msg::Bspline::ConstSharedPtr &msg)
 
   UniformBspline pos_traj(pos_pts, msg->order, 0.1);
   pos_traj.setKnot(knots);
-  const double new_traj_duration = pos_traj.getTimeSum();
-
-  std::vector<double> received_yaw_schedule;
-  if (!msg->yaw_pts.empty())
-  {
-    const bool values_finite = std::all_of(
-        msg->yaw_pts.begin(), msg->yaw_pts.end(),
-        [](double value) { return std::isfinite(value); });
-    const double yaw_duration =
-        msg->yaw_dt * static_cast<double>(msg->yaw_pts.size() - 1);
-    const double duration_tolerance =
-        std::max(0.02, 0.01 * std::abs(new_traj_duration));
-    if (
-        msg->yaw_pts.size() < 2 ||
-        !values_finite ||
-        !std::isfinite(msg->yaw_dt) ||
-        msg->yaw_dt <= 0.0 ||
-        !std::isfinite(new_traj_duration) ||
-        std::abs(yaw_duration - new_traj_duration) >
-            duration_tolerance)
-    {
-      RCLCPP_ERROR(
-          node->get_logger(),
-          "[closed_loop_controller] reject traj_id=%" PRId64
-          ": invalid explicit B2 "
-          "yaw schedule (samples=%zu dt=%.6f yaw_duration=%.6f "
-          "position_duration=%.6f).",
-          msg->traj_id, msg->yaw_pts.size(), msg->yaw_dt, yaw_duration,
-          new_traj_duration);
-      return;
-    }
-    received_yaw_schedule.assign(
-        msg->yaw_pts.begin(), msg->yaw_pts.end());
-  }
-
-  const auto recovery_cancel_status = reverse_recovery_policy.cancel();
-  if (
-      recovery_cancel_status ==
-      scan_planner::B2ReverseRecoveryStatus::CANCELLED)
-  {
-    publishReverseRecoveryStatus(recovery_cancel_status);
-    RCLCPP_INFO(
-        node->get_logger(),
-        "[closed_loop_controller] cancel straight reverse recovery because "
-        "a newer trajectory arrived.");
-  }
 
   traj.clear();
   traj.push_back(pos_traj);
   traj.push_back(traj[0].getDerivative());
   traj.push_back(traj[1].getDerivative());
 
-  traj_duration = new_traj_duration;
+  traj_duration = traj[0].getTimeSum();
   traj_id = msg->traj_id;
-  emergency_stop_trajectory = msg->emergency_stop;
-  terminal_goal_trajectory =
-      msg->terminal_goal && !msg->emergency_stop;
   traj_start_time = rclcpp::Time(msg->start_time, node->get_clock()->get_clock_type());
   exec_time = 0.0;
   last_update_time = node->now();
+  last_bspline_receive_time = last_update_time;
   receive_traj = true;
-  b2_yaw_schedule = std::move(received_yaw_schedule);
-  if (b2_yaw_schedule.empty())
-    rebuildB2YawSchedule();
+  final_yaw_aligning = false;
+  final_goal_reached = false;
+  execution_path_cleared_after_goal = false;
+  have_last_final_yaw_error = false;
+  have_last_final_yaw_cmd = false;
+  final_yaw_reversal_pending = false;
+  last_final_yaw_error = 0.0;
+  last_final_yaw_cmd = 0.0;
+  best_abs_final_yaw_error = std::numeric_limits<double>::infinity();
+  final_yaw_align_start_time = rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
+  final_yaw_last_progress_time = rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
+  final_yaw_reversal_start_time = rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
 
-  // A goal callback cannot authorize terminal yaw on the spline that happened
-  // to be active at callback time.  Bind only after a newer emergency
-  // stationary handoff and a still newer executable spline.
-  const scan_planner::GoalYawTrajectoryResult goal_yaw_transition =
-      goal_yaw_handoff.receiveTrajectory(
-          msg->emergency_stop,
-          msg->traj_id,
-          traj_start_time.seconds());
-  if (goal_yaw_transition.handoff_accepted)
-  {
-    have_goal_yaw = false;
-    RCLCPP_INFO(
-        node->get_logger(),
-        "[closed_loop_controller] accepted stationary handoff traj_id=%" PRId64
-        " for pending goal generation=%" PRIu64 ".",
-        msg->traj_id, goal_yaw_handoff.goalGeneration());
-  }
-  if (goal_yaw_transition.yaw_bound)
-  {
-    goal_yaw = goal_yaw_handoff.activeYaw();
-    have_goal_yaw = true;
-    RCLCPP_INFO(
-        node->get_logger(),
-        "[closed_loop_controller] bound pending final yaw %.3f rad to "
-        "traj_id=%" PRId64 " after generation-matched handoff.",
-        goal_yaw, msg->traj_id);
-  }
-  else if (goal_yaw_handoff.hasPendingYaw())
-  {
-    have_goal_yaw = false;
-  }
-  else if (goal_yaw_handoff.hasActiveYaw())
-  {
-    goal_yaw = goal_yaw_handoff.activeYaw();
-    have_goal_yaw = true;
-  }
-
-  final_yaw_latch.reset();
-  heading_alignment_latch.reset();
-  resetFinalYawValidation();
-
-  RCLCPP_WARN(
-      node->get_logger(),
-      "[closed_loop_controller] received bspline traj_id=%" PRId64
-      " duration=%.3f "
-      "emergency_stop=%s terminal_goal=%s B2_yaw=%s samples=%zu",
-      traj_id, traj_duration, emergency_stop_trajectory ? "true" : "false",
-      terminal_goal_trajectory ? "true" : "false",
-      msg->yaw_pts.empty() ? "legacy_fallback" : "explicit",
-      b2_yaw_schedule.size());
+  RCLCPP_WARN(node->get_logger(), "[closed_loop_controller] received bspline traj_id=%d duration=%.3f",
+              traj_id, traj_duration);
 }
 
 void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &msg)
 {
+  const double measured_yaw = yawFromQuaternion(msg->pose.pose.orientation);
+  yaw_rate_estimator.update(measured_yaw, node->now().seconds());
   odom_pos(0) = msg->pose.pose.position.x;
   odom_pos(1) = msg->pose.pose.position.y;
   odom_pos(2) = msg->pose.pose.position.z;
-  odom_yaw = yawFromQuaternion(msg->pose.pose.orientation);
+  odom_yaw = measured_yaw;
   have_odom = true;
-  last_odom_time = node->now();
-  if (receive_traj && b2_yaw_schedule.empty())
-    rebuildB2YawSchedule();
 }
 
 void goalYawCallback(const std_msgs::msg::Float64::ConstSharedPtr &msg)
 {
-  const scan_planner::GoalYawInputResult result =
-      goal_yaw_handoff.receiveYaw(msg->data, node->now().seconds());
-  if (result == scan_planner::GoalYawInputResult::REJECTED)
-  {
-    RCLCPP_WARN(
-        node->get_logger(),
-        "[closed_loop_controller] reject non-finite final goal yaw.");
-    return;
-  }
-  if (result == scan_planner::GoalYawInputResult::DUPLICATE)
-  {
-    RCLCPP_DEBUG(
-        node->get_logger(),
-        "[closed_loop_controller] ignore duplicate goal_yaw retransmission.");
-    return;
-  }
-
-  have_goal_yaw = goal_yaw_handoff.hasActiveYaw();
-  if (have_goal_yaw)
-    goal_yaw = goal_yaw_handoff.activeYaw();
-  final_yaw_latch.reset();
-  resetFinalYawValidation();
+  goal_yaw = normalizeAngle(msg->data);
+  have_goal_yaw = true;
+  have_last_final_yaw_error = false;
+  have_last_final_yaw_cmd = false;
+  final_yaw_reversal_pending = false;
+  last_final_yaw_error = 0.0;
+  last_final_yaw_cmd = 0.0;
   RCLCPP_INFO(
       node->get_logger(),
-      "[closed_loop_controller] %s final goal yaw=%.3f rad "
-      "(generation=%" PRIu64 ", awaiting_handoff=%s).",
-      result == scan_planner::GoalYawInputResult::NEW_GOAL
-          ? "received new pending"
-          : "coalesced companion",
-      goal_yaw_handoff.hasPendingYaw()
-          ? goal_yaw_handoff.pendingYaw()
-          : goal_yaw_handoff.activeYaw(),
-      goal_yaw_handoff.goalGeneration(),
-      goal_yaw_handoff.awaitingHandoff() ? "true" : "false");
+      "[closed_loop_controller] received goal yaw: goal=%.3f current=%.3f error=%.3f.",
+      goal_yaw,
+      odom_yaw,
+      normalizeAngle(goal_yaw - odom_yaw));
 }
 
-void goalPoseCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr &msg)
+void goalPositionCallback(const geometry_msgs::msg::PointStamped::ConstSharedPtr &msg)
 {
-  const double received_yaw = yawFromQuaternion(msg->pose.orientation);
-  const scan_planner::GoalYawInputResult result =
-      goal_yaw_handoff.receivePose(
-          msg->pose.position.x,
-          msg->pose.position.y,
-          msg->pose.position.z,
-          received_yaw,
-          node->now().seconds());
-  if (result == scan_planner::GoalYawInputResult::REJECTED)
+  const Eigen::Vector3d next_goal(msg->point.x, msg->point.y, msg->point.z);
+  const bool changed =
+      !have_goal_position ||
+      std::hypot(next_goal(0) - goal_position(0), next_goal(1) - goal_position(1)) > 1e-3;
+  goal_position = next_goal;
+  have_goal_position = true;
+  if (changed)
   {
-    RCLCPP_WARN(
-        node->get_logger(),
-        "[closed_loop_controller] reject goal pose with non-finite "
-        "position or yaw.");
-    return;
+    final_yaw_aligning = false;
+    final_goal_reached = false;
+    execution_path_cleared_after_goal = false;
+    have_last_final_yaw_error = false;
+    have_last_final_yaw_cmd = false;
+    final_yaw_reversal_pending = false;
+    last_final_yaw_error = 0.0;
+    last_final_yaw_cmd = 0.0;
+    best_abs_final_yaw_error = std::numeric_limits<double>::infinity();
   }
-  if (result == scan_planner::GoalYawInputResult::DUPLICATE)
-  {
-    RCLCPP_DEBUG(
-        node->get_logger(),
-        "[closed_loop_controller] ignore duplicate goal_pose retransmission.");
-    return;
-  }
-
-  have_goal_yaw = goal_yaw_handoff.hasActiveYaw();
-  if (have_goal_yaw)
-    goal_yaw = goal_yaw_handoff.activeYaw();
-  final_yaw_latch.reset();
-  resetFinalYawValidation();
   RCLCPP_INFO(
       node->get_logger(),
-      "[closed_loop_controller] %s B2 goal pose yaw=%.3f rad "
-      "(generation=%" PRIu64 ", awaiting_handoff=%s).",
-      result == scan_planner::GoalYawInputResult::NEW_GOAL
-          ? "received new pending"
-          : "coalesced companion",
-      goal_yaw_handoff.hasPendingYaw()
-          ? goal_yaw_handoff.pendingYaw()
-          : goal_yaw_handoff.activeYaw(),
-      goal_yaw_handoff.goalGeneration(),
-      goal_yaw_handoff.awaitingHandoff() ? "true" : "false");
+      "[closed_loop_controller] received navigation goal position: "
+      "goal=(%.3f, %.3f, %.3f) current=(%.3f, %.3f, %.3f) distance=%.3f changed=%d.",
+      goal_position(0), goal_position(1), goal_position(2),
+      odom_pos(0), odom_pos(1), odom_pos(2),
+      std::hypot(goal_position(0) - odom_pos(0), goal_position(1) - odom_pos(1)),
+      changed);
 }
 
 void safetyExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg)
 {
+  const bool previous = safety_execution_frozen;
   safety_execution_frozen = msg->data;
-  last_safety_execution_frozen_time = node->now();
+  if (previous == safety_execution_frozen)
+    return;
+  if (safety_execution_frozen)
+  {
+    RCLCPP_WARN(
+        node->get_logger(),
+        "[closed_loop_controller] safety_execution_frozen changed: true topic=%s.",
+        safety_execution_frozen_topic.c_str());
+  }
+  else
+  {
+    RCLCPP_INFO(
+        node->get_logger(),
+        "[closed_loop_controller] safety_execution_frozen changed: false topic=%s.",
+        safety_execution_frozen_topic.c_str());
+  }
 }
 
-void reverseRecoveryRequestCallback(
-    const std_msgs::msg::Bool::ConstSharedPtr &msg)
+void safetySpeedScaleCallback(const std_msgs::msg::Float64::ConstSharedPtr &msg)
+{
+  const double previous = safety_speed_scale;
+  safety_speed_scale = clamp(msg->data, 0.0, 1.0);
+  last_safety_speed_scale_time = node->now();
+  have_safety_speed_scale = true;
+  if (std::abs(previous - safety_speed_scale) < 1e-3)
+    return;
+  RCLCPP_INFO(
+      node->get_logger(),
+      "[closed_loop_controller] safety_speed_scale changed: %.3f topic=%s.",
+      safety_speed_scale,
+      safety_speed_scale_topic.c_str());
+}
+
+void controllerResetCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg)
 {
   if (!msg->data)
     return;
-  if (reverse_recovery_policy.active())
-    return;
-  if (!have_odom)
-  {
-    publishReverseRecoveryStatus(
-        scan_planner::B2ReverseRecoveryStatus::ODOMETRY_INVALID);
-    return;
-  }
-  const rclcpp::Time now = node->now();
-  if (!reverse_recovery_policy.begin(
-        now.seconds(), odom_pos.x(), odom_pos.y(), odom_pos.z(), odom_yaw))
-  {
-    publishReverseRecoveryStatus(
-        scan_planner::B2ReverseRecoveryStatus::ODOMETRY_INVALID);
-    return;
-  }
-  reverse_recovery_generation_time = now;
-  last_execution_path_publish_time =
-      rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
-  publishReverseRecoveryStatus(
-      scan_planner::B2ReverseRecoveryStatus::ACTIVE);
-  RCLCPP_WARN(
-      node->get_logger(),
-      "[closed_loop_controller] requested one straight reverse recovery "
-      "round: distance<=%.2fm duration<=%.2fs vx=-%.3fm/s. Waiting for "
-      "rear obstacle and ground safety approval.",
-      reverse_recovery_max_distance,
-      reverse_recovery_max_duration,
-      reverse_recovery_speed);
+  resetControllerState("reset_topic");
 }
 
-void finalYawValidationCallback(
-    const std_msgs::msg::Float64MultiArray::ConstSharedPtr &msg)
+void taskStartResetCallback(const std_msgs::msg::String::ConstSharedPtr &msg)
 {
-  if (
-      msg->data.size() < 2 ||
-      final_yaw_validation_state == FinalYawValidationState::IDLE ||
-      final_yaw_validation_state == FinalYawValidationState::DENIED)
-  {
-    return;
-  }
-
-  const double generation = msg->data[0];
-  const double decision = msg->data[1];
-  if (
-      !std::isfinite(generation) ||
-      !std::isfinite(decision) ||
-      std::abs(generation - final_yaw_validation_generation) > 1e-3)
-  {
-    return;
-  }
-
-  if (decision > 0.5)
-  {
-    if (final_yaw_validation_state != FinalYawValidationState::APPROVED)
-    {
-      RCLCPP_INFO(
-          node->get_logger(),
-          "[closed_loop_controller] final-yaw footprint safety ACK approved "
-          "for generation %.6f.",
-          generation);
-    }
-    final_yaw_validation_state = FinalYawValidationState::APPROVED;
-    return;
-  }
-
-  final_yaw_validation_state = FinalYawValidationState::DENIED;
-  final_yaw_safety_aborted = true;
-  final_yaw_preflight_started_at = -1.0;
-  force_execution_path_publish = true;
-  RCLCPP_WARN(
-      node->get_logger(),
-      "[closed_loop_controller] final yaw alignment denied by footprint "
-      "safety ACK; keeping the reached XY goal.");
+  resetControllerState("task_start:" + msg->data);
 }
 
 void cmdCallback()
 {
   const rclcpp::Time now = node->now();
-  if (reverse_recovery_policy.active())
-  {
-    publishReverseRecoveryPath(now);
-    const double odometry_age =
-        last_odom_time.nanoseconds() > 0
-            ? std::max(0.0, (now - last_odom_time).seconds())
-            : std::numeric_limits<double>::infinity();
-    // A stale false from the previous forward path must not authorize reverse
-    // motion. The monitor has to evaluate the newly published reverse path
-    // and emit at least one generation-fresh safety sample first.
-    const bool have_fresh_reverse_safety_sample =
-        last_safety_execution_frozen_time.nanoseconds() > 0 &&
-        last_safety_execution_frozen_time >=
-            reverse_recovery_generation_time;
-    const bool reverse_safety_frozen =
-        !have_fresh_reverse_safety_sample || safety_execution_frozen;
-    const scan_planner::B2ReverseRecoveryUpdate recovery =
-        reverse_recovery_policy.update(
-            now.seconds(),
-            odom_pos.x(),
-            odom_pos.y(),
-            odom_yaw,
-            odometry_age,
-            reverse_safety_frozen);
-    if (recovery.terminal)
-    {
-      publishReverseRecoveryStatus(recovery.status);
-      RCLCPP_WARN(
-          node->get_logger(),
-          "[closed_loop_controller] straight reverse recovery round ended: "
-          "status=%u distance=%.3fm elapsed=%.3fs. Hold position until SCAN "
-          "replans forward or requests another round.",
-          static_cast<unsigned int>(recovery.status),
-          recovery.distance,
-          recovery.elapsed);
-    }
-
-    if (recovery.command_reverse)
-    {
-      publishExecutionFrozen(false);
-      geometry_msgs::msg::Twist cmd;
-      cmd.linear.x =
-          -std::min(reverse_recovery_speed, std::abs(max_vx));
-      // Recovery is deliberately one-dimensional: no lateral velocity and
-      // no yaw command are allowed in this state.
-      cmd.linear.y = 0.0;
-      cmd.angular.z = 0.0;
-      cmd_vel_pub->publish(cmd);
-    }
-    else
-    {
-      publishExecutionFrozen(true);
-      publishStop();
-    }
-    last_update_time = now;
-    return;
-  }
-
-  if (reverse_recovery_policy.holding())
-  {
-    publishExecutionFrozen(safety_execution_frozen);
-    publishStop();
-    last_update_time = now;
-    return;
-  }
-
   publishExecutionPath(now);
-  const bool final_yaw_validation_timed_out =
-      final_yaw_validation_state == FinalYawValidationState::WAITING &&
-      final_yaw_preflight_started_at >= 0.0 &&
-      now.seconds() - final_yaw_preflight_started_at >=
-          final_yaw_validation_timeout;
 
   if (safety_execution_frozen)
   {
-    if (final_yaw_validation_timed_out)
-    {
-      final_yaw_safety_aborted = true;
-      final_yaw_validation_state = FinalYawValidationState::DENIED;
-      final_yaw_preflight_started_at = -1.0;
-      force_execution_path_publish = true;
-      RCLCPP_WARN(
-          node->get_logger(),
-          "[closed_loop_controller] final-yaw safety ACK timed out while "
-          "execution was frozen; skipping orientation alignment and keeping "
-          "the reached XY goal.");
-    }
+    RCLCPP_WARN_THROTTLE(
+        node->get_logger(),
+        *node->get_clock(),
+        1000,
+        "[closed_loop_controller] publish cmd_vel zero: reason=safety_execution_frozen "
+        "receive_traj=%d have_odom=%d traj_id=%d exec_time=%.3f.",
+        receive_traj,
+        have_odom,
+        traj_id,
+        exec_time);
     publishExecutionFrozen(true);
     publishStop();
     last_update_time = now;
@@ -985,15 +720,48 @@ void cmdCallback()
 
   if (!receive_traj || !have_odom)
   {
+    const double reset_age =
+        last_controller_reset_time.nanoseconds() > 0
+            ? (now - last_controller_reset_time).seconds()
+            : -1.0;
+    const double bspline_age =
+        last_bspline_receive_time.nanoseconds() > 0
+            ? (now - last_bspline_receive_time).seconds()
+            : -1.0;
+    RCLCPP_WARN_THROTTLE(
+        node->get_logger(),
+        *node->get_clock(),
+        1000,
+        "[closed_loop_controller] publish cmd_vel zero: reason=missing_input "
+        "receive_traj=%d have_odom=%d traj_id=%d reset_age=%.3f last_bspline_age=%.3f "
+        "final_goal_reached=%d final_yaw_aligning=%d safety_frozen=%d.",
+        receive_traj,
+        have_odom,
+        traj_id,
+        reset_age,
+        bspline_age,
+        final_goal_reached,
+        final_yaw_aligning,
+        safety_execution_frozen);
     publishExecutionFrozen(false);
     publishStop();
     return;
   }
 
-  // An emergency stationary spline is a stop command, not a completed route.
-  // Never let it enter the terminal-yaw latch or rotate toward a stale goal.
-  if (emergency_stop_trajectory)
+  // After the current goal is fully reached (xy + yaw), keep stopped until a
+  // new trajectory arrives. XY remains unlocked only for the next goal.
+  if (final_goal_reached)
   {
+    clearExecutionPathAfterGoal(now);
+    RCLCPP_INFO_THROTTLE(
+        node->get_logger(),
+        *node->get_clock(),
+        1000,
+        "[closed_loop_controller] publish cmd_vel zero: reason=final_goal_reached "
+        "traj_id=%d exec_time=%.3f final_yaw_aligning=%d.",
+        traj_id,
+        exec_time,
+        final_yaw_aligning);
     publishExecutionFrozen(false);
     publishStop();
     last_update_time = now;
@@ -1007,94 +775,73 @@ void cmdCallback()
   const double t_eval = std::min(exec_time, traj_duration);
   Eigen::Vector3d pos_des = traj[0].evaluateDeBoorT(t_eval);
   Eigen::Vector3d vel_des = traj[1].evaluateDeBoorT(t_eval);
-  Eigen::Vector2d pos_err(pos_des(0) - odom_pos(0), pos_des(1) - odom_pos(1));
+  const Eigen::Vector3d spline_final_pos = traj[0].evaluateDeBoorT(traj_duration);
+  // Emergency-stop B-splines intentionally collapse to the current pose. The
+  // spline endpoint therefore cannot identify navigation completion. Prefer
+  // the real navigation goal so an emergency stop in the middle of a route
+  // never enters terminal XY/yaw alignment at the stop location.
+  const Eigen::Vector3d &final_pos = have_goal_position ? goal_position : spline_final_pos;
+  const double final_dist =
+      std::hypot(final_pos(0) - odom_pos(0), final_pos(1) - odom_pos(1));
 
-  const double final_yaw_error = normalizeAngle(goal_yaw - odom_yaw);
-  scan_planner::FinalYawDecision final_yaw_decision;
-  if (terminal_goal_trajectory)
+  if (!final_yaw_aligning && final_dist <= final_yaw_start_dist)
   {
-    final_yaw_decision = final_yaw_latch.update(
-        exec_time >= traj_duration,
-        pos_err.norm(),
-        finish_dist,
-        enable_final_yaw && !final_yaw_safety_aborted,
-        have_goal_yaw,
-        final_yaw_error,
-        final_yaw_tolerance);
-  }
-
-  if (final_yaw_decision.alignment_started)
-  {
+    final_yaw_aligning = true;
+    final_yaw_align_start_time = now;
+    final_yaw_last_progress_time = now;
+    have_last_final_yaw_cmd = false;
+    final_yaw_reversal_pending = false;
+    last_final_yaw_cmd = 0.0;
+    final_yaw_reversal_start_time = rclcpp::Time(0, 0, node->get_clock()->get_clock_type());
+    best_abs_final_yaw_error = std::numeric_limits<double>::infinity();
+    path_yaw_control.reset();
+    desired_yaw_filter.reset();
     RCLCPP_INFO(
         node->get_logger(),
-        "[closed_loop_controller] final yaw alignment started: target=%.3f current=%.3f "
-        "error=%.3f tolerance=%.3f rad; XY hold is now latched.",
-        goal_yaw, odom_yaw, final_yaw_error, final_yaw_tolerance);
-  }
-  if (
-      final_yaw_decision.alignment_completed &&
-      enable_final_yaw &&
-      have_goal_yaw &&
-      !final_yaw_safety_aborted)
-  {
-    final_yaw_validation_state = FinalYawValidationState::IDLE;
-    final_yaw_preflight_started_at = -1.0;
-    force_execution_path_publish = true;
-    RCLCPP_INFO(
-        node->get_logger(),
-        "[closed_loop_controller] final yaw alignment completed: target=%.3f current=%.3f "
-        "error=%.3f tolerance=%.3f rad.",
-        goal_yaw, odom_yaw, final_yaw_error, final_yaw_tolerance);
-  }
-  if (final_yaw_decision.hold_position)
-  {
-    publishExecutionFrozen(false);
-    last_update_time = now;
-    geometry_msgs::msg::Twist cmd;
-    if (final_yaw_latch.isAligning())
-    {
-      if (final_yaw_validation_timed_out)
-      {
-        final_yaw_validation_state = FinalYawValidationState::DENIED;
-        final_yaw_safety_aborted = true;
-        final_yaw_preflight_started_at = -1.0;
-        force_execution_path_publish = true;
-        RCLCPP_WARN(
-            node->get_logger(),
-            "[closed_loop_controller] final-yaw safety ACK timed out; "
-            "skipping orientation alignment and keeping the reached XY goal.");
-      }
-      else if (
-          final_yaw_validation_state ==
-          FinalYawValidationState::APPROVED)
-      {
-        cmd.angular.z = enforceMinimumSignedMagnitude(
-            clamp(kp_yaw * final_yaw_error, -max_vyaw, max_vyaw),
-            min_in_place_vyaw);
-      }
-    }
-    cmd_vel_pub->publish(cmd);
-    return;
+        "[closed_loop_controller] enter final pose alignment: final_dist=%.3f "
+        "threshold=%.3f goal_source=%s final=(%.3f, %.3f).",
+        final_dist,
+        final_yaw_start_dist,
+        have_goal_position ? "navigation_goal" : "spline_endpoint",
+        final_pos(0),
+        final_pos(1));
   }
 
-  const double yaw_des = estimateDesiredYaw(t_eval, pos_des);
+  const double yaw_des_raw = estimateDesiredYaw(t_eval, pos_des);
+  const double yaw_des = desired_yaw_filter.update(yaw_des_raw, now.seconds());
   const double yaw_err = normalizeAngle(yaw_des - odom_yaw);
-  const bool heading_alignment_active =
-      heading_alignment_latch.update(yaw_err);
-  const double yaw_rate_ff =
-      !heading_alignment_active && b2_yaw_schedule.size() >= 2
-          ? scan_planner::b2YawScheduleRate(
-                b2_yaw_schedule, traj_duration, t_eval)
-          : 0.0;
-  const double vyaw_cmd = clamp(
-      yaw_feedforward_gain * yaw_rate_ff + kp_yaw * yaw_err,
-      -max_vyaw, max_vyaw);
+  const scan_planner::B2YawControlResult yaw_control = path_yaw_control.update(
+      yaw_err,
+      yaw_rate_estimator.rate(),
+      now.seconds(),
+      kp_yaw,
+      max_vyaw);
+  const double vyaw_cmd = yaw_control.command;
 
-  if (heading_alignment_active)
+  if (!final_yaw_aligning && yaw_control.alignment_active)
   {
+    RCLCPP_WARN_THROTTLE(
+        node->get_logger(),
+        *node->get_clock(),
+        500,
+        "[closed_loop_controller] publish cmd_vel linear zero: reason=heading_error "
+        "yaw_err=%.3f stop=%.3f resume=%.3f odom_yaw=%.3f "
+        "yaw_des_raw=%.3f yaw_des=%.3f yaw_rate=%.3f predicted_err=%.3f "
+        "cmd_w=%.3f reversal_braking=%d traj_id=%d exec_time=%.3f.",
+        yaw_err,
+        heading_error_threshold,
+        heading_resume_threshold,
+        odom_yaw,
+        yaw_des_raw,
+        yaw_des,
+        yaw_rate_estimator.rate(),
+        yaw_control.predicted_error,
+        vyaw_cmd,
+        yaw_control.reversal_braking,
+        traj_id,
+        exec_time);
     publishExecutionFrozen(true);
-    publishStop(enforceMinimumSignedMagnitude(
-        vyaw_cmd, min_in_place_vyaw));
+    publishStop(vyaw_cmd);
     last_update_time = now; // freeze exec_time while rotating in place
     return;
   }
@@ -1106,9 +853,15 @@ void cmdCallback()
   pos_des = traj[0].evaluateDeBoorT(exec_time);
   vel_des = traj[1].evaluateDeBoorT(exec_time);
 
-  pos_err = Eigen::Vector2d(pos_des(0) - odom_pos(0), pos_des(1) - odom_pos(1));
+  Eigen::Vector2d pos_err(pos_des(0) - odom_pos(0), pos_des(1) - odom_pos(1));
   Eigen::Vector2d vel_ff(vel_des(0), vel_des(1));
   Eigen::Vector2d vel_world = clampNorm(vel_ff + kp_pos * pos_err, std::max(max_vx, max_vy));
+  if (final_dist < approach_slowdown_dist)
+  {
+    const double ratio = clamp(final_dist / approach_slowdown_dist, 0.0, 1.0);
+    const double speed_scale = approach_min_speed_scale + (1.0 - approach_min_speed_scale) * ratio;
+    vel_world *= speed_scale;
+  }
   const double planar_speed = vel_world.norm();
   if (
       pos_err.norm() >= finish_dist &&
@@ -1121,11 +874,197 @@ void cmdCallback()
   const double s = std::sin(odom_yaw);
   geometry_msgs::msg::Twist cmd;
   const double body_vx = c * vel_world(0) + s * vel_world(1);
-  cmd.linear.x = clamp(
-      body_vx, allow_reverse ? -max_vx : 0.0, max_vx);
+  cmd.linear.x = clamp(body_vx, allow_reverse ? -max_vx : 0.0, max_vx);
   cmd.linear.y = clamp(-s * vel_world(0) + c * vel_world(1), -max_vy, max_vy);
   cmd.angular.z = vyaw_cmd;
 
+  if (
+      min_forward_x_speed > 0.0 &&
+      final_dist > final_yaw_start_dist &&
+      body_vx > 1e-3 &&
+      cmd.linear.x < min_forward_x_speed) {
+    const double original_x = cmd.linear.x;
+    cmd.linear.x = min_forward_x_speed;
+    RCLCPP_INFO_THROTTLE(
+        node->get_logger(),
+        *node->get_clock(),
+        500,
+        "[closed_loop_controller] enforce min forward x speed: original_x=%.3f "
+        "new_x=%.3f final_dist=%.3f final_yaw_start_dist=%.3f.",
+        original_x,
+        cmd.linear.x,
+        final_dist,
+        final_yaw_start_dist);
+  }
+
+  if (final_yaw_aligning)
+  {
+    const double final_yaw_error = have_goal_yaw ? finalYawError() : 0.0;
+    const double abs_final_yaw_error = std::abs(final_yaw_error);
+    if (final_yaw_align_start_time.nanoseconds() == 0)
+    {
+      final_yaw_align_start_time = now;
+      final_yaw_last_progress_time = now;
+      best_abs_final_yaw_error = abs_final_yaw_error;
+    }
+    else if (abs_final_yaw_error + final_yaw_progress_epsilon < best_abs_final_yaw_error)
+    {
+      best_abs_final_yaw_error = abs_final_yaw_error;
+      final_yaw_last_progress_time = now;
+    }
+
+    const double final_yaw_elapsed = (now - final_yaw_align_start_time).seconds();
+    const double final_yaw_no_progress =
+        final_yaw_last_progress_time.nanoseconds() > 0
+            ? (now - final_yaw_last_progress_time).seconds()
+            : 0.0;
+    const bool final_yaw_timed_out =
+        (final_yaw_timeout > 0.0 && final_yaw_elapsed > final_yaw_timeout) ||
+        (final_yaw_progress_timeout > 0.0 &&
+         final_yaw_no_progress > final_yaw_progress_timeout &&
+         abs_final_yaw_error > final_yaw_tolerance);
+
+    // SCAN hands the final spline to this controller once the body enters the
+    // terminal region.  Keep correcting XY while turning: a B2 can translate
+    // noticeably during an in-place yaw and a one-way XY latch otherwise
+    // reports success well outside the requested point.
+    cmd = geometry_msgs::msg::Twist();
+    const auto final_position_command =
+        scan_planner::computeB2FinalPositionCommand(
+            final_pos(0) - odom_pos(0),
+            final_pos(1) - odom_pos(1),
+            odom_yaw,
+            final_position_tolerance,
+            final_position_kp,
+            final_position_max_vx,
+            final_position_max_vy,
+            final_position_allow_reverse);
+    cmd.linear.x = final_position_command.body_x;
+    cmd.linear.y = final_position_command.body_y;
+    bool final_yaw_reversal_held = false;
+    if (enable_final_yaw && have_goal_yaw && abs_final_yaw_error > final_yaw_tolerance)
+    {
+      double desired_vyaw =
+          clamp(final_yaw_kp * final_yaw_error, -final_yaw_max_vyaw, final_yaw_max_vyaw);
+      if (std::abs(desired_vyaw) < final_yaw_min_vyaw)
+        desired_vyaw = std::copysign(final_yaw_min_vyaw, final_yaw_error);
+      const bool reversing =
+          have_last_final_yaw_cmd &&
+          std::abs(last_final_yaw_cmd) > 1e-3 &&
+          std::abs(desired_vyaw) > 1e-3 &&
+          last_final_yaw_cmd * desired_vyaw < 0.0;
+
+      if (reversing && final_yaw_reversal_hold_time > 0.0)
+      {
+        if (!final_yaw_reversal_pending)
+        {
+          final_yaw_reversal_pending = true;
+          final_yaw_reversal_start_time = now;
+        }
+
+        const double reversal_elapsed = (now - final_yaw_reversal_start_time).seconds();
+        if (reversal_elapsed < final_yaw_reversal_hold_time)
+        {
+          const double held_vyaw =
+              clamp(last_final_yaw_cmd * final_yaw_reversal_hold_speed_scale,
+                    -final_yaw_max_vyaw, final_yaw_max_vyaw);
+          cmd.angular.z = held_vyaw;
+          final_yaw_reversal_held = true;
+        }
+        else
+        {
+          cmd.angular.z = desired_vyaw;
+          final_yaw_reversal_pending = false;
+        }
+      }
+      else
+      {
+        cmd.angular.z = desired_vyaw;
+        final_yaw_reversal_pending = false;
+      }
+
+      if (!final_yaw_reversal_held && std::abs(cmd.angular.z) > 1e-3)
+      {
+        last_final_yaw_cmd = cmd.angular.z;
+        have_last_final_yaw_cmd = true;
+      }
+    }
+    else
+    {
+      final_yaw_reversal_pending = false;
+    }
+    RCLCPP_INFO_THROTTLE(
+        node->get_logger(),
+        *node->get_clock(),
+        500,
+        "[closed_loop_controller] final pose aligning: current_final_dist=%.3f "
+        "position_tolerance=%.3f xy_aligned=%d entry_threshold=%.3f "
+        "yaw_error=%.3f yaw_tolerance=%.3f cmd_linear=(%.3f, %.3f) "
+        "cmd_vyaw=%.3f reversal_hold=%d elapsed=%.3f no_progress=%.3f.",
+        final_dist,
+        final_position_tolerance,
+        final_position_command.aligned,
+        final_yaw_start_dist,
+        final_yaw_error,
+        final_yaw_tolerance,
+        cmd.linear.x,
+        cmd.linear.y,
+        cmd.angular.z,
+        final_yaw_reversal_held,
+        final_yaw_elapsed,
+        final_yaw_no_progress);
+
+    if (
+        final_yaw_timed_out &&
+        final_yaw_timeout_mark_reached &&
+        final_position_command.aligned)
+    {
+      final_goal_reached = true;
+      final_yaw_aligning = false;
+      have_last_final_yaw_cmd = false;
+      final_yaw_reversal_pending = false;
+      last_final_yaw_cmd = 0.0;
+      cmd = geometry_msgs::msg::Twist();
+      RCLCPP_WARN(
+          node->get_logger(),
+          "[closed_loop_controller] final yaw watchdog marked reached: "
+          "elapsed=%.3f no_progress=%.3f yaw_error=%.3f best_abs_error=%.3f tolerance=%.3f.",
+          final_yaw_elapsed,
+          final_yaw_no_progress,
+          final_yaw_error,
+          best_abs_final_yaw_error,
+          final_yaw_tolerance);
+    }
+    else if (final_yaw_timed_out)
+    {
+      resetControllerState("final_yaw_watchdog_timeout");
+      return;
+    }
+    else if (scan_planner::isB2FinalPoseReached(
+                 final_dist,
+                 final_yaw_error,
+                 final_position_tolerance,
+                 final_yaw_tolerance,
+                 enable_final_yaw && have_goal_yaw))
+    {
+      final_goal_reached = true;
+      final_yaw_aligning = false;
+      have_last_final_yaw_cmd = false;
+      final_yaw_reversal_pending = false;
+      last_final_yaw_cmd = 0.0;
+      cmd = geometry_msgs::msg::Twist();
+      RCLCPP_INFO(
+          node->get_logger(),
+          "[closed_loop_controller] navigation point reached by simultaneous XY and yaw alignment: "
+          "current_final_dist=%.3f position_tolerance=%.3f yaw_error=%.3f yaw_tolerance=%.3f.",
+          final_dist,
+          final_position_tolerance,
+          final_yaw_error,
+          final_yaw_tolerance);
+    }
+  }
+
+  applySafetySpeedScale(cmd, now);
   cmd_vel_pub->publish(cmd);
 }
 } // namespace
@@ -1144,33 +1083,26 @@ int main(int argc, char **argv)
       "planning/bspline", 10, bsplineCallback);
   odom_sub = node->create_subscription<nav_msgs::msg::Odometry>(
       body_pose_topic, 20, odomCallback);
+  goal_position_sub = node->create_subscription<geometry_msgs::msg::PointStamped>(
+      goal_position_topic, 10, goalPositionCallback);
   goal_yaw_sub = node->create_subscription<std_msgs::msg::Float64>(
       "goal_yaw", 10, goalYawCallback);
-  goal_pose_sub = node->create_subscription<geometry_msgs::msg::PoseStamped>(
-      goal_pose_topic, 10, goalPoseCallback);
   safety_execution_frozen_sub = node->create_subscription<std_msgs::msg::Bool>(
       safety_execution_frozen_topic, 10, safetyExecutionFrozenCallback);
-  reverse_recovery_request_sub =
-      node->create_subscription<std_msgs::msg::Bool>(
-          reverse_recovery_request_topic,
-          10,
-          reverseRecoveryRequestCallback);
-  final_yaw_validation_sub =
-      node->create_subscription<std_msgs::msg::Float64MultiArray>(
-          final_yaw_validation_topic, 10, finalYawValidationCallback);
-  cmd_vel_pub = node->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 20);
-  reverse_recovery_status_pub =
-      node->create_publisher<std_msgs::msg::UInt8>(
-          reverse_recovery_status_topic, 10);
-  execution_frozen_pub = node->create_publisher<std_msgs::msg::Bool>(
-      execution_frozen_topic, 10);
-  if (
-      !legacy_execution_frozen_topic.empty() &&
-      legacy_execution_frozen_topic != execution_frozen_topic)
+  safety_speed_scale_sub = node->create_subscription<std_msgs::msg::Float64>(
+      safety_speed_scale_topic, 10, safetySpeedScaleCallback);
+  controller_reset_sub = node->create_subscription<std_msgs::msg::Bool>(
+      controller_reset_topic, 10, controllerResetCallback);
+  for (const auto &topic : task_start_reset_topics)
   {
-    legacy_execution_frozen_pub = node->create_publisher<std_msgs::msg::Bool>(
-        legacy_execution_frozen_topic, 10);
+    if (topic.empty())
+      continue;
+    task_start_subs.push_back(
+        node->create_subscription<std_msgs::msg::String>(
+            topic, 10, taskStartResetCallback));
   }
+  cmd_vel_pub = node->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 20);
+  execution_frozen_pub = node->create_publisher<std_msgs::msg::Bool>("planning/go2_execution_frozen", 10);
   execution_path_pub = node->create_publisher<nav_msgs::msg::Path>(execution_path_topic, 10);
   cmd_timer = node->create_wall_timer(std::chrono::milliseconds(10), cmdCallback);
 
@@ -1178,24 +1110,6 @@ int main(int argc, char **argv)
   RCLCPP_WARN(node->get_logger(), "[closed_loop_controller] ready.");
 
   rclcpp::spin(node);
-
-  // Explicitly tear down namespace-scope ROS entities before the context.
-  // Static destruction after rclcpp::shutdown() used to make repeated RViz
-  // simulation runs hang or terminate the process uncleanly.
-  cmd_timer.reset();
-  final_yaw_validation_sub.reset();
-  reverse_recovery_request_sub.reset();
-  safety_execution_frozen_sub.reset();
-  goal_pose_sub.reset();
-  goal_yaw_sub.reset();
-  odom_sub.reset();
-  bspline_sub.reset();
-  execution_path_pub.reset();
-  reverse_recovery_status_pub.reset();
-  legacy_execution_frozen_pub.reset();
-  execution_frozen_pub.reset();
-  cmd_vel_pub.reset();
-  node.reset();
   rclcpp::shutdown();
   return 0;
 }

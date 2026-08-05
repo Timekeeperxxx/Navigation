@@ -1,5 +1,4 @@
 #include "plan_env/grid_map.h"
-#include "plan_env/cloud_qos.h"
 #include "plan_env/robot_self_filter.h"
 #include <chrono>
 #include <cstring>
@@ -90,41 +89,48 @@ bool decodeDepthImage(const sensor_msgs::msg::Image& image, double scaling_facto
   return true;
 }
 
-std::uint64_t groundCloudSignature(
-    const sensor_msgs::msg::PointCloud2 & cloud)
+using SteadyTime = std::chrono::steady_clock::time_point;
+
+struct SparseVoxelKey
 {
-  constexpr std::uint64_t kOffset = 1469598103934665603ULL;
-  constexpr std::uint64_t kPrime = 1099511628211ULL;
-  std::uint64_t value = kOffset;
-  auto mix = [&](std::uint64_t item) {
-    value ^= item;
-    value *= kPrime;
-  };
-  mix(cloud.width);
-  mix(cloud.height);
-  mix(cloud.point_step);
-  mix(cloud.row_step);
-  mix(cloud.data.size());
-  mix(cloud.is_bigendian ? 1U : 0U);
-  mix(cloud.is_dense ? 1U : 0U);
-  mix(cloud.fields.size());
-  for (const auto & field : cloud.fields)
+  int x;
+  int y;
+  int z;
+
+  bool operator==(const SparseVoxelKey& other) const
   {
-    mix(field.name.size());
-    for (char character : field.name)
-      mix(static_cast<unsigned char>(character));
-    mix(field.offset);
-    mix(field.datatype);
-    mix(field.count);
+    return x == other.x && y == other.y && z == other.z;
   }
-  mix(cloud.header.frame_id.size());
-  for (char character : cloud.header.frame_id)
-    mix(static_cast<unsigned char>(character));
-  // This is a static, safety-critical map. Hash all bytes so a changed region
-  // in the middle of a same-sized cloud can never keep the previous index.
-  for (const std::uint8_t byte : cloud.data)
-    mix(byte);
-  return value;
+};
+
+struct SparseVoxelKeyHash
+{
+  std::size_t operator()(const SparseVoxelKey& key) const noexcept
+  {
+    std::size_t seed = 0;
+    auto combine = [&seed](int value) {
+      seed ^= std::hash<int>()(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    };
+    combine(key.x);
+    combine(key.y);
+    combine(key.z);
+    return seed;
+  }
+};
+
+SteadyTime steadyNow()
+{
+  return std::chrono::steady_clock::now();
+}
+
+double elapsedMs(const SteadyTime& start)
+{
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+double nodeNowSec(const rclcpp::Node::SharedPtr& node)
+{
+  return node ? node->now().nanoseconds() * 1e-9 : 0.0;
 }
 }  // namespace
 
@@ -145,13 +151,10 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   getParam(node_, "grid_map/obstacles_inflation_z_up", mp_.obstacles_inflation_z_up, -1.0);
   getParam(node_, "grid_map/obstacles_inflation_z_down", mp_.obstacles_inflation_z_down, -1.0);
   getParam(node_, "grid_map/double_cylinder_radius", mp_.double_cylinder_radius_, -1.0);
+  getParam(node_, "grid_map/obstacles_inflation_radius", mp_.obstacles_inflation_radius_,
+           mp_.double_cylinder_radius_);
   getParam(node_, "grid_map/double_cylinder_offset", mp_.double_cylinder_offset_, 0.0);
   getParam(node_, "grid_map/double_cylinder_center_offset", mp_.double_cylinder_center_offset_, 0.0);
-  getParam(
-      node_, "grid_map/collision_inflation_margin_xy",
-      mp_.collision_inflation_margin_xy_, 0.0);
-  mp_.collision_inflation_margin_xy_ =
-      std::max(0.0, mp_.collision_inflation_margin_xy_);
   getParam(node_, "grid_map/map_sliding_en", mp_.map_sliding_en_, true);
   getParam(node_, "grid_map/map_sliding_thresh", mp_.map_sliding_thresh_, mp_.resolution_);
 
@@ -172,9 +175,21 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   getParam(node_, "grid_map/p_max", mp_.p_max_, -1.0);
   getParam(node_, "grid_map/p_occ", mp_.p_occ_, -1.0);
   getParam(node_, "grid_map/max_ray_length", mp_.max_ray_length_, -0.1);
+  getParam(node_, "grid_map/occupancy_decay_enabled", mp_.occupancy_decay_enabled_, false);
+  double occupancy_decay_miss_scale = 0.0;
+  getParam(node_, "grid_map/occupancy_decay_miss_scale", occupancy_decay_miss_scale, 0.0);
+  getParam(node_, "grid_map/occupancy_decay_period", mp_.occupancy_decay_period_, 1);
 
   getParam(node_, "grid_map/vis_height", mp_.vis_height_, 0.3);
   getParam(node_, "grid_map/show_occ_time", mp_.show_occ_time_, false);
+  getParam(node_, "grid_map/timing_log_enabled", mp_.timing_log_enabled_, false);
+  getParam(node_, "grid_map/timing_log_period", mp_.timing_log_period_, 1.0);
+  mp_.timing_log_period_ = std::max(0.1, mp_.timing_log_period_);
+  getParam(node_, "grid_map/publish_inflate_sparse", mp_.publish_inflate_sparse_, true);
+  getParam(node_, "grid_map/inflate_sparse_leaf_size", mp_.inflate_sparse_leaf_size_, 0.15);
+  mp_.inflate_sparse_leaf_size_ = std::max(mp_.inflate_sparse_leaf_size_, mp_.resolution_);
+  getParam(node_, "grid_map/inflate_sparse_topic", mp_.inflate_sparse_topic_,
+           string("/grid_map/occupancy_inflate_sparse"));
 
   getParam(node_, "grid_map/frame_id", mp_.frame_id_, string("world"));
   getParam(node_, "grid_map/sliding_map_frame_id", mp_.sliding_map_frame_id_, string("sliding_map"));
@@ -188,55 +203,11 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   getParam(
       node_, "grid_map/self_filter_radius",
       mp_.self_filter_radius_, mp_.double_cylinder_radius_);
-  getParam(node_, "grid_map/self_filter_padding", mp_.self_filter_padding_, 0.10);
+  getParam(node_, "grid_map/self_filter_padding", mp_.self_filter_padding_, 0.0);
   getParam(node_, "grid_map/self_filter_z_min_offset", mp_.self_filter_z_min_offset_, -0.15);
   getParam(
       node_, "grid_map/self_filter_z_max_above_sensor",
       mp_.self_filter_z_max_above_sensor_, 0.05);
-  getParam(
-      node_, "grid_map/ground_support_enabled",
-      mp_.ground_support_enabled_, false);
-  getParam(
-      node_, "grid_map/ground_support_fail_closed",
-      mp_.ground_support_fail_closed_, true);
-  getParam(
-      node_, "grid_map/ground_support_bucket_size",
-      mp_.ground_support_bucket_size_, 0.15);
-  getParam(
-      node_, "grid_map/ground_support_xy_tolerance",
-      mp_.ground_support_xy_tolerance_, 0.155);
-  getParam(
-      node_, "grid_map/ground_support_z_tolerance",
-      mp_.ground_support_z_tolerance_, 0.20);
-  double configured_body_height = 0.32;
-  getParam(node_, "grid_map/body_height", configured_body_height, 0.32);
-  getParam(
-      node_, "grid_map/ground_support_planning_height",
-      mp_.ground_support_planning_height_, configured_body_height);
-  if (std::abs(
-        mp_.ground_support_planning_height_ - configured_body_height) > 1e-6)
-  {
-    RCLCPP_WARN(
-        node_->get_logger(),
-        "[GroundSupport] planning_height %.3f differs from body_height %.3f; "
-        "using body_height so target lifting and ground lookup stay aligned.",
-        mp_.ground_support_planning_height_, configured_body_height);
-    mp_.ground_support_planning_height_ = configured_body_height;
-  }
-  getParam(
-      node_, "grid_map/ground_support_footprint_probe_margin",
-      mp_.ground_support_footprint_probe_margin_,
-      mp_.ground_support_xy_tolerance_ +
-        mp_.collision_inflation_margin_xy_);
-  getParam(
-      node_, "grid_map/ground_support_perimeter_samples",
-      mp_.ground_support_perimeter_samples_, 16);
-  getParam(
-      node_, "grid_map/ground_support_radial_samples",
-      mp_.ground_support_radial_samples_, 2);
-  getParam(
-      node_, "grid_map/ground_support_outer_ring_max_missing_per_circle",
-      mp_.ground_support_outer_ring_max_missing_per_circle_, 3);
 
   mp_.lidar_extrinsic_ <<
       1.0, 0.0, 0.0, -0.01100,
@@ -266,37 +237,19 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   mp_.clamp_min_log_ = logit(mp_.p_min_);
   mp_.clamp_max_log_ = logit(mp_.p_max_);
   mp_.min_occupancy_log_ = logit(mp_.p_occ_);
+  mp_.occupancy_decay_miss_log_ = std::min(0.0, mp_.prob_miss_log_ * std::max(0.0, occupancy_decay_miss_scale));
+  mp_.occupancy_decay_period_ = std::max(1, mp_.occupancy_decay_period_);
   mp_.unknown_flag_ = 0.01;
   mp_.map_sliding_thresh_vox_ = std::max(1, static_cast<int>(std::ceil(mp_.map_sliding_thresh_ * mp_.resolution_inv_)));
-
-  plan_env::GroundSupportConfig ground_support_config;
-  ground_support_config.bucket_size = mp_.ground_support_bucket_size_;
-  ground_support_config.xy_tolerance = mp_.ground_support_xy_tolerance_;
-  ground_support_config.z_tolerance = mp_.ground_support_z_tolerance_;
-  ground_support_config.planning_height =
-      mp_.ground_support_planning_height_;
-  ground_support_config.circle_radius = mp_.double_cylinder_radius_;
-  ground_support_config.circle_offset = mp_.double_cylinder_offset_;
-  ground_support_config.circle_center_offset =
-      mp_.double_cylinder_center_offset_;
-  ground_support_config.footprint_probe_margin =
-      mp_.ground_support_footprint_probe_margin_;
-  ground_support_config.perimeter_samples =
-      mp_.ground_support_perimeter_samples_;
-  ground_support_config.radial_samples =
-      mp_.ground_support_radial_samples_;
-  ground_support_config.outer_ring_max_missing_per_circle =
-      mp_.ground_support_outer_ring_max_missing_per_circle_;
-  ground_support_index_.configure(ground_support_config);
-  ground_support_ready_ = false;
-  ground_support_source_point_count_ = 0;
-  ground_support_source_signature_ = 0;
 
   cout << "hit: " << mp_.prob_hit_log_ << endl;
   cout << "miss: " << mp_.prob_miss_log_ << endl;
   cout << "min log: " << mp_.clamp_min_log_ << endl;
   cout << "max: " << mp_.clamp_max_log_ << endl;
   cout << "thresh log: " << mp_.min_occupancy_log_ << endl;
+  cout << "occupancy decay: enabled=" << mp_.occupancy_decay_enabled_
+       << ", miss_log=" << mp_.occupancy_decay_miss_log_
+       << ", period=" << mp_.occupancy_decay_period_ << endl;
 
   for (int i = 0; i < 3; ++i)
     mp_.map_voxel_num_(i) = ceil(mp_.map_size_(i) / mp_.resolution_);
@@ -346,9 +299,14 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
     lidar_pose_sub_ =
         node_->create_subscription<nav_msgs::msg::Odometry>(
             "/grid_map/sensor_pose", 50, std::bind(&GridMap::sensorPoseCallback, this, std::placeholders::_1));
+    // /lio/cloud_world is a real-time sensor stream.  Use the sensor-data QoS
+    // profile so this subscriber remains compatible with both the current
+    // Best Effort LIO publisher and a Reliable publisher from older builds.
+    // A Reliable subscription cannot connect to a Best Effort publisher.
+    const auto cloud_qos = rclcpp::SensorDataQoS().keep_last(1);
     cloud_sub_ =
         node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-            "/grid_map/cloud", plan_env::cloudSensorQos(),
+            "/grid_map/cloud", cloud_qos,
             std::bind(&GridMap::cloudCallback, this, std::placeholders::_1));
   }
 
@@ -356,33 +314,12 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
       node_->create_subscription<nav_msgs::msg::Odometry>(
           "/grid_map/body_pose", 50, std::bind(&GridMap::slidingMapFrameCallback, this, std::placeholders::_1));
 
-  if (mp_.ground_support_enabled_)
-  {
-    const auto ground_qos =
-        rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
-    ground_sub_ =
-        node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-            "/grid_map/ground", ground_qos,
-            std::bind(
-              &GridMap::groundCallback, this,
-              std::placeholders::_1));
-    RCLCPP_INFO(
-        node_->get_logger(),
-        "[GroundSupport] enabled: xy_tolerance=%.3fm z_tolerance=%.3fm "
-        "planning_height=%.3fm footprint_probe_margin=%.3fm samples=%dx%d",
-        ground_support_index_.config().xy_tolerance,
-        ground_support_index_.config().z_tolerance,
-        ground_support_index_.config().planning_height,
-        ground_support_index_.config().footprint_probe_margin,
-        ground_support_index_.config().radial_samples,
-        ground_support_index_.config().perimeter_samples);
-  }
-
   occ_timer_ = node_->create_wall_timer(std::chrono::milliseconds(50), std::bind(&GridMap::updateOccupancyCallback, this));
   vis_timer_ = node_->create_wall_timer(std::chrono::milliseconds(50), std::bind(&GridMap::visCallback, this));
 
   map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("/grid_map/occupancy", 10);
   map_inf_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("/grid_map/occupancy_inflate", 10);
+  map_inf_sparse_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(mp_.inflate_sparse_topic_, 10);
   sliding_map_bbox_pub_ = node_->create_publisher<visualization_msgs::msg::Marker>("/grid_map/sliding_map_bbox", 10);
 
   unknown_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("/grid_map/unknown", 10);
@@ -393,6 +330,7 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   md_.use_cloud_update_ = false;
   md_.has_first_depth_ = false;
   md_.has_ray_pose_ = false;
+  md_.has_body_pose_ = false;
   md_.has_cloud_ = false;
   md_.image_cnt_ = 0;
   md_.depth_image_width_ = 0;
@@ -401,12 +339,34 @@ void GridMap::initMap(const rclcpp::Node::SharedPtr& nh)
   md_.sliding_map_frame_pos_.setZero();
   md_.ray_q_ = Eigen::Quaterniond::Identity();
   md_.body_yaw_ = 0.0;
-  md_.has_body_pose_ = false;
 
   md_.fuse_time_ = 0.0;
   md_.update_num_ = 0;
-  md_.obstacle_observation_count_ = 0;
   md_.max_fuse_time_ = 0.0;
+  md_.last_timing_log_time_ = 0.0;
+  md_.latest_cloud_receive_time_ = 0.0;
+  md_.latest_cloud_callback_done_time_ = 0.0;
+  md_.latest_cloud_raw_points_ = 0;
+  md_.latest_cloud_kept_points_ = 0;
+  md_.latest_cloud_self_filtered_points_ = 0;
+  md_.last_cloud_convert_ms_ = 0.0;
+  md_.last_cloud_filter_ms_ = 0.0;
+  md_.last_cloud_callback_ms_ = 0.0;
+  md_.last_update_wait_ms_ = 0.0;
+  md_.last_update_raycast_ms_ = 0.0;
+  md_.last_update_publish_inflate_ms_ = 0.0;
+  md_.last_update_total_ms_ = 0.0;
+  md_.last_raycast_slide_ms_ = 0.0;
+  md_.last_raycast_trace_ms_ = 0.0;
+  md_.last_raycast_cache_ms_ = 0.0;
+  md_.last_raycast_decay_ms_ = 0.0;
+  md_.last_raycast_input_points_ = 0;
+  md_.last_cache_voxels_ = 0;
+  md_.last_publish_inflate_ms_ = 0.0;
+  md_.last_publish_inflate_points_ = 0;
+  md_.last_publish_inflate_sparse_points_ = 0;
+  md_.last_publish_inflate_voxels_ = 0;
+  md_.last_publish_inflate_all_info_ = false;
   md_.local_bound_min_ = mp_.map_bound_min_idx_;
   md_.local_bound_max_ = mp_.map_bound_max_idx_;
 
@@ -428,13 +388,8 @@ void GridMap::updateMapBoundaryFromIndex()
 
 void GridMap::rebuildInflationOffsets()
 {
-  // Keep the published/visualized physical circles unchanged, but give SCAN
-  // an explicit planning clearance so it does not enter a narrow gap and
-  // leave the downstream safety monitor with no collision-free escape.
-  const double double_radius =
-      std::max(0.0, mp_.double_cylinder_radius_) +
-      std::max(0.0, mp_.collision_inflation_margin_xy_);
-  const int inf_step_xy = ceil(double_radius / mp_.resolution_);
+  const double inflation_radius = std::max(0.0, mp_.obstacles_inflation_radius_);
+  const int inf_step_xy = ceil(inflation_radius / mp_.resolution_);
   const int inf_step_z_up = ceil(mp_.obstacles_inflation_z_up / mp_.resolution_);
   const int inf_step_z_down = ceil(mp_.obstacles_inflation_z_down / mp_.resolution_);
 
@@ -443,7 +398,7 @@ void GridMap::rebuildInflationOffsets()
     for (int y = -inf_step_xy; y <= inf_step_xy; ++y)
     {
       Eigen::Vector2d offset_xy(x * mp_.resolution_, y * mp_.resolution_);
-      if (offset_xy.norm() >= double_radius)
+      if (offset_xy.norm() >= inflation_radius)
         continue;
 
       for (int z = -inf_step_z_down; z <= inf_step_z_up; ++z)
@@ -523,6 +478,32 @@ void GridMap::applyOccupancyUpdate(const Eigen::Vector3i& id, double new_log_odd
   md_.occupancy_buffer_[addr] = new_log_odds;
   if (was_occ != now_occ)
     updateInflation(id, now_occ ? 1 : -1);
+}
+
+void GridMap::decayUnobservedOccupancy(const Eigen::Vector3i& min_id, const Eigen::Vector3i& max_id)
+{
+  if (!mp_.occupancy_decay_enabled_ || mp_.occupancy_decay_miss_log_ >= 0.0)
+    return;
+  if (mp_.occupancy_decay_period_ > 1 &&
+      static_cast<int>(static_cast<unsigned char>(md_.raycast_num_)) % mp_.occupancy_decay_period_ != 0)
+    return;
+
+  for (int x = min_id(0); x <= max_id(0); ++x)
+    for (int y = min_id(1); y <= max_id(1); ++y)
+      for (int z = min_id(2); z <= max_id(2); ++z)
+      {
+        Eigen::Vector3i id(x, y, z);
+        const int addr = toAddress(id);
+        if (md_.occupancy_buffer_[addr] <= mp_.min_occupancy_log_)
+          continue;
+        if (md_.flag_rayend_[addr] == md_.raycast_num_ || md_.flag_traverse_[addr] == md_.raycast_num_)
+          continue;
+
+        const double decayed_log_odds = std::max(
+            md_.occupancy_buffer_[addr] + mp_.occupancy_decay_miss_log_,
+            mp_.clamp_min_log_);
+        applyOccupancyUpdate(id, decayed_log_odds);
+      }
 }
 
 void GridMap::resetCellByAddress(int addr)
@@ -766,15 +747,16 @@ void GridMap::projectDepthImage()
 
 void GridMap::raycastProcess()
 {
+  // if (md_.proj_points_.size() == 0)
   if (md_.proj_points_cnt == 0)
-  {
-    clearRobotSelfOccupancy();
     return;
-  }
 
+  const auto t_slide_start = steadyNow();
   updateSlidingMap(md_.ray_pos_);
+  md_.last_raycast_slide_ms_ = elapsedMs(t_slide_start);
 
   md_.raycast_num_ += 1;
+  md_.last_raycast_input_points_ = md_.proj_points_cnt;
 
   int vox_idx;
   double length;
@@ -792,6 +774,7 @@ void GridMap::raycastProcess()
   Eigen::Vector3d half = Eigen::Vector3d(0.5, 0.5, 0.5);
   Eigen::Vector3d ray_pt, pt_w;
 
+  const auto t_trace_start = steadyNow();
   for (int i = 0; i < md_.proj_points_cnt; ++i)
   {
     pt_w = md_.proj_points_[i];
@@ -868,6 +851,7 @@ void GridMap::raycastProcess()
       }
     }
   }
+  md_.last_raycast_trace_ms_ = elapsedMs(t_trace_start);
 
   min_x = min(min_x, md_.ray_pos_(0));
   min_y = min(min_y, md_.ray_pos_(1));
@@ -895,6 +879,8 @@ void GridMap::raycastProcess()
 
   // std::cout << "cache all: " << md_.cache_voxel_.size() << std::endl;
 
+  md_.last_cache_voxels_ = static_cast<int>(md_.cache_voxel_.size());
+  const auto t_cache_start = steadyNow();
   while (!md_.cache_voxel_.empty())
   {
 
@@ -929,7 +915,15 @@ void GridMap::raycastProcess()
                  mp_.clamp_max_log_);
     applyOccupancyUpdate(idx, new_log_odds);
   }
+  md_.last_raycast_cache_ms_ = elapsedMs(t_cache_start);
 
+  const auto t_decay_start = steadyNow();
+  decayUnobservedOccupancy(min_id, max_id);
+  md_.last_raycast_decay_ms_ = elapsedMs(t_decay_start);
+
+  // A body return can have accumulated before the first valid body pose or
+  // while the robot moved between scans.  Clear the current body volume from
+  // both raw and inflated occupancy after every fusion pass.
   clearRobotSelfOccupancy();
 }
 
@@ -1034,7 +1028,6 @@ void GridMap::visCallback()
 {
 
   publishMap();
-  publishMapInflate(true);
   publishSlidingMapFrame();
   publishSlidingMapBBox();
   publishDepthCloud();
@@ -1045,6 +1038,10 @@ void GridMap::updateOccupancyCallback()
   if (!md_.occ_need_update_)
     return;
 
+  const auto t_update_start = steadyNow();
+  if (md_.latest_cloud_callback_done_time_ > 0.0)
+    md_.last_update_wait_ms_ = std::max(0.0, (nodeNowSec(node_) - md_.latest_cloud_callback_done_time_) * 1000.0);
+
   /* update occupancy */
   // ros::Time t1, t2, t3, t4;
   // t1 = ros::Time::now();
@@ -1052,8 +1049,20 @@ void GridMap::updateOccupancyCallback()
   if (!md_.use_cloud_update_)
     projectDepthImage();
   // t2 = ros::Time::now();
+  const int updated_points = md_.proj_points_cnt;
+  const auto t_raycast_start = steadyNow();
   raycastProcess();
-  ++md_.obstacle_observation_count_;
+  md_.last_update_raycast_ms_ = elapsedMs(t_raycast_start);
+  if (updated_points > 0)
+  {
+    const auto t_publish_start = steadyNow();
+    publishMapInflate(false);
+    md_.last_update_publish_inflate_ms_ = elapsedMs(t_publish_start);
+  }
+  else
+  {
+    md_.last_update_publish_inflate_ms_ = 0.0;
+  }
   // t3 = ros::Time::now();
 
   // t4 = ros::Time::now();
@@ -1070,6 +1079,8 @@ void GridMap::updateOccupancyCallback()
 
   md_.occ_need_update_ = false;
   md_.use_cloud_update_ = false;
+  md_.last_update_total_ms_ = elapsedMs(t_update_start);
+  logTimingIfNeeded();
 }
 
 void GridMap::depthPoseCallback(const sensor_msgs::msg::Image::ConstSharedPtr &img,
@@ -1192,26 +1203,27 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
     return;
   }
 
+  const auto t_callback_start = steadyNow();
+  md_.latest_cloud_receive_time_ = nodeNowSec(node_);
+
   pcl::PointCloud<pcl::PointXYZ> latest_cloud;
+  const auto t_convert_start = steadyNow();
   pcl::fromROSMsg(*img, latest_cloud);
+  md_.last_cloud_convert_ms_ = elapsedMs(t_convert_start);
+  md_.latest_cloud_raw_points_ = static_cast<int>(latest_cloud.points.size());
+  md_.latest_cloud_self_filtered_points_ = 0;
 
   md_.has_cloud_ = true;
 
   if (latest_cloud.points.size() == 0)
-  {
-    // An empty lidar frame is still a valid obstacle observation. This is
-    // common in the RViz simulator before a test obstacle is inserted and can
-    // also happen in genuinely open space. Count it as map warm-up without
-    // fabricating occupied or free voxels.
-    ++md_.obstacle_observation_count_;
     return;
-  }
 
   const Eigen::Matrix3d sensor_r = md_.ray_q_.toRotationMatrix();
   const Eigen::Vector3d ray_pos = md_.ray_pos_;
   if (!std::isfinite(ray_pos.x()) || !std::isfinite(ray_pos.y()) || !std::isfinite(ray_pos.z()))
     return;
 
+  const auto t_filter_start = steadyNow();
   updateSlidingMap(ray_pos);
 
   md_.proj_points_cnt = 0;
@@ -1234,13 +1246,16 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
     }
     const Eigen::Vector3d devi = pt_world - ray_pos;
     const double ray_length = devi.norm();
-    // Keep only the sensor's true blind range here.  Robot body/leg returns
-    // are removed by the pose-aware self mask below so a nearby wall remains
-    // visible to planning.
+    // Reject returns from the robot body before raycasting and footprint
+    // inflation.  Without this filter, body/leg returns become a dense
+    // inflated shell that follows the robot and is mistaken for an obstacle.
     if (ray_length < mp_.lidar_min_range_)
       continue;
     if (isInsideRobotSelfMask(pt_world))
+    {
+      ++md_.latest_cloud_self_filtered_points_;
       continue;
+    }
     const bool in_local_range =
         fabs(devi(0)) <= mp_.local_update_range_(0) && fabs(devi(1)) <= mp_.local_update_range_(1) &&
         fabs(devi(2)) <= mp_.local_update_range_(2);
@@ -1254,145 +1269,16 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
 
     md_.proj_points_cnt++;
   }
+  md_.last_cloud_filter_ms_ = elapsedMs(t_filter_start);
+  md_.latest_cloud_kept_points_ = md_.proj_points_cnt;
+
+  if (md_.proj_points_cnt == 0)
+    return;
 
   md_.use_cloud_update_ = true;
   md_.occ_need_update_ = true;
-}
-
-void GridMap::groundCallback(
-    const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg)
-{
-  if (!mp_.ground_support_enabled_ || !cloud_msg)
-    return;
-
-  auto invalidate_ground_support = [this]() {
-    std::lock_guard<std::mutex> lock(ground_support_mutex_);
-    ground_support_ready_ = false;
-    ground_support_source_point_count_ = 0;
-    ground_support_source_signature_ = 0;
-  };
-
-  const std::string source_frame = cloud_msg->header.frame_id;
-  if (source_frame != mp_.frame_id_)
-  {
-    invalidate_ground_support();
-    RCLCPP_ERROR_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "[GroundSupport] reject frame '%s'; expected '%s'.",
-        source_frame.c_str(), mp_.frame_id_.c_str());
-    return;
-  }
-
-  const std::size_t source_point_count =
-      static_cast<std::size_t>(cloud_msg->width) *
-      static_cast<std::size_t>(cloud_msg->height);
-  const std::uint64_t source_signature =
-      groundCloudSignature(*cloud_msg);
-  plan_env::GroundSupportConfig support_config;
-  {
-    std::lock_guard<std::mutex> lock(ground_support_mutex_);
-    // nav_pcd_map_publisher republishes the same transient-local static map.
-    // Avoid rebuilding a several-hundred-thousand-point index every second,
-    // while still accepting a same-sized map with a different sample hash.
-    if (ground_support_ready_ &&
-        source_point_count == ground_support_source_point_count_ &&
-        source_signature == ground_support_source_signature_)
-      return;
-    support_config = ground_support_index_.config();
-    // A changed latched map supersedes the old one. Keep the planner
-    // fail-closed until the replacement index has been built successfully.
-    ground_support_ready_ = false;
-    ground_support_source_point_count_ = 0;
-    ground_support_source_signature_ = 0;
-  }
-
-  pcl::PointCloud<pcl::PointXYZ> cloud;
-  pcl::fromROSMsg(*cloud_msg, cloud);
-  if (cloud.empty())
-  {
-    RCLCPP_ERROR_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "[GroundSupport] received an empty ground cloud; planning remains "
-        "fail-closed.");
-    return;
-  }
-
-  plan_env::GroundSupportIndex next_index(support_config);
-  next_index.reserve(cloud.size());
-  for (const pcl::PointXYZ & point : cloud.points)
-    next_index.addPoint(point.x, point.y, point.z);
-
-  if (next_index.empty())
-  {
-    RCLCPP_ERROR(
-        node_->get_logger(),
-        "[GroundSupport] ground cloud had no finite XYZ points; planning "
-        "remains fail-closed.");
-    return;
-  }
-
-  const std::size_t indexed_points = next_index.size();
-  {
-    std::lock_guard<std::mutex> lock(ground_support_mutex_);
-    ground_support_index_ = std::move(next_index);
-    ground_support_source_point_count_ = source_point_count;
-    ground_support_source_signature_ = source_signature;
-    ground_support_ready_ = true;
-  }
-  RCLCPP_INFO(
-      node_->get_logger(),
-      "[GroundSupport] indexed %zu ground points in frame '%s'.",
-      indexed_points, mp_.frame_id_.c_str());
-}
-
-bool GridMap::isGroundSupportReady()
-{
-  if (!mp_.ground_support_enabled_ || !mp_.ground_support_fail_closed_)
-    return true;
-  std::lock_guard<std::mutex> lock(ground_support_mutex_);
-  return ground_support_ready_;
-}
-
-bool GridMap::isGroundSupported(
-    const Eigen::Vector3d & pos, double yaw)
-{
-  if (!mp_.ground_support_enabled_)
-    return true;
-
-  std::lock_guard<std::mutex> lock(ground_support_mutex_);
-  if (!ground_support_ready_)
-    return !mp_.ground_support_fail_closed_;
-  return ground_support_index_.isPoseSupported(
-      pos.x(), pos.y(), pos.z(), yaw);
-}
-
-int GridMap::getInflateOccupancy(Eigen::Vector3d pos, double yaw)
-{
-  // Missing same-floor support is a hard collision condition, independent of
-  // positive-obstacle raycasting.  This makes holes, drop-offs and unmapped
-  // floor impossible shortcuts for A*, rebound optimization and final checks.
-  if (!isGroundSupported(pos, yaw))
-    return 1;
-  return getDynamicInflateOccupancy(pos, yaw);
-}
-
-int GridMap::getDynamicInflateOccupancy(Eigen::Vector3d pos, double yaw)
-{
-  Eigen::Vector3d heading(std::cos(yaw), std::sin(yaw), 0.0);
-  Eigen::Vector3d center =
-      pos + mp_.double_cylinder_center_offset_ * heading;
-  Eigen::Vector3d front =
-      center + mp_.double_cylinder_offset_ * heading;
-  Eigen::Vector3d rear =
-      center - mp_.double_cylinder_offset_ * heading;
-
-  int front_occ =
-      getInflateOccupancyFromBuffer(
-        front, md_.occupancy_buffer_inflate_);
-  if (front_occ != 0)
-    return front_occ;
-  return getInflateOccupancyFromBuffer(
-      rear, md_.occupancy_buffer_inflate_);
+  md_.last_cloud_callback_ms_ = elapsedMs(t_callback_start);
+  md_.latest_cloud_callback_done_time_ = nodeNowSec(node_);
 }
 
 void GridMap::publishMap()
@@ -1437,14 +1323,46 @@ void GridMap::publishMap()
 void GridMap::publishMapInflate(bool all_info)
 {
 
-  if (map_inf_pub_->get_subscription_count() <= 0)
+  const auto t_publish_start = steadyNow();
+  const bool publish_full = map_inf_pub_->get_subscription_count() > 0;
+  const bool publish_sparse = mp_.publish_inflate_sparse_ &&
+                              map_inf_sparse_pub_ &&
+                              map_inf_sparse_pub_->get_subscription_count() > 0;
+  md_.last_publish_inflate_points_ = 0;
+  md_.last_publish_inflate_sparse_points_ = 0;
+  md_.last_publish_inflate_voxels_ = 0;
+  md_.last_publish_inflate_ms_ = 0.0;
+  if (!publish_full && !publish_sparse)
     return;
 
   pcl::PointXYZ pt;
   pcl::PointCloud<pcl::PointXYZ> cloud;
+  pcl::PointCloud<pcl::PointXYZ> sparse_cloud;
+  std::unordered_set<SparseVoxelKey, SparseVoxelKeyHash> sparse_voxels;
+  const double inv_sparse_leaf = 1.0 / mp_.inflate_sparse_leaf_size_;
+  if (publish_sparse)
+    sparse_voxels.reserve(20000);
 
   Eigen::Vector3i min_cut = mp_.map_bound_min_idx_;
   Eigen::Vector3i max_cut = mp_.map_bound_max_idx_;
+  if (!all_info)
+  {
+    min_cut = md_.local_bound_min_;
+    max_cut = md_.local_bound_max_;
+
+    const int inf_step_xy = ceil(std::max(0.0, mp_.obstacles_inflation_radius_) * mp_.resolution_inv_);
+    const int inf_step_z_up = ceil(std::max(0.0, mp_.obstacles_inflation_z_up) * mp_.resolution_inv_);
+    const int inf_step_z_down = ceil(std::max(0.0, mp_.obstacles_inflation_z_down) * mp_.resolution_inv_);
+    min_cut -= Eigen::Vector3i(inf_step_xy, inf_step_xy, inf_step_z_down);
+    max_cut += Eigen::Vector3i(inf_step_xy, inf_step_xy, inf_step_z_up);
+    boundIndex(min_cut);
+    boundIndex(max_cut);
+  }
+  md_.last_publish_inflate_all_info_ = all_info;
+  md_.last_publish_inflate_voxels_ =
+      (max_cut(0) - min_cut(0) + 1) *
+      (max_cut(1) - min_cut(1) + 1) *
+      (max_cut(2) - min_cut(2) + 1);
 
   const std::vector<char> &inflate_buffer = md_.occupancy_buffer_inflate_;
   for (int x = min_cut(0); x <= max_cut(0); ++x)
@@ -1462,19 +1380,115 @@ void GridMap::publishMapInflate(bool all_info)
         pt.x = pos(0);
         pt.y = pos(1);
         pt.z = pos(2);
-        cloud.push_back(pt);
+        if (publish_full)
+          cloud.push_back(pt);
+
+        if (publish_sparse)
+        {
+          const SparseVoxelKey key{
+              static_cast<int>(std::floor(pos(0) * inv_sparse_leaf)),
+              static_cast<int>(std::floor(pos(1) * inv_sparse_leaf)),
+              static_cast<int>(std::floor(pos(2) * inv_sparse_leaf))};
+          if (sparse_voxels.insert(key).second)
+            sparse_cloud.push_back(pt);
+        }
       }
 
-  cloud.width = cloud.points.size();
-  cloud.height = 1;
-  cloud.is_dense = true;
-  cloud.header.frame_id = mp_.frame_id_;
-  sensor_msgs::msg::PointCloud2 cloud_msg;
+  const rclcpp::Time stamp = node_->now();
+  if (publish_full)
+  {
+    cloud.width = cloud.points.size();
+    cloud.height = 1;
+    cloud.is_dense = true;
+    cloud.header.frame_id = mp_.frame_id_;
+    sensor_msgs::msg::PointCloud2 cloud_msg;
 
-  pcl::toROSMsg(cloud, cloud_msg);
-  map_inf_pub_->publish(cloud_msg);
+    pcl::toROSMsg(cloud, cloud_msg);
+    cloud_msg.header.stamp = stamp;
+    map_inf_pub_->publish(cloud_msg);
+  }
+  if (publish_sparse)
+  {
+    sparse_cloud.width = sparse_cloud.points.size();
+    sparse_cloud.height = 1;
+    sparse_cloud.is_dense = true;
+    sparse_cloud.header.frame_id = mp_.frame_id_;
+    sensor_msgs::msg::PointCloud2 sparse_msg;
+
+    pcl::toROSMsg(sparse_cloud, sparse_msg);
+    sparse_msg.header.stamp = stamp;
+    map_inf_sparse_pub_->publish(sparse_msg);
+  }
+  md_.last_publish_inflate_points_ = static_cast<int>(cloud.points.size());
+  md_.last_publish_inflate_sparse_points_ = static_cast<int>(sparse_cloud.points.size());
+  md_.last_publish_inflate_ms_ = elapsedMs(t_publish_start);
 
   // ROS_INFO("pub map");
+}
+
+void GridMap::logTimingIfNeeded()
+{
+  if (!mp_.timing_log_enabled_)
+    return;
+
+  const double now = nodeNowSec(node_);
+  if (md_.last_timing_log_time_ > 0.0 &&
+      now - md_.last_timing_log_time_ < mp_.timing_log_period_)
+    return;
+  md_.last_timing_log_time_ = now;
+
+  const double total_cloud_to_update_ms =
+      md_.latest_cloud_receive_time_ > 0.0
+          ? std::max(0.0, (now - md_.latest_cloud_receive_time_) * 1000.0)
+          : 0.0;
+
+  const char* slowest_name = "cloud_convert";
+  double slowest_ms = md_.last_cloud_convert_ms_;
+  auto consider = [&](const char* name, double value) {
+    if (value > slowest_ms)
+    {
+      slowest_name = name;
+      slowest_ms = value;
+    }
+  };
+  consider("cloud_filter", md_.last_cloud_filter_ms_);
+  consider("wait_update_timer", md_.last_update_wait_ms_);
+  consider("raycast_trace", md_.last_raycast_trace_ms_);
+  consider("raycast_cache", md_.last_raycast_cache_ms_);
+  consider("raycast_decay", md_.last_raycast_decay_ms_);
+  consider("publish_inflate", md_.last_publish_inflate_ms_);
+
+  RCLCPP_INFO(
+      node_->get_logger(),
+      "[GridMap timing] slowest=%s %.2fms total_cloud_to_update=%.2fms "
+      "cloud_raw=%d kept=%d self_filtered=%d cb=%.2fms convert=%.2fms filter=%.2fms "
+      "wait_update_timer=%.2fms update_total=%.2fms raycast=%.2fms "
+      "raycast_parts(slide=%.2f trace=%.2f cache=%.2f decay=%.2f input=%d cache_voxels=%d) "
+      "publish_inflate=%.2fms(full_points=%d sparse_points=%d scan_voxels=%d local=%d sparse_leaf=%.3f).",
+      slowest_name,
+      slowest_ms,
+      total_cloud_to_update_ms,
+      md_.latest_cloud_raw_points_,
+      md_.latest_cloud_kept_points_,
+      md_.latest_cloud_self_filtered_points_,
+      md_.last_cloud_callback_ms_,
+      md_.last_cloud_convert_ms_,
+      md_.last_cloud_filter_ms_,
+      md_.last_update_wait_ms_,
+      md_.last_update_total_ms_,
+      md_.last_update_raycast_ms_,
+      md_.last_raycast_slide_ms_,
+      md_.last_raycast_trace_ms_,
+      md_.last_raycast_cache_ms_,
+      md_.last_raycast_decay_ms_,
+      md_.last_raycast_input_points_,
+      md_.last_cache_voxels_,
+      md_.last_publish_inflate_ms_,
+      md_.last_publish_inflate_points_,
+      md_.last_publish_inflate_sparse_points_,
+      md_.last_publish_inflate_voxels_,
+      md_.last_publish_inflate_all_info_ ? 0 : 1,
+      mp_.inflate_sparse_leaf_size_);
 }
 
 void GridMap::publishSlidingMapFrame()
@@ -1591,11 +1605,6 @@ void GridMap::publishUnknown()
 bool GridMap::odomValid() { return md_.has_ray_pose_; }
 
 bool GridMap::hasDepthObservation() { return md_.has_first_depth_; }
-
-uint64_t GridMap::getObstacleObservationCount()
-{
-  return md_.obstacle_observation_count_;
-}
 
 Eigen::Vector3d GridMap::getOrigin() { return mp_.map_origin_; }
 

@@ -51,6 +51,11 @@ global_planner:
   ros__parameters:
     turning_weight: 0.1 #Punish the zig-zag path
     a_star_expanding_radius: 0.05
+    path_smoothing_resolution: 0.1
+    path_smoothing_iterations: 3
+    path_smoothing_data_weight: 0.25
+    path_smoothing_smooth_weight: 0.35
+    path_smoothing_max_deviation: 0.25
     roi_file_path: ""
     roi_radius: 1.0   # Radius for circular ROI (if using pointInROI)
     roi_z_tolerance: 0.2 # Z tolerance for ROI checking
@@ -60,20 +65,25 @@ global_planner:
     planground_fallback_ratio: 0.3
     planground_downsample_leaf_size: 0.2
 
-    #@ Hybrid planning parameters (v24 - Ultra-Strong Planground Preference with Maximum Anti-Detour 加强版)
+    #@ Hybrid planning parameters. Planground is a mild preference, not a hard lane.
     use_hybrid_planner: true
-    hybrid_planground_bias: 15.0
+    hybrid_planground_bias: 0.45
     hybrid_downsample_leaf_size: 0.15
-    hybrid_max_ground_bridge_length: 0.12
-    hybrid_max_ground_cost: 250.0
-    hybrid_min_ground_cost: 150.0
-    hybrid_detour_ratio_threshold: 4.0
-    hybrid_distance_balance_threshold: 1.5
-    hybrid_ground_path_length_penalty: 5.0
-    hybrid_detour_balance_factor_lower_bound: 0.5
-    hybrid_detour_balance_factor_upper_bound: 3.0
+    hybrid_max_ground_bridge_length: 2.0
+    hybrid_max_ground_cost: 2.0
+    hybrid_min_ground_cost: 0.02
+    hybrid_detour_ratio_threshold: 1.1
+    hybrid_distance_balance_threshold: 6.0
+    hybrid_ground_path_length_penalty: 0.0
+    hybrid_detour_balance_factor_lower_bound: 0.2
+    hybrid_detour_balance_factor_upper_bound: 1.5
+    hybrid_planground_exit_penalty: 0.0
+    hybrid_ground_step_penalty: 0.0
+    anti_backtrack_weight: 1.0
+    hybrid_path_detour_limit: 1.6
+    hybrid_planground_path_margin: 1.05
 
     #@ v25 Edge penalty parameters - penalize ground points near cloud edges
     hybrid_edge_penalty_radius: 0.1
-    hybrid_edge_penalty_weight: 200.0
+    hybrid_edge_penalty_weight: 5.0
     hybrid_edge_penalty_falloff_rate: 2.0

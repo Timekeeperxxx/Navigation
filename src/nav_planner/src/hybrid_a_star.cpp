@@ -32,14 +32,9 @@
 #include <global_planner/hybrid_a_star.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
-#include <algorithm>
-#include <chrono>
 #include <cmath>
-#include <cstdint>
+#include <algorithm>
 #include <limits>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
 
 //=============================================================================
 // v20 - Unified Map with Strong Planground Preference (规划主体在planground上)
@@ -107,11 +102,11 @@ Hybrid_A_Star::Hybrid_A_Star(
   // Copy the point clouds
   *pc_planground_ = *pc_planground;
   *pc_ground_ = *pc_ground;
-  
+
   // Build KD-trees
   kdtree_planground_->setInputCloud(pc_planground_);
   kdtree_ground_->setInputCloud(pc_ground_);
-  
+
   // Build the initial hybrid cloud
   rebuildHybridCloud();
 }
@@ -121,83 +116,6 @@ Hybrid_A_Star::~Hybrid_A_Star()
   if (a_star_planner_) {
     delete a_star_planner_;
   }
-}
-
-void Hybrid_A_Star::setDownsampleLeafSize(double leaf_size)
-{
-  if (!std::isfinite(leaf_size) || leaf_size < 0.0) {
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] Ignoring invalid downsample leaf size: %.3f", leaf_size);
-    return;
-  }
-
-  if (std::abs(hybrid_downsample_leaf_size_ - leaf_size) <= 1e-9) {
-    return;
-  }
-
-  hybrid_downsample_leaf_size_ = leaf_size;
-
-  // GlobalPlanner configures the leaf size immediately after constructing this
-  // object.  The constructor has already built the initial cloud, so changing
-  // the parameter must rebuild here; otherwise every non-default value is
-  // silently ignored for the lifetime of this planner instance.
-  rebuildHybridCloud();
-}
-
-void Hybrid_A_Star::setReferencePlanningTime(double seconds)
-{
-  if (!std::isfinite(seconds) || seconds <= 0.0) {
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] Ignoring invalid reference planning budget: %.3f s", seconds);
-    return;
-  }
-  reference_planning_time_ = seconds;
-}
-
-void Hybrid_A_Star::setMaxPlanningTime(double seconds)
-{
-  if (!std::isfinite(seconds) || seconds < 0.0) {
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] Ignoring invalid main planning budget: %.3f s "
-      "(use 0 for no deadline)", seconds);
-    return;
-  }
-  max_planning_time_ = seconds;
-}
-
-void Hybrid_A_Star::setHeuristicWeight(double weight)
-{
-  if (!std::isfinite(weight) || weight < 1.0) {
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] Ignoring invalid heuristic weight: %.3f (must be >= 1.0)", weight);
-    return;
-  }
-  heuristic_weight_ = weight;
-}
-
-void Hybrid_A_Star::setCancelChecker(CancelChecker checker)
-{
-  cancel_checker_ = std::move(checker);
-}
-
-void Hybrid_A_Star::setEdgeValidator(EdgeValidator validator)
-{
-  edge_validator_ = std::move(validator);
-}
-
-void Hybrid_A_Star::setTurnValidator(TurnValidator validator)
-{
-  turn_validator_ = std::move(validator);
-}
-
-void Hybrid_A_Star::setGoalConnectorValidator(
-    GoalConnectorValidator validator)
-{
-  goal_connector_validator_ = std::move(validator);
 }
 
 void Hybrid_A_Star::updatePlanground(pcl::PointCloud<pcl::PointXYZI>::Ptr new_planground)
@@ -227,53 +145,102 @@ void Hybrid_A_Star::rebuildHybridCloud()
   pc_hybrid_->clear();
   is_from_planground_.clear();
 
-  // Downsample the secondary ground cloud before calculating its distance to
-  // planground.  The former order calculated 143k nearest-neighbour distances,
-  // copied those points into the hybrid cloud, then discarded about 102k of
-  // them.  The voxel centroid is the point A* actually uses, so calculating
-  // its exact distance afterwards is both cheaper and more representative.
-  pcl::PointCloud<pcl::PointXYZI>::Ptr planning_ground = pc_ground_;
-  if (hybrid_downsample_leaf_size_ > 0.0 && pc_ground_->size() > 1000) {
-    auto downsampled_ground =
-      pcl::PointCloud<pcl::PointXYZI>::Ptr(
-        new pcl::PointCloud<pcl::PointXYZI>());
-    pcl::VoxelGrid<pcl::PointXYZI> voxel_grid;
-    voxel_grid.setInputCloud(pc_ground_);
-    voxel_grid.setLeafSize(
-      hybrid_downsample_leaf_size_,
-      hybrid_downsample_leaf_size_,
-      hybrid_downsample_leaf_size_);
-    voxel_grid.filter(*downsampled_ground);
-    planning_ground = downsampled_ground;
-
-    RCLCPP_INFO(
-      perception_ros_->get_logger(),
-      "[Hybrid] Downsampled ground before cost assignment: %lu -> %lu "
-      "points (leaf=%.3f), planground preserved: %lu points",
-      pc_ground_->size(), planning_ground->size(),
-      hybrid_downsample_leaf_size_, pc_planground_->size());
-  }
-
-  pc_hybrid_->reserve(pc_planground_->size() + planning_ground->size());
-  is_from_planground_.reserve(
-    pc_planground_->size() + planning_ground->size());
-
-  // Phase 1: preserve every preferred fill_footprint point.
-  for (const auto& source_point : pc_planground_->points) {
-    pcl::PointXYZI pt = source_point;
+  // Phase 1: Add ALL planground points with zero cost
+  for (size_t i = 0; i < pc_planground_->size(); ++i) {
+    pcl::PointXYZI pt = pc_planground_->points[i];
     pt.intensity = 0.0f;
     pc_hybrid_->push_back(pt);
     is_from_planground_.push_back(true);
   }
 
-  // Phase 2: append the coarser ground bridge nodes. Their intensity remains
-  // the same distance-to-fill cost contract used by planOnHybrid().
-  for (const auto& source_point : planning_ground->points) {
-    pcl::PointXYZI pt = source_point;
-    const double dist_to_planground = distanceToNearestPlanground(pt);
+  // Phase 2: Add ALL ground points with distance-to-planground placeholder
+  for (size_t i = 0; i < pc_ground_->size(); ++i) {
+    pcl::PointXYZI pt = pc_ground_->points[i];
+    double dist_to_planground = distanceToNearestPlanground(pt);
     pt.intensity = static_cast<float>(dist_to_planground);
     pc_hybrid_->push_back(pt);
     is_from_planground_.push_back(false);
+  }
+
+  // Phase 3: Downsample ONLY the ground portion of the hybrid cloud
+  // Preserve ALL planground points at their original density to maintain
+  // the planground's advantage as the preferred planning surface.
+  // Only downsample ground points to reduce computational cost.
+  if (hybrid_downsample_leaf_size_ > 0.0 && pc_ground_->size() > 1000) {
+    // CRITICAL FIX: Verify that is_from_planground_ is in sync with pc_hybrid_
+    // Before downsampling, ensure the sizes match
+    if (is_from_planground_.size() != pc_hybrid_->size()) {
+      RCLCPP_WARN(perception_ros_->get_logger(),
+        "[Hybrid] Size mismatch before downsampling: is_from_planground_=%lu, pc_hybrid_=%lu. Rebuilding source tracking.",
+        is_from_planground_.size(), pc_hybrid_->size());
+      // Rebuild is_from_planground_ from scratch
+      is_from_planground_.clear();
+      for (size_t i = 0; i < pc_planground_->size() && i < pc_hybrid_->size(); ++i) {
+        is_from_planground_.push_back(true);
+      }
+      for (size_t i = pc_planground_->size(); i < pc_hybrid_->size(); ++i) {
+        is_from_planground_.push_back(false);
+      }
+    }
+
+    // Extract ground points from hybrid cloud
+    pcl::PointCloud<pcl::PointXYZI>::Ptr ground_only(new pcl::PointCloud<pcl::PointXYZI>);
+    std::vector<size_t> ground_indices;
+    for (size_t i = pc_planground_->size(); i < pc_hybrid_->size(); ++i) {
+      ground_only->push_back(pc_hybrid_->points[i]);
+      ground_indices.push_back(i);
+    }
+
+    // Downsample ground points
+    pcl::PointCloud<pcl::PointXYZI>::Ptr downsampled_ground(new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::VoxelGrid<pcl::PointXYZI> voxel_grid;
+    voxel_grid.setInputCloud(ground_only);
+    voxel_grid.setLeafSize(hybrid_downsample_leaf_size_, hybrid_downsample_leaf_size_, hybrid_downsample_leaf_size_);
+    voxel_grid.filter(*downsampled_ground);
+
+    // Map downsampled ground points back to source tracking
+    pcl::KdTreeFLANN<pcl::PointXYZI> kdtree_ground_original;
+    kdtree_ground_original.setInputCloud(ground_only);
+
+    std::vector<bool> downsampled_source;
+    for (size_t i = 0; i < downsampled_ground->size(); ++i) {
+      std::vector<int> nearest_idx(1);
+      std::vector<float> nearest_dist(1);
+      kdtree_ground_original.nearestKSearch(downsampled_ground->points[i], 1, nearest_idx, nearest_dist);
+      if (nearest_idx[0] >= 0 && static_cast<size_t>(nearest_idx[0]) < ground_indices.size()) {
+        size_t original_idx = ground_indices[nearest_idx[0]];
+        if (original_idx < is_from_planground_.size()) {
+          downsampled_source.push_back(is_from_planground_[original_idx]);
+        } else {
+          downsampled_source.push_back(false);
+        }
+      } else {
+        downsampled_source.push_back(false);
+      }
+    }
+
+    // Rebuild hybrid cloud: planground points (preserved) + downsampled ground points
+    pcl::PointCloud<pcl::PointXYZI>::Ptr new_hybrid(new pcl::PointCloud<pcl::PointXYZI>);
+    std::vector<bool> new_source;
+
+    // Add all planground points (preserved at original density)
+    for (size_t i = 0; i < pc_planground_->size(); ++i) {
+      new_hybrid->push_back(pc_hybrid_->points[i]);
+      new_source.push_back(true);
+    }
+
+    // Add downsampled ground points
+    for (size_t i = 0; i < downsampled_ground->size(); ++i) {
+      new_hybrid->push_back(downsampled_ground->points[i]);
+      new_source.push_back(false);
+    }
+
+    *pc_hybrid_ = *new_hybrid;
+    is_from_planground_ = new_source;
+
+    RCLCPP_INFO(perception_ros_->get_logger(),
+      "[Hybrid] Downsampled ground: %lu -> %lu points (leaf=%.3f), planground preserved: %lu points",
+      ground_only->size(), downsampled_ground->size(), hybrid_downsample_leaf_size_, pc_planground_->size());
   }
 
   // CRITICAL FIX: Ensure is_from_planground_ is always in sync with pc_hybrid_
@@ -286,15 +253,15 @@ void Hybrid_A_Star::rebuildHybridCloud()
       is_from_planground_.push_back(i < pc_planground_->size());
     }
   }
-  
+
   kdtree_hybrid_->setInputCloud(pc_hybrid_);
-  
+
   RCLCPP_INFO(perception_ros_->get_logger(),
     "[Hybrid] Rebuilt hybrid cloud: %lu points (%lu planground + %lu ground)",
-    pc_hybrid_->size(), pc_planground_->size(), planning_ground->size());
+    pc_hybrid_->size(), pc_planground_->size(), pc_ground_->size());
 }
 
-double Hybrid_A_Star::calculatePathLength(const std::vector<unsigned int>& path, 
+double Hybrid_A_Star::calculatePathLength(const std::vector<unsigned int>& path,
                                            pcl::PointCloud<pcl::PointXYZI>::Ptr cloud)
 {
   if (path.size() < 2) return 0.0;
@@ -323,7 +290,7 @@ double Hybrid_A_Star::distanceToNearestPlanground(const pcl::PointXYZI& pt)
   return std::numeric_limits<double>::max();
 }
 
-double Hybrid_A_Star::calculateGroundCost(double dist_to_planground, 
+double Hybrid_A_Star::calculateGroundCost(double dist_to_planground,
                                            double planground_path_length,
                                            double straight_line_distance)
 {
@@ -382,14 +349,14 @@ double Hybrid_A_Star::calculateGroundCost(double dist_to_planground,
   // - detour_balance_factor_lower_bound_: 0.5 (绕路比平衡因子下限)
   // - detour_balance_factor_upper_bound_: 3.0 (绕路比平衡因子上限)
   //===========================================================================
-  
+
   // Step 1: 计算基础代价 - 基于距离planground的距离
   // 使用二次函数，使靠近planground的地面点代价低，远离的代价高
   // v24: planground_bias_从10.0提高到15.0，进一步提高地面点基础代价
   // 确保规划主体在planground上，只有planground确实严重绕路时才考虑走地面
   double ratio = dist_to_planground / max_ground_bridge_length_;
   double base_cost = planground_bias_ * (1.0 + ratio * ratio);
-  
+
   // Step 2: 计算绕路比平衡因子
   // detour_ratio = planground路径长度 / 直线距离
   // 使用平滑的指数函数，避免极端值
@@ -408,13 +375,13 @@ double Hybrid_A_Star::calculateGroundCost(double dist_to_planground,
   // 即使planground严重绕路，地面代价也不应降得太低
   // 当planground路径很直时，地面代价大幅升高
   double detour_ratio = planground_path_length / (straight_line_distance + 0.0001);
-  
+
   // 使用平滑的指数函数
   // k = 0.5 使过渡平滑，避免极端调整
   double k = 0.5;
   double detour_balance_factor = std::exp(k * (detour_ratio_threshold_ - detour_ratio));
   detour_balance_factor = std::max(detour_balance_factor_lower_bound_, std::min(detour_balance_factor_upper_bound_, detour_balance_factor));
-  
+
   // Step 3: 计算距离平衡因子
   // 核心思想：根据起点到终点的直线距离调整地面代价
   // - 短距离 (straight_line_distance < distance_balance_threshold_):
@@ -426,7 +393,7 @@ double Hybrid_A_Star::calculateGroundCost(double dist_to_planground,
   // 更多路径被视为"长距离"，避免绕路
   double distance_balance_factor = 1.0 + 0.5 * std::tanh((straight_line_distance - distance_balance_threshold_) / distance_balance_threshold_);
   distance_balance_factor = std::max(0.5, std::min(1.5, distance_balance_factor));
-  
+
   // Step 4: 距离惩罚 - 当距离planground超过阈值时，代价急剧上升
   // 这确保规划器不会走太远的地面路径
   // 使用指数函数，使超过阈值后代价急剧上升
@@ -438,7 +405,7 @@ double Hybrid_A_Star::calculateGroundCost(double dist_to_planground,
     double excess_ratio = (dist_to_planground - max_ground_bridge_length_) / max_ground_bridge_length_;
     distance_penalty = std::exp(excess_ratio * 2.0);
   }
-  
+
   // Step 5: 计算最终代价
   // 最终代价 = 基础代价 * 绕路比平衡因子 * 距离平衡因子 * 距离惩罚
   // 其中：
@@ -479,35 +446,35 @@ double Hybrid_A_Star::calculateEdgePenalty(const pcl::PointXYZI& pt)
   // - High penalty for points near edges (few neighbors, low density_ratio)
   // - Low penalty for points in dense areas (many neighbors, high density_ratio)
   // - Smooth transition controlled by edge_penalty_falloff_rate_
-  
+
   if (edge_penalty_weight_ <= 0.0 || edge_penalty_radius_ <= 0.0) {
     return 0.0;
   }
-  
+
   // Count neighbors within the search radius
   std::vector<int> neighbor_indices;
   std::vector<float> neighbor_distances;
   int num_neighbors = kdtree_ground_->radiusSearch(pt, edge_penalty_radius_, neighbor_indices, neighbor_distances);
-  
+
   // Subtract 1 to exclude the point itself
   if (num_neighbors > 0) {
     num_neighbors--;
   }
-  
+
   // Estimate expected density: for a well-populated area with leaf_size=0.15,
   // we expect roughly (radius/leaf_size)^3 points in 3D, or (radius/leaf_size)^2 in 2D
   // Use a conservative estimate: at least 10 neighbors means "not an edge"
   const double MIN_NEIGHBORS_FOR_SAFE = 10.0;
-  
+
   // density_ratio: 0.0 = edge (no neighbors), 1.0+ = safe area (many neighbors)
   double density_ratio = static_cast<double>(num_neighbors) / MIN_NEIGHBORS_FOR_SAFE;
-  
+
   // Compute edge penalty using exponential falloff
   // When density_ratio = 0 (edge): penalty = edge_penalty_weight_
   // When density_ratio = 1 (safe): penalty = edge_penalty_weight_ * exp(-falloff_rate)
   // When density_ratio >> 1 (dense): penalty ≈ 0
   double edge_penalty = edge_penalty_weight_ * std::exp(-edge_penalty_falloff_rate_ * density_ratio);
-  
+
   return edge_penalty;
 
 }
@@ -517,108 +484,61 @@ bool Hybrid_A_Star::planOnPlangroundOnly(const pcl::PointXYZI& start_pose,
                                            double& path_length,
                                            std::vector<unsigned int>* path_out)
 {
-  if (path_out) {
-    path_out->clear();
-  }
-
-  const double straight_line_distance = straightLineDistance(start_pose, goal_pose);
   if (pc_planground_->size() < 2) {
-    path_length = straight_line_distance;
+    path_length = straightLineDistance(start_pose, goal_pose);
     return false;
   }
-  
+
   std::vector<int> start_idx(1), goal_idx(1);
   std::vector<float> start_dist(1), goal_dist(1);
-  
+
   pcl::PointXYZI search_pt;
   search_pt.x = start_pose.x;
   search_pt.y = start_pose.y;
   search_pt.z = start_pose.z;
   search_pt.intensity = 0.0f;
-  
+
   if (kdtree_planground_->nearestKSearch(search_pt, 1, start_idx, start_dist) == 0) {
-    path_length = straight_line_distance;
+    path_length = straightLineDistance(start_pose, goal_pose);
     return false;
   }
-  
+
   search_pt.x = goal_pose.x;
   search_pt.y = goal_pose.y;
   search_pt.z = goal_pose.z;
-  
+
   if (kdtree_planground_->nearestKSearch(search_pt, 1, goal_idx, goal_dist) == 0) {
-    path_length = straight_line_distance;
+    path_length = straightLineDistance(start_pose, goal_pose);
     return false;
   }
-  if (
-      goal_dist[0] < 0.0f ||
-      std::sqrt(static_cast<double>(goal_dist[0])) >
-          max_ground_bridge_length_)
-  {
-    path_length = straight_line_distance;
-    RCLCPP_INFO(
-      perception_ros_->get_logger(),
-      "[Hybrid] Skip planground-only reference: requested goal is %.3fm "
-      "from fill_footprint (limit %.3fm).",
-      goal_dist[0] >= 0.0f
-          ? std::sqrt(static_cast<double>(goal_dist[0]))
-          : std::numeric_limits<double>::infinity(),
-      max_ground_bridge_length_);
-    return false;
-  }
-  
+
   A_Star_on_Graph planground_planner(pc_planground_, perception_ros_, a_star_expanding_radius_);
   planground_planner.setupTurningWeight(turning_weight_);
-  planground_planner.setMaxPlanningTime(reference_planning_time_);
-  planground_planner.setHeuristicWeight(heuristic_weight_);
-  planground_planner.setCancelChecker(cancel_checker_);
-  planground_planner.setUsePerceptionCosts(false);
-  // fill_footprint is already the preferred traversable centre surface.
-  // Running the full double-circle ground probe for every candidate edge
-  // makes even a weighted reference search spend most of its budget checking
-  // nodes that never belong to the result.  Validate the returned polyline
-  // once in planOnHybrid(); an invalid reference simply falls through to the
-  // fully constrained Hybrid search.
+  planground_planner.setupBacktrackingWeight(backtracking_weight_);
+  planground_planner.setupGoalDirectnessWeight(goal_directness_weight_);
 
   std::vector<unsigned int> planground_path;
   planground_planner.getPath(static_cast<unsigned int>(start_idx[0]),
                               static_cast<unsigned int>(goal_idx[0]),
                               planground_path);
 
-  if (planground_planner.wasCancelled()) {
-    path_length = straight_line_distance;
-    RCLCPP_INFO(perception_ros_->get_logger(), "[Hybrid] Planground reference cancelled");
-    return false;
-  }
-
-  if (planground_planner.wasTimedOut()) {
-    // A reference timeout is not a planning failure.  Preserve the legacy
-    // ratio=1 behavior so an expensive/disconnected planground graph cannot
-    // consume the main hybrid search budget.
-    path_length = straight_line_distance;
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] Planground reference timed out after %.3f s; using straight-line detour ratio",
-      reference_planning_time_);
-    return false;
-  }
-  
   if (planground_path.empty()) {
-    path_length = straight_line_distance;
+    path_length = straightLineDistance(start_pose, goal_pose);
     return false;
   }
 
   if (path_out) {
     *path_out = planground_path;
   }
-  
+
   path_length = calculatePathLength(planground_path, pc_planground_);
-  
+
   RCLCPP_INFO(perception_ros_->get_logger(),
     "[Hybrid] Planground-only path: %lu nodes, length=%.2f, straight=%.2f, detour_ratio=%.2f",
-    planground_path.size(), path_length, 
-    straight_line_distance,
-    path_length / (straight_line_distance + 0.0001));
-  
+    planground_path.size(), path_length,
+    straightLineDistance(start_pose, goal_pose),
+    path_length / (straightLineDistance(start_pose, goal_pose) + 0.0001));
+
   return true;
 }
 
@@ -652,68 +572,13 @@ unsigned int Hybrid_A_Star::addStartPoseToHybrid(const pcl::PointXYZI& start_pos
   return start_idx;
 }
 
-unsigned int Hybrid_A_Star::ensureGoalInHybrid(const pcl::PointXYZI& goal_pose, 
+unsigned int Hybrid_A_Star::ensureGoalInHybrid(const pcl::PointXYZI& goal_pose,
                                                  bool goal_on_ground,
                                                  unsigned int ground_goal_idx)
 {
-  (void)goal_on_ground;
-  (void)ground_goal_idx;
-  exact_goal_connector_target_.reset();
-
-  if (goal_connector_validator_) {
-    std::vector<int> indices;
-    std::vector<float> squared_distances;
-    pcl::PointXYZI search_point = goal_pose;
-    search_point.intensity = 0.0f;
-    const double connector_radius =
-      std::max(0.01, max_ground_bridge_length_);
-    if (kdtree_hybrid_->radiusSearch(
-          search_point, connector_radius, indices, squared_distances) <= 0) {
-      RCLCPP_WARN(
-        perception_ros_->get_logger(),
-        "[Hybrid] No cloud point lies within %.3fm of the exact goal.",
-        connector_radius);
-      return static_cast<unsigned int>(pc_hybrid_->size());
-    }
-
-    for (std::size_t candidate_number = 0;
-         candidate_number < indices.size(); ++candidate_number) {
-      const int index = indices[candidate_number];
-      if (index < 0 ||
-          static_cast<std::size_t>(index) >= pc_hybrid_->size()) {
-        continue;
-      }
-      const auto& candidate =
-        pc_hybrid_->points[static_cast<std::size_t>(index)];
-      if (!goal_connector_validator_(candidate, goal_pose)) {
-        continue;
-      }
-      const unsigned int hybrid_goal_idx =
-        static_cast<unsigned int>(index);
-      pc_hybrid_->points[hybrid_goal_idx].intensity = 0.0f;
-      exact_goal_connector_target_ = goal_pose;
-      RCLCPP_INFO(
-        perception_ros_->get_logger(),
-        "[Hybrid] Selected validated exact-goal approach at %.3fm "
-        "(candidate %lu/%lu).",
-        std::sqrt(std::max(
-          0.0f,
-          squared_distances[candidate_number])),
-        candidate_number + 1,
-        indices.size());
-      return hybrid_goal_idx;
-    }
-
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] No nearby cloud point has a ground-safe connector and "
-      "terminal-yaw sweep into the exact goal.");
-    return static_cast<unsigned int>(pc_hybrid_->size());
-  }
-
   unsigned int hybrid_goal_idx;
   if (!findNearestInHybrid(goal_pose, hybrid_goal_idx)) {
-    return static_cast<unsigned int>(pc_hybrid_->size());
+    return 0;
   }
   pc_hybrid_->points[hybrid_goal_idx].intensity = 0.0f;
   return hybrid_goal_idx;
@@ -724,12 +589,9 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
 {
   path.clear();
 
-  if (pc_hybrid_->size() < 2 ||
-      hybrid_start_idx >= pc_hybrid_->size() ||
-      hybrid_goal_idx >= pc_hybrid_->size()) {
+  if (pc_hybrid_->size() < 2) {
     RCLCPP_WARN(perception_ros_->get_logger(),
-      "[Hybrid] Invalid planning request: cloud=%lu, start=%u, goal=%u",
-      pc_hybrid_->size(), hybrid_start_idx, hybrid_goal_idx);
+      "[Hybrid] Hybrid cloud too small (%lu) for planning", pc_hybrid_->size());
     return false;
   }
 
@@ -740,79 +602,18 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
   // Compute straight-line distance
   double straight_line_distance = straightLineDistance(start_pose, goal_pose);
 
-  // Plan on planground-only once to get both the detour ratio and a connected
-  // fallback.  Keeping the path here avoids the former third A* pass when the
-  // main hybrid search fails or reaches its deadline.
+  // Plan on planground-only to get reference path length for detour ratio
   double planground_path_length = straight_line_distance;
-  std::vector<unsigned int> reference_path;
-  const bool reference_path_available = planOnPlangroundOnly(
-    start_pose, goal_pose, planground_path_length, &reference_path);
+  std::vector<unsigned int> planground_reference_path;
+  bool has_planground_reference = planOnPlangroundOnly(
+    start_pose, goal_pose, planground_path_length, &planground_reference_path);
 
-  if (cancel_checker_ && cancel_checker_()) {
-    RCLCPP_INFO(perception_ros_->get_logger(),
-      "[Hybrid] Planning cancelled after planground reference search");
-    return false;
-  }
-
-  // Prefer the connected fill_footprint route when it passes the exact same
-  // continuous ground-footprint validator used by the main search.  This is
-  // both safer and much cheaper than probing the footprint on every discarded
-  // reference-search candidate.  The hybrid cloud preserves planground as its
-  // prefix, so these indices remain valid after inserting the exact start.
-  if (reference_path_available && !reference_path.empty()) {
-    bool reference_valid = std::all_of(
-      reference_path.begin(), reference_path.end(),
-      [this](unsigned int index) {
-        return index < pc_planground_->size() &&
-               index < pc_hybrid_->size() &&
-               index < is_from_planground_.size() &&
-               is_from_planground_[index];
-      });
-
-    if (reference_valid && edge_validator_) {
-      for (size_t index = 1; index < reference_path.size(); ++index) {
-        if (!edge_validator_(
-              pc_hybrid_->points[reference_path[index - 1]],
-              pc_hybrid_->points[reference_path[index]])) {
-          reference_valid = false;
-          break;
-        }
-      }
-    }
-
-    if (reference_valid && reference_path.front() != hybrid_start_idx) {
-      reference_valid =
-        hybrid_start_idx < pc_hybrid_->size() &&
-        (!edge_validator_ ||
-         edge_validator_(
-           pc_hybrid_->points[hybrid_start_idx],
-           pc_hybrid_->points[reference_path.front()]));
-      if (reference_valid) {
-        reference_path.insert(reference_path.begin(), hybrid_start_idx);
-      }
-    }
-
-    if (reference_valid) {
-      path = std::move(reference_path);
-      RCLCPP_INFO(
-        perception_ros_->get_logger(),
-        "[Hybrid] Using validated fill_footprint reference directly: %lu nodes",
-        path.size());
-      return true;
-    }
-
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] fill_footprint reference failed full-footprint validation; "
-      "falling through to constrained Hybrid search");
-  }
-  
   double detour_ratio = planground_path_length / (straight_line_distance + 0.0001);
-  
+
   RCLCPP_INFO(perception_ros_->get_logger(),
     "[Hybrid] Detour analysis: straight=%.2f, planground_path=%.2f, ratio=%.2f, threshold=%.2f",
     straight_line_distance, planground_path_length, detour_ratio, detour_ratio_threshold_);
-  
+
   // CRITICAL FIX: Ensure is_from_planground_ is in sync with pc_hybrid_ before iterating
   if (is_from_planground_.size() != pc_hybrid_->size()) {
     RCLCPP_ERROR(perception_ros_->get_logger(),
@@ -823,20 +624,15 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
       is_from_planground_.push_back(i < pc_planground_->size());
     }
   }
-  
+
   // Update ground point intensities with actual cost based on detour ratio and edge penalty
   int ground_points_updated = 0;
   int edge_penalty_applied = 0;
   for (size_t i = 0; i < pc_hybrid_->size(); ++i) {
-    if ((i & 0x3ffU) == 0U && cancel_checker_ && cancel_checker_()) {
-      RCLCPP_INFO(perception_ros_->get_logger(),
-        "[Hybrid] Planning cancelled while updating hybrid costs");
-      return false;
-    }
     if (i < is_from_planground_.size() && !is_from_planground_[i]) {
       double dist_to_planground = static_cast<double>(pc_hybrid_->points[i].intensity);
       double ground_cost = calculateGroundCost(dist_to_planground, planground_path_length, straight_line_distance);
-      
+
       // v25: Apply edge penalty to discourage planning near cloud boundaries
       // Points near the edge of the ground cloud (low local density) get additional cost
       double edge_penalty = calculateEdgePenalty(pc_hybrid_->points[i]);
@@ -844,40 +640,40 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
         ground_cost += edge_penalty;
         edge_penalty_applied++;
       }
-      
+
       pc_hybrid_->points[i].intensity = static_cast<float>(ground_cost);
       ground_points_updated++;
     }
   }
-  
+
   // v20关键修复: 更新地面点intensity后，必须重建kdtree
   kdtree_hybrid_->setInputCloud(pc_hybrid_);
-  
+
   RCLCPP_INFO(perception_ros_->get_logger(),
     "[Hybrid] Planning on hybrid cloud: %lu points (%d ground updated, %d with edge penalty), "
     "detour_ratio=%.2f, threshold=%.2f",
     pc_hybrid_->size(), ground_points_updated, edge_penalty_applied,
     detour_ratio, detour_ratio_threshold_);
 
-  
+
   // Check if start pose has enough neighbors
   std::vector<int> start_neighbors;
   std::vector<float> start_neighbor_distances;
-  kdtree_hybrid_->radiusSearch(pc_hybrid_->points[hybrid_start_idx], 
-                                a_star_expanding_radius_, 
+  kdtree_hybrid_->radiusSearch(pc_hybrid_->points[hybrid_start_idx],
+                                a_star_expanding_radius_,
                                 start_neighbors, start_neighbor_distances);
-  
+
   start_neighbors.erase(
     std::remove(start_neighbors.begin(), start_neighbors.end(), static_cast<int>(hybrid_start_idx)),
     start_neighbors.end());
-  
+
   unsigned int actual_start_idx = hybrid_start_idx;
   // A start node only needs one valid edge to enter the graph. Treating a
   // single neighbor as isolated discards the real robot pose unnecessarily.
   if (start_neighbors.empty()) {
     // Save goal position before any cloud modification
     pcl::PointXYZI goal_position = pc_hybrid_->points[hybrid_goal_idx];
-    
+
     // If start pose was added (it's the last point), remove it first
     bool start_was_added = false;
     if (hybrid_start_idx == pc_hybrid_->size() - 1) {
@@ -886,7 +682,7 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
       start_was_added = true;
       kdtree_hybrid_->setInputCloud(pc_hybrid_);
     }
-    
+
     // CRITICAL FIX: After removing the start point, the hybrid_goal_idx may be invalid
     // because the point cloud size decreased by 1. Always re-find the goal position
     // in the modified cloud to ensure correct index.
@@ -900,11 +696,11 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
     if (kdtree_hybrid_->nearestKSearch(goal_search_pt, 1, goal_idx, goal_dist) > 0 && goal_idx[0] >= 0) {
       hybrid_goal_idx = static_cast<unsigned int>(goal_idx[0]);
     } else {
-      RCLCPP_WARN(perception_ros_->get_logger(), 
+      RCLCPP_WARN(perception_ros_->get_logger(),
         "[Hybrid] Cannot re-find goal in hybrid cloud after start removal");
       return false;
     }
-    
+
     std::vector<int> nearest_start(1);
     std::vector<float> nearest_start_dist(1);
     pcl::PointXYZI search_pt;
@@ -913,20 +709,20 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
     search_pt.z = start_pose.z;
     search_pt.intensity = 0.0f;
     kdtree_hybrid_->nearestKSearch(search_pt, 1, nearest_start, nearest_start_dist);
-    
+
     if (nearest_start[0] >= 0) {
       actual_start_idx = static_cast<unsigned int>(nearest_start[0]);
       pc_hybrid_->points[actual_start_idx].intensity = 0.0f;
-      RCLCPP_WARN(perception_ros_->get_logger(), 
+      RCLCPP_WARN(perception_ros_->get_logger(),
         "[Hybrid] Start pose isolated (neighbors=%lu), using nearest cloud point idx=%u (dist=%.3f)",
         start_neighbors.size(), actual_start_idx, std::sqrt(nearest_start_dist[0]));
     } else {
-      RCLCPP_WARN(perception_ros_->get_logger(), 
+      RCLCPP_WARN(perception_ros_->get_logger(),
         "[Hybrid] Cannot find any nearest point in hybrid cloud for start pose");
       return false;
     }
   }
-  
+
   // CRITICAL FIX: Validate indices before creating A* planner to prevent segfault
   if (actual_start_idx >= pc_hybrid_->size() || hybrid_goal_idx >= pc_hybrid_->size()) {
     RCLCPP_ERROR(perception_ros_->get_logger(),
@@ -934,262 +730,69 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
       actual_start_idx, pc_hybrid_->size(), hybrid_goal_idx, pc_hybrid_->size());
     return false;
   }
-  
+
   // Plan on the hybrid cloud using A*
   if (a_star_planner_) {
     delete a_star_planner_;
   }
-  
-  a_star_planner_ = new A_Star_on_Graph(pc_hybrid_, perception_ros_, a_star_expanding_radius_);
-  a_star_planner_->setupTurningWeight(turning_weight_);
-  a_star_planner_->setMaxPlanningTime(max_planning_time_);
-  a_star_planner_->setHeuristicWeight(heuristic_weight_);
-  a_star_planner_->setCancelChecker(cancel_checker_);
-  // The requested global-planning contract is ground/fill support only.
-  // Static/dynamic obstacle clearance is handled by SCAN's local planner;
-  // retaining perception dGraph here duplicated the 143k-point map lookup and
-  // delayed every global replan. Hybrid intensity and turning costs remain.
-  a_star_planner_->setUsePerceptionCosts(false);
-  // Full double-circle support checks are intentionally lazy.  Applying the
-  // expensive footprint probe to every discarded A* candidate dominated
-  // Scene5 (tens of seconds).  Instead, find a candidate path, validate every
-  // directed edge with the exact same callback, block all rejected edges, and
-  // re-run A*.  A path is returned only after every edge passes; the finite
-  // graph is searched until success/exhaustion or a newer goal cancels it.
-  using DirectedEdgeKey = std::uint64_t;
-  struct TurnKey
-  {
-    unsigned int previous;
-    unsigned int pivot;
-    unsigned int next;
 
-    bool operator==(const TurnKey& other) const
-    {
-      return previous == other.previous &&
-             pivot == other.pivot &&
-             next == other.next;
-    }
-  };
-  struct TurnKeyHash
-  {
-    std::size_t operator()(const TurnKey& key) const
-    {
-      std::size_t seed = std::hash<unsigned int>{}(key.previous);
-      seed ^= std::hash<unsigned int>{}(key.pivot) +
-              0x9e3779b9U + (seed << 6U) + (seed >> 2U);
-      seed ^= std::hash<unsigned int>{}(key.next) +
-              0x9e3779b9U + (seed << 6U) + (seed >> 2U);
-      return seed;
-    }
-  };
-  const auto edge_key = [](unsigned int from, unsigned int to) {
-      return (static_cast<DirectedEdgeKey>(from) << 32U) |
-             static_cast<DirectedEdgeKey>(to);
-    };
-  std::unordered_set<DirectedEdgeKey> blocked_edges;
-  std::unordered_map<DirectedEdgeKey, bool> checked_edges;
-  std::unordered_map<TurnKey, bool, TurnKeyHash> checked_turns;
-  a_star_planner_->setIndexEdgeValidator(
-    [&blocked_edges, &edge_key](unsigned int from, unsigned int to) {
-      return blocked_edges.find(edge_key(from, to)) == blocked_edges.end();
-    });
+		  a_star_planner_ = new A_Star_on_Graph(pc_hybrid_, perception_ros_, a_star_expanding_radius_);
+		  a_star_planner_->setupTurningWeight(turning_weight_);
+		  a_star_planner_->setupBacktrackingWeight(backtracking_weight_);
+		  a_star_planner_->setupGoalDirectnessWeight(goal_directness_weight_);
+		  a_star_planner_->setupHybridGroundTransitionPenalties(
+		    planground_exit_penalty_, ground_step_penalty_);
 
-  size_t lazy_rounds = 0;
-  size_t footprint_checks = 0;
-  size_t footprint_rejections = 0;
-  size_t turn_checks = 0;
-  size_t turn_rejections = 0;
-  double footprint_check_seconds = 0.0;
-  bool main_timed_out = false;
-  while (true) {
-    ++lazy_rounds;
-    std::vector<unsigned int> candidate_path;
-    a_star_planner_->getPath(
-      actual_start_idx, hybrid_goal_idx, candidate_path);
-    main_timed_out = main_timed_out || a_star_planner_->wasTimedOut();
-
-    if (a_star_planner_->wasCancelled() ||
-        (cancel_checker_ && cancel_checker_())) {
-      path.clear();
-      RCLCPP_INFO(
-        perception_ros_->get_logger(), "[Hybrid] Main hybrid A* cancelled");
-      return false;
-    }
-    if (candidate_path.empty()) {
-      path.clear();
-      break;
-    }
-
-    bool candidate_valid = true;
-    size_t newly_blocked = 0;
-    for (size_t index = 1; index < candidate_path.size(); ++index) {
-      if ((index & 0x3fU) == 0U &&
-          cancel_checker_ && cancel_checker_()) {
-        path.clear();
-        RCLCPP_INFO(
-          perception_ros_->get_logger(),
-          "[Hybrid] Main hybrid A* cancelled during footprint validation");
-        return false;
-      }
-
-      const unsigned int from = candidate_path[index - 1];
-      const unsigned int to = candidate_path[index];
-      const DirectedEdgeKey key = edge_key(from, to);
-      auto checked = checked_edges.find(key);
-      bool edge_valid = true;
-      if (checked != checked_edges.end()) {
-        edge_valid = checked->second;
-      } else if (edge_validator_) {
-        ++footprint_checks;
-        const auto check_started_at = std::chrono::steady_clock::now();
-        edge_valid = edge_validator_(
-          pc_hybrid_->points[from], pc_hybrid_->points[to]);
-        footprint_check_seconds += std::chrono::duration<double>(
-          std::chrono::steady_clock::now() - check_started_at).count();
-        checked_edges.emplace(key, edge_valid);
-        if (!edge_valid) {
-          ++footprint_rejections;
-        }
-      }
-
-      if (!edge_valid) {
-        candidate_valid = false;
-        if (blocked_edges.insert(key).second) {
-          ++newly_blocked;
-        }
-      }
-    }
-
-    // The graph itself has no heading state.  Two edges may therefore pass
-    // the B2 footprint check independently while their common vertex cannot
-    // support the intermediate headings needed to turn from one to the
-    // other.  Reject the incoming edge lazily so A* can approach the pivot
-    // from another direction or choose a wider place to turn.
-    if (candidate_valid && turn_validator_) {
-      for (size_t index = 1; index + 1 < candidate_path.size(); ++index) {
-        if ((index & 0x3fU) == 0U &&
-            cancel_checker_ && cancel_checker_()) {
-          path.clear();
-          RCLCPP_INFO(
-            perception_ros_->get_logger(),
-            "[Hybrid] Main hybrid A* cancelled during B2 turn validation");
-          return false;
-        }
-
-        const TurnKey key{
-          candidate_path[index - 1],
-          candidate_path[index],
-          candidate_path[index + 1]};
-        auto checked = checked_turns.find(key);
-        bool turn_valid = true;
-        if (checked != checked_turns.end()) {
-          turn_valid = checked->second;
-        } else {
-          ++turn_checks;
-          const auto check_started_at = std::chrono::steady_clock::now();
-          turn_valid = turn_validator_(
-            pc_hybrid_->points[key.previous],
-            pc_hybrid_->points[key.pivot],
-            pc_hybrid_->points[key.next]);
-          footprint_check_seconds += std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - check_started_at).count();
-          checked_turns.emplace(key, turn_valid);
-          if (!turn_valid) {
-            ++turn_rejections;
-          }
-        }
-
-        if (!turn_valid) {
-          candidate_valid = false;
-          const DirectedEdgeKey incoming =
-            edge_key(key.previous, key.pivot);
-          if (blocked_edges.insert(incoming).second) {
-            ++newly_blocked;
-          }
-        }
-      }
-
-      // The exact requested XY is appended after A* because it is not
-      // necessarily a point-cloud sample. Validate the last graph turn into
-      // that connector as well; otherwise a safe connector can still require
-      // an unsupported heading sweep at the selected approach point.
-      if (candidate_valid && exact_goal_connector_target_ &&
-          candidate_path.size() >= 2) {
-        const unsigned int previous =
-          candidate_path[candidate_path.size() - 2];
-        const unsigned int pivot = candidate_path.back();
-        ++turn_checks;
-        const auto check_started_at = std::chrono::steady_clock::now();
-        const bool turn_valid = turn_validator_(
-          pc_hybrid_->points[previous],
-          pc_hybrid_->points[pivot],
-          *exact_goal_connector_target_);
-        footprint_check_seconds += std::chrono::duration<double>(
-          std::chrono::steady_clock::now() - check_started_at).count();
-        if (!turn_valid) {
-          ++turn_rejections;
-          candidate_valid = false;
-          if (blocked_edges.insert(edge_key(previous, pivot)).second) {
-            ++newly_blocked;
-          }
-        }
-      }
-    }
-
-    if (candidate_valid) {
-      path = std::move(candidate_path);
-      RCLCPP_INFO(
-        perception_ros_->get_logger(),
-        "[Hybrid] Lazy footprint validation accepted round %lu: "
-        "path=%lu edge_checks=%lu edge_rejected=%lu "
-        "turn_checks=%lu turn_rejected=%lu check_time=%.3fs",
-        lazy_rounds, path.size(), footprint_checks,
-        footprint_rejections, turn_checks, turn_rejections,
-        footprint_check_seconds);
-      break;
-    }
-
-    RCLCPP_INFO(
-      perception_ros_->get_logger(),
-      "[Hybrid] Lazy footprint validation round %lu rejected %lu new "
-      "directed edges (path=%lu total_blocked=%lu edge_checks=%lu "
-      "turn_checks=%lu %.3fs)",
-      lazy_rounds, newly_blocked, candidate_path.size(),
-      blocked_edges.size(), footprint_checks, turn_checks,
-      footprint_check_seconds);
-    if (newly_blocked == 0) {
-      RCLCPP_ERROR(
-        perception_ros_->get_logger(),
-        "[Hybrid] Lazy validation made no progress; aborting safely");
-      path.clear();
-      break;
-    }
-  }
+	  a_star_planner_->getPath(actual_start_idx, hybrid_goal_idx, path);
 
   if (path.empty()) {
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] No fully ground-supported path found on hybrid cloud "
-      "(%s, rounds=%lu blocked_edges=%lu edge_checks=%lu turn_checks=%lu "
-      "%.3fs, "
-      "budget=%.2fs, expanding_radius=%.2f)",
-      main_timed_out ? "timeout" : "search exhausted",
-      lazy_rounds, blocked_edges.size(), footprint_checks,
-      turn_checks, footprint_check_seconds,
-      max_planning_time_, a_star_expanding_radius_);
+    const double start_to_planground = distanceToNearestPlanground(start_pose);
+    const double goal_to_planground = distanceToNearestPlanground(goal_pose);
+    if (start_to_planground <= 0.5 && goal_to_planground <= 0.5 &&
+        has_planground_reference && !planground_reference_path.empty()) {
+      path = planground_reference_path;
+      if (hybrid_start_idx < pc_hybrid_->size() &&
+          path.front() != hybrid_start_idx) {
+        path.insert(path.begin(), hybrid_start_idx);
+      }
+      RCLCPP_WARN(perception_ros_->get_logger(),
+        "[Hybrid] Hybrid A* failed; using connected planground fallback: "
+        "%lu nodes, start_offset=%.3f, goal_offset=%.3f",
+        path.size(), start_to_planground, goal_to_planground);
+      return true;
+    }
+    RCLCPP_WARN(perception_ros_->get_logger(),
+      "[Hybrid] No path found on hybrid cloud (expanding_radius=%.2f)",
+      a_star_expanding_radius_);
     return false;
   }
 
-  if (!std::all_of(
-        path.begin(), path.end(),
-        [this](unsigned int index) {return index < pc_hybrid_->size();})) {
-    RCLCPP_ERROR(
-      perception_ros_->get_logger(),
-      "[Hybrid] A* returned an index outside the hybrid cloud; discarding path");
-    path.clear();
-    return false;
+  double path_length = calculatePathLength(path, pc_hybrid_);
+  const bool goal_is_planground =
+    hybrid_goal_idx < is_from_planground_.size() && is_from_planground_[hybrid_goal_idx];
+  if (goal_is_planground && has_planground_reference && !planground_reference_path.empty()) {
+    const double reference_length = std::max(straight_line_distance, 0.1);
+    const bool hybrid_detours_too_much =
+      path_length > reference_length * path_detour_limit_;
+    const bool planground_reference_is_shorter =
+      path_length > planground_path_length * planground_path_margin_;
+
+    if ((hybrid_detours_too_much && planground_path_length <= path_length) ||
+        planground_reference_is_shorter) {
+      path = planground_reference_path;
+      if (hybrid_start_idx < pc_hybrid_->size() &&
+          path.front() != hybrid_start_idx) {
+        path.insert(path.begin(), hybrid_start_idx);
+      }
+      path_length = calculatePathLength(path, pc_hybrid_);
+      RCLCPP_WARN(perception_ros_->get_logger(),
+        "[Hybrid] Replaced detouring hybrid path with shorter planground reference: "
+        "final=%.2f, planground=%.2f, straight=%.2f, detour_limit=%.2f, margin=%.2f",
+        path_length, planground_path_length, straight_line_distance,
+        path_detour_limit_, planground_path_margin_);
+    }
   }
-  
+
   // Analyze the hybrid path
   int ground_nodes = 0;
   for (size_t i = 0; i < path.size(); ++i) {
@@ -1197,11 +800,11 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
       ground_nodes++;
     }
   }
-  
-  RCLCPP_INFO(perception_ros_->get_logger(), 
-    "[Hybrid] Path found on hybrid cloud: %lu nodes (%d ground), path length=%.2f",
-    path.size(), ground_nodes, calculatePathLength(path, pc_hybrid_));
-  
+
+	  RCLCPP_INFO(perception_ros_->get_logger(),
+	    "[Hybrid] Path found on hybrid cloud: %lu nodes (%d ground), path length=%.2f",
+	    path.size(), ground_nodes, path_length);
+
   return true;
 }
 
@@ -1212,17 +815,17 @@ bool Hybrid_A_Star::planOnHybrid(unsigned int hybrid_start_idx, unsigned int hyb
 void Hybrid_A_Star::getPath(unsigned int start, unsigned int goal, std::vector<unsigned int>& path)
 {
   path.clear();
-  
+
   if (start >= pc_planground_->size() || goal >= pc_planground_->size()) {
     RCLCPP_WARN(perception_ros_->get_logger(),
       "[Hybrid] Invalid start (%u) or goal (%u) index (planground size=%lu)",
       start, goal, pc_planground_->size());
     return;
   }
-  
+
   pcl::PointXYZI start_pose = pc_planground_->points[start];
   pcl::PointXYZI goal_pose = pc_planground_->points[goal];
-  
+
   // Find corresponding indices in hybrid cloud
   unsigned int hybrid_start_idx, hybrid_goal_idx;
   if (!findNearestInHybrid(start_pose, hybrid_start_idx) ||
@@ -1231,11 +834,11 @@ void Hybrid_A_Star::getPath(unsigned int start, unsigned int goal, std::vector<u
       "[Hybrid] Cannot find start/goal in hybrid cloud");
     return;
   }
-  
+
   // Set start and goal intensities to zero (no cost)
   pc_hybrid_->points[hybrid_start_idx].intensity = 0.0f;
   pc_hybrid_->points[hybrid_goal_idx].intensity = 0.0f;
-  
+
   // Plan on hybrid cloud
   if (!planOnHybrid(hybrid_start_idx, hybrid_goal_idx, path)) {
     RCLCPP_WARN(perception_ros_->get_logger(),
@@ -1244,28 +847,28 @@ void Hybrid_A_Star::getPath(unsigned int start, unsigned int goal, std::vector<u
   }
 }
 
-void Hybrid_A_Star::getPathWithGroundGoal(unsigned int start, unsigned int ground_goal, 
+void Hybrid_A_Star::getPathWithGroundGoal(unsigned int start, unsigned int ground_goal,
                                            std::vector<unsigned int>& path)
 {
   path.clear();
-  
+
   if (start >= pc_planground_->size()) {
     RCLCPP_WARN(perception_ros_->get_logger(),
       "[Hybrid] Invalid start index (%u) for planground (size=%lu)",
       start, pc_planground_->size());
     return;
   }
-  
+
   if (ground_goal >= pc_ground_->size()) {
     RCLCPP_WARN(perception_ros_->get_logger(),
       "[Hybrid] Invalid ground goal index (%u) for ground (size=%lu)",
       ground_goal, pc_ground_->size());
     return;
   }
-  
+
   pcl::PointXYZI start_pose = pc_planground_->points[start];
   pcl::PointXYZI goal_pose = pc_ground_->points[ground_goal];
-  
+
   // Find start in hybrid cloud
   unsigned int hybrid_start_idx;
   if (!findNearestInHybrid(start_pose, hybrid_start_idx)) {
@@ -1273,18 +876,18 @@ void Hybrid_A_Star::getPathWithGroundGoal(unsigned int start, unsigned int groun
       "[Hybrid] Cannot find start in hybrid cloud");
     return;
   }
-  
+
   // Ensure goal is in hybrid cloud with zero cost
   unsigned int hybrid_goal_idx = ensureGoalInHybrid(goal_pose, true, ground_goal);
-  if (hybrid_goal_idx >= pc_hybrid_->size()) {
+  if (hybrid_goal_idx == 0) {
     RCLCPP_WARN(perception_ros_->get_logger(),
       "[Hybrid] Cannot find goal in hybrid cloud");
     return;
   }
-  
+
   // Set start intensity to zero
   pc_hybrid_->points[hybrid_start_idx].intensity = 0.0f;
-  
+
   // Plan on hybrid cloud
   if (!planOnHybrid(hybrid_start_idx, hybrid_goal_idx, path)) {
     RCLCPP_WARN(perception_ros_->get_logger(),
@@ -1297,17 +900,17 @@ void Hybrid_A_Star::getPathWithGroundStartAndGoal(unsigned int ground_start, uns
                                                     std::vector<unsigned int>& path)
 {
   path.clear();
-  
+
   if (ground_start >= pc_ground_->size() || ground_goal >= pc_ground_->size()) {
     RCLCPP_WARN(perception_ros_->get_logger(),
       "[Hybrid] Invalid ground start (%u) or goal (%u) index (ground size=%lu)",
       ground_start, ground_goal, pc_ground_->size());
     return;
   }
-  
+
   pcl::PointXYZI start_pose = pc_ground_->points[ground_start];
   pcl::PointXYZI goal_pose = pc_ground_->points[ground_goal];
-  
+
   // Find start and goal in hybrid cloud
   unsigned int hybrid_start_idx, hybrid_goal_idx;
   if (!findNearestInHybrid(start_pose, hybrid_start_idx) ||
@@ -1316,11 +919,11 @@ void Hybrid_A_Star::getPathWithGroundStartAndGoal(unsigned int ground_start, uns
       "[Hybrid] Cannot find start/goal in hybrid cloud");
     return;
   }
-  
+
   // Set start and goal intensities to zero
   pc_hybrid_->points[hybrid_start_idx].intensity = 0.0f;
   pc_hybrid_->points[hybrid_goal_idx].intensity = 0.0f;
-  
+
   // Plan on hybrid cloud
   if (!planOnHybrid(hybrid_start_idx, hybrid_goal_idx, path)) {
     RCLCPP_WARN(perception_ros_->get_logger(),
@@ -1331,8 +934,7 @@ void Hybrid_A_Star::getPathWithGroundStartAndGoal(unsigned int ground_start, uns
 
 void Hybrid_A_Star::getPathWithStartPose(const geometry_msgs::msg::PoseStamped& start_pose,
                                            unsigned int goal,
-                                           std::vector<unsigned int>& path,
-                                           const pcl::PointXYZI* exact_goal)
+                                           std::vector<unsigned int>& path)
 {
   path.clear();
 
@@ -1351,17 +953,14 @@ void Hybrid_A_Star::getPathWithStartPose(const geometry_msgs::msg::PoseStamped& 
   start_pt.intensity = 0.0f;
 
   // Get goal pose from planground
-  pcl::PointXYZI goal_pt =
-    exact_goal ? *exact_goal : pc_planground_->points[goal];
+  pcl::PointXYZI goal_pt = pc_planground_->points[goal];
 
   // Add start pose to hybrid cloud
   unsigned int hybrid_start_idx = addStartPoseToHybrid(start_pt);
 
-  // Choose the nearest position only for legacy callers. Navigation goals
-  // install a directional connector validator and search every nearby point.
-  const unsigned int hybrid_goal_idx =
-    ensureGoalInHybrid(goal_pt, false, 0);
-  if (hybrid_goal_idx >= pc_hybrid_->size()) {
+  // Find goal in hybrid cloud
+  unsigned int hybrid_goal_idx;
+  if (!findNearestInHybrid(goal_pt, hybrid_goal_idx)) {
     RCLCPP_WARN(perception_ros_->get_logger(),
       "[Hybrid] Cannot find goal in hybrid cloud");
     return;
@@ -1380,40 +979,38 @@ void Hybrid_A_Star::getPathWithStartPose(const geometry_msgs::msg::PoseStamped& 
 
 void Hybrid_A_Star::getPathWithStartPoseAndGroundGoal(const geometry_msgs::msg::PoseStamped& start_pose,
                                                         unsigned int ground_goal,
-                                                        std::vector<unsigned int>& path,
-                                                        const pcl::PointXYZI* exact_goal)
+                                                        std::vector<unsigned int>& path)
 {
   path.clear();
-  
+
   if (ground_goal >= pc_ground_->size()) {
     RCLCPP_WARN(perception_ros_->get_logger(),
       "[Hybrid] Invalid ground goal index (%u) for ground (size=%lu)",
       ground_goal, pc_ground_->size());
     return;
   }
-  
+
   // Convert start pose to point
   pcl::PointXYZI start_pt;
   start_pt.x = start_pose.pose.position.x;
   start_pt.y = start_pose.pose.position.y;
   start_pt.z = start_pose.pose.position.z;
   start_pt.intensity = 0.0f;
-  
+
   // Get goal pose from ground
-  pcl::PointXYZI goal_pt =
-    exact_goal ? *exact_goal : pc_ground_->points[ground_goal];
-  
+  pcl::PointXYZI goal_pt = pc_ground_->points[ground_goal];
+
   // Add start pose to hybrid cloud
   unsigned int hybrid_start_idx = addStartPoseToHybrid(start_pt);
-  
+
   // Ensure goal is in hybrid cloud with zero cost
   unsigned int hybrid_goal_idx = ensureGoalInHybrid(goal_pt, true, ground_goal);
-  if (hybrid_goal_idx >= pc_hybrid_->size()) {
+  if (hybrid_goal_idx == 0) {
     RCLCPP_WARN(perception_ros_->get_logger(),
       "[Hybrid] Cannot find goal in hybrid cloud");
     return;
   }
-  
+
   // Plan on hybrid cloud
   if (!planOnHybrid(hybrid_start_idx, hybrid_goal_idx, path)) {
     RCLCPP_WARN(perception_ros_->get_logger(),
@@ -1427,38 +1024,38 @@ void Hybrid_A_Star::simplifyPath(const std::vector<unsigned int>& path_indices,
                                   std::vector<unsigned int>& simplified_indices)
 {
   simplified_indices.clear();
-  
+
   if (path_indices.size() < 3) {
     simplified_indices = path_indices;
     return;
   }
-  
+
   // Line-of-sight shortcutting: remove intermediate nodes that can be shortcut
   simplified_indices.push_back(path_indices[0]);
-  
+
   size_t current = 0;
   for (size_t i = 1; i < path_indices.size() - 1; i++) {
     // Try to shortcut from current to i+1
     const pcl::PointXYZI& p1 = cloud->points[path_indices[current]];
     const pcl::PointXYZI& p2 = cloud->points[path_indices[i + 1]];
-    
+
     double dx = p2.x - p1.x;
     double dy = p2.y - p1.y;
     double dz = p2.z - p1.z;
     double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-    
+
     // Check if the straight line between p1 and p2 stays close to the original path
     // Sample points along the straight line and check distance to original path
     bool can_shortcut = true;
     int num_samples = std::max(10, static_cast<int>(dist / 0.2));
-    
+
     for (int s = 1; s < num_samples; s++) {
       double ratio = static_cast<double>(s) / num_samples;
-      
+
       // Point on the straight line
       double sx = p1.x + dx * ratio;
       double sy = p1.y + dy * ratio;
-      
+
       // Find the closest point on the original path segment (current to i+1)
       double min_path_dist = std::numeric_limits<double>::max();
       for (size_t j = current; j <= i + 1 && j < path_indices.size(); j++) {
@@ -1467,13 +1064,13 @@ void Hybrid_A_Star::simplifyPath(const std::vector<unsigned int>& path_indices,
         double d = std::sqrt((sx - px) * (sx - px) + (sy - py) * (sy - py));
         min_path_dist = std::min(min_path_dist, d);
       }
-      
+
       if (min_path_dist > 0.15) {
         can_shortcut = false;
         break;
       }
     }
-    
+
     if (!can_shortcut) {
       // Cannot shortcut, keep this node
       simplified_indices.push_back(path_indices[i]);
@@ -1481,12 +1078,12 @@ void Hybrid_A_Star::simplifyPath(const std::vector<unsigned int>& path_indices,
     }
     // else: skip this node (shortcut it)
   }
-  
+
   // Always add the last node
   if (simplified_indices.back() != path_indices.back()) {
     simplified_indices.push_back(path_indices.back());
   }
-  
+
   RCLCPP_DEBUG(perception_ros_->get_logger(),
     "[Hybrid] Path simplification: %lu -> %lu nodes",
     path_indices.size(), simplified_indices.size());
@@ -1495,10 +1092,10 @@ void Hybrid_A_Star::simplifyPath(const std::vector<unsigned int>& path_indices,
 /**
  * @brief Detect sharp corners in the path and insert additional control points
  *        to ensure the smoothed path follows the original path more closely.
- * 
+ *
  * This function identifies sharp turns (angle < threshold) and inserts extra
  * control points near the corner to prevent the spline from cutting the corner too much.
- * 
+ *
  * @param path_indices The simplified path indices
  * @param cloud The point cloud
  * @param corner_enhanced_indices Output: path indices with corner enhancement
@@ -1510,45 +1107,45 @@ void Hybrid_A_Star::enhanceCorners(const std::vector<unsigned int>& path_indices
                                     double angle_threshold_deg)
 {
   corner_enhanced_indices.clear();
-  
+
   if (path_indices.size() < 3) {
     corner_enhanced_indices = path_indices;
     return;
   }
-  
+
   double angle_threshold_rad = angle_threshold_deg * M_PI / 180.0;
-  
+
   // Always add the first point
   corner_enhanced_indices.push_back(path_indices[0]);
-  
+
   for (size_t i = 1; i < path_indices.size() - 1; i++) {
     const pcl::PointXYZI& prev = cloud->points[path_indices[i - 1]];
     const pcl::PointXYZI& curr = cloud->points[path_indices[i]];
     const pcl::PointXYZI& next = cloud->points[path_indices[i + 1]];
-    
+
     // Compute vectors
     double v1x = curr.x - prev.x;
     double v1y = curr.y - prev.y;
     double v2x = next.x - curr.x;
     double v2y = next.y - curr.y;
-    
+
     double len1 = std::sqrt(v1x * v1x + v1y * v1y);
     double len2 = std::sqrt(v2x * v2x + v2y * v2y);
-    
+
     if (len1 < 0.001 || len2 < 0.001) {
       corner_enhanced_indices.push_back(path_indices[i]);
       continue;
     }
-    
+
     // Normalize
     v1x /= len1; v1y /= len1;
     v2x /= len2; v2y /= len2;
-    
+
     // Compute angle between vectors (dot product)
     double dot = v1x * v2x + v1y * v2y;
     dot = std::max(-1.0, std::min(1.0, dot));
     double angle = std::acos(dot);
-    
+
     if (angle < angle_threshold_rad) {
       // Sharp corner detected - always insert the original point to preserve the corner
       corner_enhanced_indices.push_back(path_indices[i]);
@@ -1557,17 +1154,17 @@ void Hybrid_A_Star::enhanceCorners(const std::vector<unsigned int>& path_indices
       double dx = next.x - prev.x;
       double dy = next.y - prev.y;
       double dist_skip = std::sqrt(dx * dx + dy * dy);
-      
+
       if (dist_skip > 2.0) {
         corner_enhanced_indices.push_back(path_indices[i]);
       }
       // else: skip this point for smoother path
     }
   }
-  
+
   // Always add the last point
   corner_enhanced_indices.push_back(path_indices.back());
-  
+
   RCLCPP_DEBUG(perception_ros_->get_logger(),
     "[Hybrid] Corner enhancement: %lu -> %lu nodes (angle_threshold=%.1f deg)",
     path_indices.size(), corner_enhanced_indices.size(), angle_threshold_deg);
@@ -1580,11 +1177,12 @@ void Hybrid_A_Star::smoothPath(const std::vector<unsigned int>& raw_path_indices
                                 double smoothing_resolution)
 {
   smoothed_points.clear();
-  
+  smoothing_resolution = std::max(0.03, smoothing_resolution);
+
   if (raw_path_indices.size() < 2) {
     return;
   }
-  
+
   // Step 1: Simplify the path first
   std::vector<unsigned int> simplified_indices;
   simplifyPath(raw_path_indices, cloud, simplified_indices);
@@ -1658,7 +1256,7 @@ void Hybrid_A_Star::smoothPath(const std::vector<unsigned int>& raw_path_indices
     ctrl_y.swap(new_y);
     ctrl_z.swap(new_z);
   }
-  
+
   // Step 3: Apply Catmull-Rom spline interpolation for smooth path
   // Catmull-Rom is a cubic spline that passes through all control points
   // and produces a smooth, continuous curve.
@@ -1671,7 +1269,7 @@ void Hybrid_A_Star::smoothPath(const std::vector<unsigned int>& raw_path_indices
   //
   // Z is interpolated using the same Catmull-Rom spline to ensure smooth
   // height transitions along the path.
-  
+
   size_t n = ctrl_x.size();
   if (n == 2) {
     // Just two points: return a straight line
@@ -1680,18 +1278,19 @@ void Hybrid_A_Star::smoothPath(const std::vector<unsigned int>& raw_path_indices
     double dz = ctrl_z[1] - ctrl_z[0];
     double total_dist = std::sqrt(dx * dx + dy * dy);
     int num_steps = std::max(2, static_cast<int>(total_dist / smoothing_resolution));
-    
+
     for (int i = 0; i <= num_steps; i++) {
       double t = static_cast<double>(i) / num_steps;
-      smoothed_points.push_back(std::make_tuple(
-        ctrl_x[0] + dx * t,
-        ctrl_y[0] + dy * t,
-        ctrl_z[0] + dz * t
-      ));
-    }
-    return;
-  }
-  
+	    smoothed_points.push_back(std::make_tuple(
+	      ctrl_x[0] + dx * t,
+	      ctrl_y[0] + dy * t,
+	      ctrl_z[0] + dz * t
+	    ));
+	  }
+	  relaxSmoothedPoints(smoothed_points);
+	  return;
+	}
+
   // For Catmull-Rom, we need at least 3 control points
 
   // Calculate total path length for sampling
@@ -1809,12 +1408,66 @@ void Hybrid_A_Star::smoothPath(const std::vector<unsigned int>& raw_path_indices
     double Cy = lerp(B1y, B2y, t1, t2, tt);
     double Cz = lerp(B1z, B2z, t1, t2, tt);
 
-    smoothed_points.push_back(std::make_tuple(Cx, Cy, Cz));
+	    smoothed_points.push_back(std::make_tuple(Cx, Cy, Cz));
+	  }
+
+	  relaxSmoothedPoints(smoothed_points);
+
+	  RCLCPP_DEBUG(perception_ros_->get_logger(),
+	    "[Hybrid] Path smoothing (centripetal): %lu control points -> %lu smoothed points (resolution=%.2f)",
+	    simplified_indices.size(), smoothed_points.size(), smoothing_resolution);
+	}
+
+void Hybrid_A_Star::relaxSmoothedPoints(std::vector<std::tuple<double, double, double>>& points)
+{
+  if (output_smoothing_iterations_ <= 0 || points.size() < 3) {
+    return;
   }
 
-  RCLCPP_DEBUG(perception_ros_->get_logger(),
-    "[Hybrid] Path smoothing (centripetal): %lu control points -> %lu smoothed points (resolution=%.2f)",
-    simplified_indices.size(), smoothed_points.size(), smoothing_resolution);
+  const std::vector<std::tuple<double, double, double>> original_points = points;
+  for (int iteration = 0; iteration < output_smoothing_iterations_; ++iteration) {
+    std::vector<std::tuple<double, double, double>> next_points = points;
+
+    for (size_t i = 1; i + 1 < points.size(); ++i) {
+      const double ox = std::get<0>(original_points[i]);
+      const double oy = std::get<1>(original_points[i]);
+      const double oz = std::get<2>(original_points[i]);
+
+      const double x = std::get<0>(points[i]);
+      const double y = std::get<1>(points[i]);
+      const double z = std::get<2>(points[i]);
+
+      double nx = x
+        + output_smoothing_data_weight_ * (ox - x)
+        + output_smoothing_smooth_weight_
+          * (std::get<0>(points[i - 1]) + std::get<0>(points[i + 1]) - 2.0 * x);
+      double ny = y
+        + output_smoothing_data_weight_ * (oy - y)
+        + output_smoothing_smooth_weight_
+          * (std::get<1>(points[i - 1]) + std::get<1>(points[i + 1]) - 2.0 * y);
+      double nz = z
+        + output_smoothing_data_weight_ * (oz - z)
+        + output_smoothing_smooth_weight_
+          * (std::get<2>(points[i - 1]) + std::get<2>(points[i + 1]) - 2.0 * z);
+
+      if (output_smoothing_max_deviation_ > 0.0) {
+        const double dx = nx - ox;
+        const double dy = ny - oy;
+        const double dz = nz - oz;
+        const double deviation = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (deviation > output_smoothing_max_deviation_) {
+          const double scale = output_smoothing_max_deviation_ / deviation;
+          nx = ox + dx * scale;
+          ny = oy + dy * scale;
+          nz = oz + dz * scale;
+        }
+      }
+
+      next_points[i] = std::make_tuple(nx, ny, nz);
+    }
+
+    points.swap(next_points);
+  }
 }
 
 double Hybrid_A_Star::estimatePlangroundPathLength(const geometry_msgs::msg::PoseStamped& start_pose,
@@ -1825,12 +1478,12 @@ double Hybrid_A_Star::estimatePlangroundPathLength(const geometry_msgs::msg::Pos
   start_pt.y = start_pose.pose.position.y;
   start_pt.z = start_pose.pose.position.z;
   start_pt.intensity = 0.0f;
-  
+
   goal_pt.x = goal_pose.pose.position.x;
   goal_pt.y = goal_pose.pose.position.y;
   goal_pt.z = goal_pose.pose.position.z;
   goal_pt.intensity = 0.0f;
-  
+
   double path_length;
   planOnPlangroundOnly(start_pt, goal_pt, path_length);
   return path_length;
@@ -1842,200 +1495,78 @@ void Hybrid_A_Star::smoothPathToRosPath(const std::vector<unsigned int>& raw_pat
                                          const std::string& frame_id,
                                          double smoothing_resolution)
 {
-  using PathPoint = std::tuple<double, double, double>;
+  // First, get the smoothed 3D points (x, y, z) from Catmull-Rom spline
+  std::vector<std::tuple<double, double, double>> smoothed_points;
+  smoothPath(raw_path_indices, cloud, smoothed_points, smoothing_resolution);
 
-  ros_path.poses.clear();
   ros_path.header.frame_id = frame_id;
   ros_path.header.stamp = rclcpp::Time(0); // placeholder, will be set by caller
 
-  if (!cloud || raw_path_indices.empty() ||
-      !std::all_of(
-        raw_path_indices.begin(), raw_path_indices.end(),
-        [&cloud](unsigned int index) {return index < cloud->size();})) {
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] Cannot build ROS path: raw A* path contains an invalid cloud index");
-    return;
-  }
+  if (!smoothed_points.empty()) {
+    // Use smoothed path with Catmull-Rom interpolated Z values
+    for (size_t it = 0; it < smoothed_points.size(); it++) {
+      geometry_msgs::msg::PoseStamped pst;
+      pst.header = ros_path.header;
+      pst.pose.position.x = std::get<0>(smoothed_points[it]);
+      pst.pose.position.y = std::get<1>(smoothed_points[it]);
+      pst.pose.position.z = std::get<2>(smoothed_points[it]);
 
-  auto to_pcl_point = [](const PathPoint & point) {
-      pcl::PointXYZI pcl_point;
-      pcl_point.x = static_cast<float>(std::get<0>(point));
-      pcl_point.y = static_cast<float>(std::get<1>(point));
-      pcl_point.z = static_cast<float>(std::get<2>(point));
-      pcl_point.intensity = 0.0f;
-      return pcl_point;
-    };
-
-  auto points_are_finite = [](const std::vector<PathPoint> & points) {
-      return std::all_of(
-        points.begin(), points.end(),
-        [](const PathPoint & point) {
-          return std::isfinite(std::get<0>(point)) &&
-                 std::isfinite(std::get<1>(point)) &&
-                 std::isfinite(std::get<2>(point));
-        });
-    };
-
-  auto validate_edges = [this, &to_pcl_point](
-      const std::vector<PathPoint> & points) {
-      if (!edge_validator_ || points.size() < 2) {
-        return true;
+      if (it < smoothed_points.size() - 1) {
+        double vx = std::get<0>(smoothed_points[it+1]) - std::get<0>(smoothed_points[it]);
+        double vy = std::get<1>(smoothed_points[it+1]) - std::get<1>(smoothed_points[it]);
+        double yaw = atan2(vy, vx);
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, yaw);
+        pst.pose.orientation.x = q.getX();
+        pst.pose.orientation.y = q.getY();
+        pst.pose.orientation.z = q.getZ();
+        pst.pose.orientation.w = q.getW();
       }
-      for (size_t i = 1; i < points.size(); ++i) {
-        if (!edge_validator_(to_pcl_point(points[i - 1]), to_pcl_point(points[i]))) {
-          return false;
-        }
-      }
-      return true;
-    };
-
-  auto append_linear_segment = [this](
-      const pcl::PointXYZI & from, const pcl::PointXYZI & to,
-      double max_spacing, std::vector<PathPoint> & output) {
-      const double dx = static_cast<double>(to.x) - from.x;
-      const double dy = static_cast<double>(to.y) - from.y;
-      const double dz = static_cast<double>(to.z) - from.z;
-      const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-      // Validate the same complete graph edge that lazy A* accepted.  In
-      // particular, navigation installs a narrowly scoped exemption for the
-      // edge leaving the exact live start; splitting that edge first would
-      // make only its first sub-segment qualify for the exemption and could
-      // reject an otherwise accepted raw path during serialization.  The
-      // samples below are representation points, not new graph edges.  The
-      // final B2 path gate independently samples every published translation
-      // and either repairs the live-start maneuver or rejects it.
-      if (edge_validator_ && !edge_validator_(from, to)) {
-        return false;
-      }
-      const size_t segment_count = std::max<size_t>(
-        1U, static_cast<size_t>(std::ceil(distance / max_spacing)));
-      for (size_t step = 1; step <= segment_count; ++step) {
-        const double ratio = static_cast<double>(step) / segment_count;
-        pcl::PointXYZI sample;
-        sample.x = static_cast<float>(from.x + dx * ratio);
-        sample.y = static_cast<float>(from.y + dy * ratio);
-        sample.z = static_cast<float>(from.z + dz * ratio);
-        sample.intensity = 0.0f;
-        output.emplace_back(sample.x, sample.y, sample.z);
-      }
-      return true;
-    };
-
-  auto build_validated_raw_path = [&]() {
-      constexpr double kRawInterpolationSpacing = 0.1;
-      std::vector<PathPoint> raw_points;
-      const pcl::PointXYZI & first = cloud->points[raw_path_indices.front()];
-      raw_points.emplace_back(first.x, first.y, first.z);
-      for (size_t i = 1; i < raw_path_indices.size(); ++i) {
-        const pcl::PointXYZI & from = cloud->points[raw_path_indices[i - 1]];
-        const pcl::PointXYZI & to = cloud->points[raw_path_indices[i]];
-        if (!append_linear_segment(
-              from, to, kRawInterpolationSpacing, raw_points)) {
-          raw_points.clear();
-          break;
-        }
-      }
-      return raw_points;
-    };
-
-  // First try the existing shortcut + Catmull-Rom output.  A* validates its
-  // graph edges, but smoothing creates new edges and therefore must be checked
-  // independently with the exact same traversability rule.
-  std::vector<PathPoint> path_points;
-  smoothPath(raw_path_indices, cloud, path_points, smoothing_resolution);
-  if (!points_are_finite(path_points) || !validate_edges(path_points)) {
-    RCLCPP_WARN(
-      perception_ros_->get_logger(),
-      "[Hybrid] Smoothed path failed edge validation; falling back to raw A* polyline");
-    path_points.clear();
-  }
-
-  if (path_points.empty()) {
-    path_points = build_validated_raw_path();
-    if (path_points.empty()) {
-      RCLCPP_WARN(
-        perception_ros_->get_logger(),
-        "[Hybrid] Raw A* path also failed edge validation; publishing an empty path");
-      return;
+      ros_path.poses.push_back(pst);
     }
-  }
+  } else {
+    // Fallback to raw path
+    for (size_t it = 0; it < raw_path_indices.size(); it++) {
+      geometry_msgs::msg::PoseStamped pst;
+      pst.header = ros_path.header;
+      pst.pose.position.x = cloud->points[raw_path_indices[it]].x;
+      pst.pose.position.y = cloud->points[raw_path_indices[it]].y;
+      pst.pose.position.z = cloud->points[raw_path_indices[it]].z;
 
-  for (size_t i = 0; i < path_points.size(); ++i) {
-    geometry_msgs::msg::PoseStamped pose;
-    pose.header = ros_path.header;
-    pose.pose.position.x = std::get<0>(path_points[i]);
-    pose.pose.position.y = std::get<1>(path_points[i]);
-    pose.pose.position.z = std::get<2>(path_points[i]);
-
-    if (i + 1 < path_points.size()) {
-      const double yaw = std::atan2(
-        std::get<1>(path_points[i + 1]) - std::get<1>(path_points[i]),
-        std::get<0>(path_points[i + 1]) - std::get<0>(path_points[i]));
-      tf2::Quaternion q;
-      q.setRPY(0.0, 0.0, yaw);
-      pose.pose.orientation.x = q.getX();
-      pose.pose.orientation.y = q.getY();
-      pose.pose.orientation.z = q.getZ();
-      pose.pose.orientation.w = q.getW();
-    } else if (!ros_path.poses.empty()) {
-      pose.pose.orientation = ros_path.poses.back().pose.orientation;
-    } else {
-      pose.pose.orientation.w = 1.0;
+      if (it < raw_path_indices.size() - 1) {
+        double vx = cloud->points[raw_path_indices[it+1]].x - cloud->points[raw_path_indices[it]].x;
+        double vy = cloud->points[raw_path_indices[it+1]].y - cloud->points[raw_path_indices[it]].y;
+        double yaw = atan2(vy, vx);
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, yaw);
+        pst.pose.orientation.x = q.getX();
+        pst.pose.orientation.y = q.getY();
+        pst.pose.orientation.z = q.getZ();
+        pst.pose.orientation.w = q.getW();
+      }
+      ros_path.poses.push_back(pst);
     }
-    ros_path.poses.push_back(pose);
   }
 
   // A* searches on a point cloud, so its last node is the nearest traversable
-  // cloud sample rather than necessarily the exact requested waypoint. Append
-  // a short connector only after validating it. Keeping the cloud endpoint as
-  // its own pose avoids replacing a validated final edge with an unchecked
-  // shortcut from the preceding pose.
+  // cloud sample rather than necessarily the exact requested waypoint.  The
+  // completion monitor, however, measures against the requested waypoint.
+  // Restore a short, bounded goal connector so SCAN and the monitor use the
+  // same XY endpoint instead of stopping on opposite sides of their tolerance.
   if (!ros_path.poses.empty()) {
-    const auto & cloud_endpoint = ros_path.poses.back();
-    const double goal_dx =
-      goal_pose.pose.position.x - cloud_endpoint.pose.position.x;
-    const double goal_dy =
-      goal_pose.pose.position.y - cloud_endpoint.pose.position.y;
-    const double goal_dz =
-      goal_pose.pose.position.z - cloud_endpoint.pose.position.z;
-    const double goal_offset_xy = std::hypot(goal_dx, goal_dy);
-    const double goal_offset_3d =
-      std::sqrt(goal_dx * goal_dx + goal_dy * goal_dy + goal_dz * goal_dz);
+    auto &path_goal = ros_path.poses.back();
+    const double goal_dx = goal_pose.pose.position.x - path_goal.pose.position.x;
+    const double goal_dy = goal_pose.pose.position.y - path_goal.pose.position.y;
+    const double goal_offset = std::hypot(goal_dx, goal_dy);
     constexpr double kMaxExactGoalConnector = 0.25;
 
-    bool connector_valid = goal_offset_3d <= kMaxExactGoalConnector;
-    if (connector_valid && edge_validator_ && goal_offset_3d > 1e-6) {
-      pcl::PointXYZI from;
-      from.x = static_cast<float>(cloud_endpoint.pose.position.x);
-      from.y = static_cast<float>(cloud_endpoint.pose.position.y);
-      from.z = static_cast<float>(cloud_endpoint.pose.position.z);
-      from.intensity = 0.0f;
-      pcl::PointXYZI to;
-      to.x = static_cast<float>(goal_pose.pose.position.x);
-      to.y = static_cast<float>(goal_pose.pose.position.y);
-      to.z = static_cast<float>(goal_pose.pose.position.z);
-      to.intensity = 0.0f;
-      std::vector<PathPoint> connector_samples;
-      connector_valid = append_linear_segment(from, to, 0.1, connector_samples);
-    }
-
-    if (connector_valid) {
-      if (goal_offset_3d > 1e-6) {
-        geometry_msgs::msg::PoseStamped exact_goal;
-        exact_goal.header = ros_path.header;
-        exact_goal.pose.position = goal_pose.pose.position;
-        ros_path.poses.push_back(exact_goal);
-      } else {
-        ros_path.poses.back().pose.position = goal_pose.pose.position;
-      }
-
+    if (goal_offset <= kMaxExactGoalConnector) {
+      path_goal.pose.position = goal_pose.pose.position;
       if (ros_path.poses.size() >= 2) {
-        auto & previous = ros_path.poses[ros_path.poses.size() - 2];
-        auto & path_goal = ros_path.poses.back();
+        auto &previous = ros_path.poses[ros_path.poses.size() - 2];
         const double segment_yaw = std::atan2(
-          path_goal.pose.position.y - previous.pose.position.y,
-          path_goal.pose.position.x - previous.pose.position.x);
+            path_goal.pose.position.y - previous.pose.position.y,
+            path_goal.pose.position.x - previous.pose.position.x);
         tf2::Quaternion q;
         q.setRPY(0.0, 0.0, segment_yaw);
         previous.pose.orientation.x = q.getX();
@@ -2045,15 +1576,14 @@ void Hybrid_A_Star::smoothPathToRosPath(const std::vector<unsigned int>& raw_pat
         path_goal.pose.orientation = previous.pose.orientation;
       }
       RCLCPP_INFO(
-        perception_ros_->get_logger(),
-        "[Hybrid] Added validated exact-goal connector (cloud snap offset=%.3fm).",
-        goal_offset_3d);
+          perception_ros_->get_logger(),
+          "[Hybrid] Restored exact requested goal at path end (cloud snap offset=%.3fm).",
+          goal_offset);
     } else {
       RCLCPP_WARN(
-        perception_ros_->get_logger(),
-        "[Hybrid] Exact-goal connector rejected (xy=%.3fm, 3d=%.3fm); "
-        "keeping the validated cloud endpoint.",
-        goal_offset_xy, goal_offset_3d);
+          perception_ros_->get_logger(),
+          "[Hybrid] Requested goal is %.3fm from the planned cloud endpoint; keep the validated endpoint.",
+          goal_offset);
     }
   }
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <memory>
+#include <algorithm>
 #include <string>
 #include <chrono>
 #include <csignal>
@@ -24,8 +25,13 @@
 #include <tuple>
 #include <utility>
 #include <filesystem>
+#include <fstream>
+#include <limits>
 #include <vector>
+#include <unordered_map>
 
+#include "Eigen/Geometry"
+#include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/executors/single_threaded_executor.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
@@ -56,7 +62,7 @@ public:
     this->declare_parameter<float>("ground_local_layer_xy_bin_size", 0.5);
     this->declare_parameter<float>("ground_local_layer_radius", 3.0);
     this->declare_parameter<float>("ground_local_layer_z_tolerance", 0.2);
-    this->declare_parameter<float>("ground_local_layer_min_height", 0.6);
+    this->declare_parameter<float>("ground_local_layer_min_height", 0.45);
     this->declare_parameter<float>("ground_local_layer_max_height", 1.8);
     this->declare_parameter<int>("ground_local_layer_min_lower_points", 80);
     this->declare_parameter<float>("ground_local_layer_min_support_ratio", 0.75);
@@ -118,8 +124,8 @@ public:
     if (ground_local_layer_min_height_ < 0.0f) {
       RCLCPP_WARN(
         this->get_logger(),
-        "ground_local_layer_min_height 不能为负数，重置为 0.6m。");
-      ground_local_layer_min_height_ = 0.6f;
+        "ground_local_layer_min_height 不能为负数，重置为 0.45m。");
+      ground_local_layer_min_height_ = 0.45f;
     }
     if (ground_local_layer_max_height_ <= ground_local_layer_min_height_) {
       RCLCPP_WARN(
@@ -173,6 +179,10 @@ public:
       "base_footprint_fill_cloud", 10,
       std::bind(&SaveTerrainMapNode::baseFootprintFillCallback, this, std::placeholders::_1));
 
+    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+      "/lio/odom", 100,
+      std::bind(&SaveTerrainMapNode::odomCallback, this, std::placeholders::_1));
+
     // Service to trigger saving
     save_service_ = this->create_service<std_srvs::srv::Trigger>(
       "save_terrain_map",
@@ -207,6 +217,8 @@ public:
     accumulated_map_cloud_->clear();
     accumulated_ground_cloud_->clear();
     accumulated_base_footprint_fill_cloud_->clear();
+    accumulated_ground_timestamps_.clear();
+    accumulated_base_footprint_fill_timestamps_.clear();
     accumulated_ground_grid_index_.clear();
     accumulated_base_footprint_fill_grid_index_.clear();
   }
@@ -284,6 +296,7 @@ public:
     if (!ensureSaveDirectory()) {
       return;
     }
+    applyLoopCorrectionToAccumulatedClouds();
 
     const auto save_start = std::chrono::steady_clock::now();
     RCLCPP_INFO(
@@ -622,7 +635,11 @@ private:
         *accumulated_map_cloud_ += map_cloud;
       }
       accumulateCloudWithGroundXyDedup(
-        ground_cloud, accumulated_ground_cloud_, accumulated_ground_grid_index_);
+        ground_cloud,
+        rclcpp::Time(msg->header.stamp).seconds(),
+        accumulated_ground_cloud_,
+        accumulated_ground_timestamps_,
+        accumulated_ground_grid_index_);
     }
   }
 
@@ -633,7 +650,10 @@ private:
       pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>());
       pcl::fromROSMsg(*msg, *cloud);
       accumulateCloudWithGroundXyDedup(
-        *cloud, accumulated_base_footprint_fill_cloud_,
+        *cloud,
+        rclcpp::Time(msg->header.stamp).seconds(),
+        accumulated_base_footprint_fill_cloud_,
+        accumulated_base_footprint_fill_timestamps_,
         accumulated_base_footprint_fill_grid_index_);
     }
   }
@@ -662,11 +682,14 @@ private:
 
   void accumulateCloudWithGroundXyDedup(
     const pcl::PointCloud<pcl::PointXYZI> & src,
+    const double timestamp,
     const pcl::PointCloud<pcl::PointXYZI>::Ptr & dst,
+    std::vector<double> & timestamps,
     std::map<GridKey, std::size_t> & grid_index)
   {
     if (!ground_xy_dedup_) {
       *dst += src;
+      timestamps.insert(timestamps.end(), src.size(), timestamp);
       return;
     }
 
@@ -676,10 +699,403 @@ private:
       if (it == grid_index.end()) {
         grid_index[key] = dst->size();
         dst->push_back(point);
+        timestamps.push_back(timestamp);
       } else {
         dst->points[it->second] = point;
+        timestamps[it->second] = timestamp;
       }
     }
+  }
+
+  struct LoopCorrection
+  {
+    bool valid = false;
+    double candidate_timestamp = 0.0;
+    double deformation_start_timestamp = 0.0;
+    double end_timestamp = 0.0;
+    Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+  };
+
+  struct TimedPosition
+  {
+    double timestamp = 0.0;
+    Eigen::Vector3f position = Eigen::Vector3f::Zero();
+  };
+
+  struct PoseGraphCorrection
+  {
+    double timestamp = 0.0;
+    Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  };
+
+  using PoseGraphCorrectionVector = std::vector<
+    PoseGraphCorrection,
+    Eigen::aligned_allocator<PoseGraphCorrection>>;
+
+  void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(cloud_mutex_);
+    const double timestamp = rclcpp::Time(msg->header.stamp).seconds();
+    if (!std::isfinite(timestamp)) {
+      return;
+    }
+    const Eigen::Vector3f position(
+      static_cast<float>(msg->pose.pose.position.x),
+      static_cast<float>(msg->pose.pose.position.y),
+      static_cast<float>(msg->pose.pose.position.z));
+    if (!position.allFinite()) {
+      return;
+    }
+    if (!odom_positions_.empty() &&
+      timestamp <= odom_positions_.back().timestamp)
+    {
+      if (std::abs(timestamp - odom_positions_.back().timestamp) < 1e-9) {
+        odom_positions_.back().position = position;
+      }
+      return;
+    }
+    odom_positions_.push_back(TimedPosition{timestamp, position});
+  }
+
+  PoseGraphCorrectionVector loadPoseGraphCorrections() const
+  {
+    PoseGraphCorrectionVector corrections;
+    const std::string filename =
+      save_directory_ + "loop_pose_graph.txt";
+    std::ifstream input(filename);
+    if (!input.is_open()) {
+      return corrections;
+    }
+
+    std::string format;
+    std::getline(input, format);
+    if (format != "NAV_LIO_POSE_GRAPH_V1") {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "忽略格式不支持的位姿图轨迹: %s",
+        filename.c_str());
+      return {};
+    }
+    std::size_t count = 0;
+    input >> count;
+    if (!input.good() || count < 2 || count > 1000000) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "忽略数量无效的位姿图轨迹: %s",
+        filename.c_str());
+      return {};
+    }
+    corrections.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      PoseGraphCorrection sample;
+      input >> sample.timestamp;
+      for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+          input >> sample.transform(row, col);
+        }
+      }
+      if (!input.good() ||
+          !std::isfinite(sample.timestamp) ||
+          !sample.transform.allFinite() ||
+          (!corrections.empty() &&
+           sample.timestamp <= corrections.back().timestamp)) {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "忽略内容无效的位姿图轨迹: %s",
+          filename.c_str());
+        return {};
+      }
+      corrections.push_back(sample);
+    }
+    return corrections;
+  }
+
+  Eigen::Matrix4f poseGraphCorrectionAt(
+    const PoseGraphCorrectionVector & corrections,
+    const double timestamp) const
+  {
+    const auto after = std::lower_bound(
+      corrections.begin(), corrections.end(), timestamp,
+      [](const PoseGraphCorrection & sample, const double value) {
+        return sample.timestamp < value;
+      });
+    if (after == corrections.begin()) {
+      return after->transform;
+    }
+    if (after == corrections.end()) {
+      return corrections.back().transform;
+    }
+    const auto before = after - 1;
+    const double interval =
+      after->timestamp - before->timestamp;
+    const float ratio = interval > 1e-9 ?
+      static_cast<float>(
+        (timestamp - before->timestamp) / interval) :
+      0.0f;
+    const float clamped_ratio =
+      std::max(0.0f, std::min(1.0f, ratio));
+    Eigen::Quaternionf before_rotation(
+      before->transform.block<3, 3>(0, 0));
+    Eigen::Quaternionf after_rotation(
+      after->transform.block<3, 3>(0, 0));
+    before_rotation.normalize();
+    after_rotation.normalize();
+
+    Eigen::Matrix4f interpolated =
+      Eigen::Matrix4f::Identity();
+    interpolated.block<3, 3>(0, 0) =
+      before_rotation.slerp(
+        clamped_ratio, after_rotation).toRotationMatrix();
+    interpolated.block<3, 1>(0, 3) =
+      before->transform.block<3, 1>(0, 3) +
+      clamped_ratio *
+      (after->transform.block<3, 1>(0, 3) -
+       before->transform.block<3, 1>(0, 3));
+    return interpolated;
+  }
+
+  bool applyPoseGraphCorrection(
+    pcl::PointCloud<pcl::PointXYZI> & cloud,
+    const std::vector<double> & timestamps,
+    const PoseGraphCorrectionVector & corrections)
+  {
+    if (cloud.size() != timestamps.size() ||
+        corrections.size() < 2) {
+      return false;
+    }
+    std::unordered_map<double, Eigen::Matrix4f>
+      correction_cache;
+    correction_cache.reserve(corrections.size());
+    for (std::size_t i = 0; i < cloud.size(); ++i) {
+      auto correction_it =
+        correction_cache.find(timestamps[i]);
+      if (correction_it == correction_cache.end()) {
+        correction_it = correction_cache.emplace(
+          timestamps[i],
+          poseGraphCorrectionAt(
+            corrections, timestamps[i])).first;
+      }
+      auto & point = cloud.points[i];
+      const Eigen::Vector3f corrected =
+        correction_it->second.block<3, 3>(0, 0) *
+        Eigen::Vector3f(point.x, point.y, point.z) +
+        correction_it->second.block<3, 1>(0, 3);
+      point.x = corrected.x();
+      point.y = corrected.y();
+      point.z = corrected.z();
+    }
+    return true;
+  }
+
+  LoopCorrection loadLoopCorrection() const
+  {
+    LoopCorrection correction;
+    const std::string filename = save_directory_ + "loop_correction.txt";
+    std::ifstream input(filename);
+    if (!input.is_open()) {
+      return correction;
+    }
+
+    std::string format;
+    std::getline(input, format);
+    if (format == "NAV_LIO_LOOP_CORRECTION_V1") {
+      input >> correction.candidate_timestamp >> correction.end_timestamp;
+      correction.deformation_start_timestamp =
+        correction.candidate_timestamp;
+    } else if (format == "NAV_LIO_LOOP_CORRECTION_V2") {
+      input >> correction.candidate_timestamp
+            >> correction.deformation_start_timestamp
+            >> correction.end_timestamp;
+    } else {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "忽略格式不支持的闭环校正元数据: %s",
+        filename.c_str());
+      return correction;
+    }
+
+    for (int row = 0; row < 4; ++row) {
+      for (int col = 0; col < 4; ++col) {
+        input >> correction.transform(row, col);
+      }
+    }
+    if (!input.good() ||
+        !std::isfinite(correction.candidate_timestamp) ||
+        !std::isfinite(correction.deformation_start_timestamp) ||
+        !std::isfinite(correction.end_timestamp) ||
+        correction.deformation_start_timestamp <
+          correction.candidate_timestamp ||
+        correction.deformation_start_timestamp >=
+          correction.end_timestamp ||
+        correction.end_timestamp <= correction.candidate_timestamp ||
+        !correction.transform.allFinite()) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "忽略内容无效的闭环校正元数据: %s",
+        filename.c_str());
+      return LoopCorrection{};
+    }
+
+    correction.valid = true;
+    return correction;
+  }
+
+  float loopCorrectionAlpha(
+    const LoopCorrection & correction,
+    const double timestamp) const
+  {
+    const double raw_alpha =
+      (timestamp - correction.deformation_start_timestamp) /
+      (correction.end_timestamp -
+       correction.deformation_start_timestamp);
+    return static_cast<float>(
+      std::max(0.0, std::min(1.0, raw_alpha)));
+  }
+
+  bool positionAt(
+    const double timestamp,
+    Eigen::Vector3f & position) const
+  {
+    if (odom_positions_.empty()) {
+      return false;
+    }
+    const auto after = std::lower_bound(
+      odom_positions_.begin(), odom_positions_.end(), timestamp,
+      [](const TimedPosition & sample, const double value) {
+        return sample.timestamp < value;
+      });
+    if (after == odom_positions_.begin()) {
+      position = after->position;
+      return true;
+    }
+    if (after == odom_positions_.end()) {
+      position = odom_positions_.back().position;
+      return true;
+    }
+    const auto before = after - 1;
+    const double interval = after->timestamp - before->timestamp;
+    const float ratio = interval > 1e-9 ?
+      static_cast<float>((timestamp - before->timestamp) / interval) : 0.0f;
+    position = before->position +
+      std::max(0.0f, std::min(1.0f, ratio)) *
+      (after->position - before->position);
+    return true;
+  }
+
+  bool applyLoopCorrection(
+    pcl::PointCloud<pcl::PointXYZI> & cloud,
+    const std::vector<double> & timestamps,
+    const LoopCorrection & correction)
+  {
+    if (cloud.size() != timestamps.size()) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "无法应用闭环校正：点数=%zu，时间戳数=%zu。",
+        cloud.size(), timestamps.size());
+      return false;
+    }
+
+    Eigen::Vector3f end_position;
+    if (!positionAt(correction.end_timestamp, end_position)) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "无法应用闭环校正：没有与 terrain 同步的 /lio/odom 轨迹。");
+      return false;
+    }
+    const Eigen::Vector3f corrected_end_position =
+      correction.transform.block<3, 3>(0, 0) * end_position +
+      correction.transform.block<3, 1>(0, 3);
+    const Eigen::Vector3f end_position_delta =
+      corrected_end_position - end_position;
+    Eigen::Quaternionf target_rotation(
+      correction.transform.block<3, 3>(0, 0));
+    target_rotation.normalize();
+
+    std::unordered_map<double, Eigen::Vector3f> pivot_cache;
+    pivot_cache.reserve(odom_positions_.size());
+    for (std::size_t i = 0; i < cloud.size(); ++i) {
+      auto & point = cloud.points[i];
+      auto pivot_it = pivot_cache.find(timestamps[i]);
+      if (pivot_it == pivot_cache.end()) {
+        Eigen::Vector3f pivot;
+        if (!positionAt(timestamps[i], pivot)) {
+          return false;
+        }
+        pivot_it = pivot_cache.emplace(timestamps[i], pivot).first;
+      }
+      const float alpha =
+        loopCorrectionAlpha(correction, timestamps[i]);
+      const Eigen::Quaternionf rotation =
+        Eigen::Quaternionf::Identity().slerp(alpha, target_rotation);
+      const Eigen::Vector3f original(point.x, point.y, point.z);
+      // Match SuperLIO's pose deformation: orientation correction is local
+      // around the sensor position; only the endpoint position residual is
+      // distributed over time. This preserves real ramp elevation.
+      const Eigen::Vector3f corrected =
+        rotation * (original - pivot_it->second) +
+        pivot_it->second + alpha * end_position_delta;
+      point.x = corrected.x();
+      point.y = corrected.y();
+      point.z = corrected.z();
+    }
+    return true;
+  }
+
+  void applyLoopCorrectionToAccumulatedClouds()
+  {
+    if (loop_correction_applied_) {
+      return;
+    }
+
+    const PoseGraphCorrectionVector pose_graph_corrections =
+      loadPoseGraphCorrections();
+    if (!pose_graph_corrections.empty()) {
+      const bool ground_ok = applyPoseGraphCorrection(
+        *accumulated_ground_cloud_,
+        accumulated_ground_timestamps_,
+        pose_graph_corrections);
+      const bool footprint_ok = applyPoseGraphCorrection(
+        *accumulated_base_footprint_fill_cloud_,
+        accumulated_base_footprint_fill_timestamps_,
+        pose_graph_corrections);
+      if (!ground_ok || !footprint_ok) {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "terrain 位姿图校正未完整应用，拒绝标记为已校正。");
+        return;
+      }
+      loop_correction_applied_ = true;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "已按优化后的关键帧位姿图重建 terrain/ground/footprint；Z 未锁定。");
+      return;
+    }
+
+    const LoopCorrection correction = loadLoopCorrection();
+    if (!correction.valid) {
+      return;
+    }
+
+    const bool ground_ok = applyLoopCorrection(
+      *accumulated_ground_cloud_,
+      accumulated_ground_timestamps_,
+      correction);
+    const bool footprint_ok = applyLoopCorrection(
+      *accumulated_base_footprint_fill_cloud_,
+      accumulated_base_footprint_fill_timestamps_,
+      correction);
+    if (!ground_ok || !footprint_ok) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "terrain 闭环校正未完整应用，拒绝标记为已校正。");
+      return;
+    }
+
+    loop_correction_applied_ = true;
+    RCLCPP_INFO(
+      this->get_logger(),
+      "已对 terrain/ground/footprint 应用与 map.pcd 相同的渐变 SE(3) 闭环校正；Z 未锁定。");
   }
 
   void saveServiceCallback(
@@ -694,6 +1110,7 @@ private:
       response->message = "创建保存目录失败。";
       return;
     }
+    applyLoopCorrectionToAccumulatedClouds();
 
     // Generate filename with timestamp
     auto now = std::chrono::system_clock::now();
@@ -827,6 +1244,7 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr terrain_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr base_footprint_fill_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_service_;
 
   std::string save_directory_;
@@ -855,8 +1273,12 @@ private:
   pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_map_cloud_;
   pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_ground_cloud_;
   pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_base_footprint_fill_cloud_;
+  std::vector<double> accumulated_ground_timestamps_;
+  std::vector<double> accumulated_base_footprint_fill_timestamps_;
   std::map<GridKey, std::size_t> accumulated_ground_grid_index_;
   std::map<GridKey, std::size_t> accumulated_base_footprint_fill_grid_index_;
+  std::vector<TimedPosition> odom_positions_;
+  bool loop_correction_applied_ = false;
 
   // 标记 main() 中是否已经保存过地图，避免析构函数重复保存
   bool saved_in_main_ = false;

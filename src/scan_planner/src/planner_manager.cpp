@@ -1,6 +1,5 @@
 // #include <fstream>
 #include <plan_manage/planner_manager.h>
-#include <plan_manage/reference_guide.h>
 #include <thread>
 
 namespace scan_planner
@@ -67,7 +66,18 @@ namespace scan_planner
     getParam(nh, "manager/feasibility_tolerance", pp_.feasibility_tolerance_, 0.0);
     getParam(nh, "manager/control_points_distance", pp_.ctrl_pt_dist, -1.0);
     getParam(nh, "manager/planning_horizon", pp_.planning_horizon_, 5.0);
-    getParam(nh, "manager/planar_motion", planar_motion_, false);
+    getParam(nh, "manager/collision_check_corridor_radius", collision_check_corridor_radius_, 0.4);
+    getParam(nh, "manager/collision_check_z_tolerance", collision_check_z_tolerance_, 0.35);
+    getParam(nh, "manager/collision_check_z_tolerance_down", collision_check_z_tolerance_down_,
+             collision_check_z_tolerance_);
+    getParam(nh, "manager/collision_check_z_tolerance_up", collision_check_z_tolerance_up_,
+             collision_check_z_tolerance_);
+    getParam(nh, "manager/collision_check_start_clear_radius", collision_check_start_clear_radius_, 0.5);
+    collision_check_corridor_radius_ = std::max(0.0, collision_check_corridor_radius_);
+    collision_check_z_tolerance_ = std::max(0.0, collision_check_z_tolerance_);
+    collision_check_z_tolerance_down_ = std::max(0.0, collision_check_z_tolerance_down_);
+    collision_check_z_tolerance_up_ = std::max(0.0, collision_check_z_tolerance_up_);
+    collision_check_start_clear_radius_ = std::max(0.0, collision_check_start_clear_radius_);
 
     local_data_.traj_id_ = 0;
     grid_map_.reset(new GridMap);
@@ -88,11 +98,7 @@ namespace scan_planner
 
   bool SCANPlannerManager::reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel,
                                         Eigen::Vector3d start_acc, Eigen::Vector3d local_target_pt,
-                                        Eigen::Vector3d local_target_vel,
-                                        bool flag_polyInit,
-                                        bool flag_randomPolyTraj,
-                                        const std::vector<Eigen::Vector3d> *reference_guide,
-                                        bool allow_short_verified_recovery_leg)
+                                        Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
   {
 
     static int count = 0;
@@ -102,136 +108,109 @@ namespace scan_planner
     cout << "start: " << start_pt.transpose() << ", " << start_vel.transpose() << "\ngoal:" << local_target_pt.transpose() << ", " << local_target_vel.transpose()
          << endl;
 
-    const double minimum_plan_distance =
-        allow_short_verified_recovery_leg ? 0.05 : 0.20;
-    if ((start_pt - local_target_pt).norm() < minimum_plan_distance)
+    if ((start_pt - local_target_pt).norm() < 0.2)
     {
       cout << "Close to goal" << endl;
       continuous_failures_count_++;
       return false;
     }
 
-    rclcpp::Time t_start = node_->now();
+    const rclcpp::Time t_total_start = node_->now();
+    rclcpp::Time t_start = t_total_start;
     rclcpp::Duration t_init(0, 0), t_opt(0, 0), t_refine(0, 0);
+    rclcpp::Duration t_feasibility(0, 0), t_collision(0, 0);
 
     /*** STEP 1: INIT ***/
     double ts = (start_pt - local_target_pt).norm() > 0.1 ? pp_.ctrl_pt_dist / pp_.max_vel_ * 1.2 : pp_.ctrl_pt_dist / pp_.max_vel_ * 5; // pp_.ctrl_pt_dist / pp_.max_vel_ is too tense, and will surely exceed the acc/vel limits
+    if (!std::isfinite(ts) || ts <= 1e-4)
+    {
+      ROS_ERROR("Invalid B-spline initialization sample time ts=%f (ctrl_dist=%f max_vel=%f).",
+                ts, pp_.ctrl_pt_dist, pp_.max_vel_);
+      continuous_failures_count_++;
+      return false;
+    }
     vector<Eigen::Vector3d> point_set, start_end_derivatives;
     static bool flag_first_call = true, flag_force_polynomial = false;
     bool flag_regenerate = false;
-    bool using_reference_guide = false;
-    const bool have_reference_guide =
-        reference_guide != nullptr && reference_guide->size() >= 2;
     do
     {
       point_set.clear();
       start_end_derivatives.clear();
       flag_regenerate = false;
 
-      if (have_reference_guide ||
-          flag_first_call || flag_polyInit || flag_force_polynomial
-          /*|| ( start_pt - local_target_pt ).norm() < 1.0*/)
+      if (flag_first_call || flag_polyInit || flag_force_polynomial /*|| ( start_pt - local_target_pt ).norm() < 1.0*/) // Initial path generated from a min-snap traj by order.
       {
         flag_first_call = false;
         flag_force_polynomial = false;
-        using_reference_guide = have_reference_guide;
 
-        if (using_reference_guide)
+        PolynomialTraj gl_traj;
+
+        double dist = (start_pt - local_target_pt).norm();
+        double time = pow(pp_.max_vel_, 2) / pp_.max_acc_ > dist ? sqrt(dist / pp_.max_acc_) : (dist - pow(pp_.max_vel_, 2) / pp_.max_acc_) / pp_.max_vel_ + 2 * pp_.max_vel_ / pp_.max_acc_;
+
+        if (!flag_randomPolyTraj)
         {
-          const double max_guide_spacing =
-              std::min(0.20, std::max(0.05, pp_.ctrl_pt_dist * 0.5));
-          point_set = resampleReferenceGuide(
-              *reference_guide,
-              start_pt,
-              local_target_pt,
-              max_guide_spacing,
-              7);
-
-          double guide_length = 0.0;
-          for (size_t index = 1; index < point_set.size(); ++index)
-            guide_length +=
-                (point_set[index] - point_set[index - 1]).norm();
-          const double mean_spacing =
-              guide_length /
-              std::max<double>(1.0, point_set.size() - 1.0);
-          ts = std::max(
-              0.05,
-              mean_spacing / std::max(0.05, pp_.max_vel_) * 1.2);
-
-          start_end_derivatives.push_back(start_vel);
-          start_end_derivatives.push_back(local_target_vel);
-          start_end_derivatives.push_back(start_acc);
-          start_end_derivatives.push_back(Eigen::Vector3d::Zero());
+          gl_traj = PolynomialTraj::one_segment_traj_gen(start_pt, start_vel, start_acc, local_target_pt, local_target_vel, Eigen::Vector3d::Zero(), time);
         }
         else
         {
-
-          PolynomialTraj gl_traj;
-
-          double dist = (start_pt - local_target_pt).norm();
-          double time = pow(pp_.max_vel_, 2) / pp_.max_acc_ > dist ? sqrt(dist / pp_.max_acc_) : (dist - pow(pp_.max_vel_, 2) / pp_.max_acc_) / pp_.max_vel_ + 2 * pp_.max_vel_ / pp_.max_acc_;
-
-          if (!flag_randomPolyTraj)
-          {
-            gl_traj = PolynomialTraj::one_segment_traj_gen(start_pt, start_vel, start_acc, local_target_pt, local_target_vel, Eigen::Vector3d::Zero(), time);
-          }
-          else
-          {
-            Eigen::Vector3d horizon_dir = ((start_pt - local_target_pt).cross(Eigen::Vector3d(0, 0, 1))).normalized();
-            Eigen::Vector3d vertical_dir = ((start_pt - local_target_pt).cross(horizon_dir)).normalized();
-            Eigen::Vector3d vertical_perturbation = Eigen::Vector3d::Zero();
-            if (!planar_motion_)
-            {
-              vertical_perturbation =
-                  (((double)rand()) / RAND_MAX - 0.5) *
-                  (start_pt - local_target_pt).norm() * vertical_dir * 0.4 *
-                  (-0.978 / (continuous_failures_count_ + 0.989) + 0.989);
-            }
-            Eigen::Vector3d random_inserted_pt = (start_pt + local_target_pt) / 2 +
-                                                 (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * horizon_dir * 0.8 * (-0.978 / (continuous_failures_count_ + 0.989) + 0.989) +
-                                                 vertical_perturbation;
-            Eigen::MatrixXd pos(3, 3);
-            pos.col(0) = start_pt;
-            pos.col(1) = random_inserted_pt;
-            pos.col(2) = local_target_pt;
-            Eigen::VectorXd t(2);
-            t(0) = t(1) = time / 2;
-            gl_traj = PolynomialTraj::minSnapTraj(pos, start_vel, local_target_vel, start_acc, Eigen::Vector3d::Zero(), t);
-          }
-
-          double t;
-          bool flag_too_far;
-          ts *= 1.5; // ts will be divided by 1.5 in the next
-          do
-          {
-            ts /= 1.5;
-            point_set.clear();
-            flag_too_far = false;
-            Eigen::Vector3d last_pt = gl_traj.evaluate(0);
-            for (t = 0; t < time; t += ts)
-            {
-              Eigen::Vector3d pt = gl_traj.evaluate(t);
-              if ((last_pt - pt).norm() > pp_.ctrl_pt_dist * 1.5)
-              {
-                flag_too_far = true;
-                break;
-              }
-              last_pt = pt;
-              point_set.push_back(pt);
-            }
-          } while (flag_too_far || point_set.size() < 7); // To make sure the initial path has enough points.
-          t -= ts;
-          start_end_derivatives.push_back(gl_traj.evaluateVel(0));
-          start_end_derivatives.push_back(local_target_vel);
-          start_end_derivatives.push_back(gl_traj.evaluateAcc(0));
-          start_end_derivatives.push_back(gl_traj.evaluateAcc(t));
+          Eigen::Vector3d horizon_dir = ((start_pt - local_target_pt).cross(Eigen::Vector3d(0, 0, 1))).normalized();
+          Eigen::Vector3d vertical_dir = ((start_pt - local_target_pt).cross(horizon_dir)).normalized();
+          Eigen::Vector3d random_inserted_pt = (start_pt + local_target_pt) / 2 +
+                                               (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * horizon_dir * 0.8 * (-0.978 / (continuous_failures_count_ + 0.989) + 0.989) +
+                                               (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * vertical_dir * 0.4 * (-0.978 / (continuous_failures_count_ + 0.989) + 0.989);
+          Eigen::MatrixXd pos(3, 3);
+          pos.col(0) = start_pt;
+          pos.col(1) = random_inserted_pt;
+          pos.col(2) = local_target_pt;
+          Eigen::VectorXd t(2);
+          t(0) = t(1) = time / 2;
+          gl_traj = PolynomialTraj::minSnapTraj(pos, start_vel, local_target_vel, start_acc, Eigen::Vector3d::Zero(), t);
         }
+
+        double t;
+        bool flag_too_far;
+        ts *= 1.5; // ts will be divided by 1.5 in the next
+        int polynomial_resample_attempts = 0;
+        do
+        {
+          polynomial_resample_attempts++;
+          ts /= 1.5;
+          point_set.clear();
+          flag_too_far = false;
+          Eigen::Vector3d last_pt = gl_traj.evaluate(0);
+          for (t = 0; t < time; t += ts)
+          {
+            Eigen::Vector3d pt = gl_traj.evaluate(t);
+            if ((last_pt - pt).norm() > pp_.ctrl_pt_dist * 1.5)
+            {
+              flag_too_far = true;
+              break;
+            }
+            last_pt = pt;
+            point_set.push_back(pt);
+          }
+        } while ((flag_too_far || point_set.size() < 7) &&
+                 polynomial_resample_attempts < 48); // To make sure the initial path has enough points.
+        if (flag_too_far || point_set.size() < 7)
+        {
+          ROS_ERROR("Unable to sample polynomial initial path after %d attempts: points=%zu ts=%f too_far=%d.",
+                    polynomial_resample_attempts, point_set.size(), ts, flag_too_far);
+          continuous_failures_count_++;
+          return false;
+        }
+        t -= ts;
+        start_end_derivatives.push_back(gl_traj.evaluateVel(0));
+        start_end_derivatives.push_back(local_target_vel);
+        start_end_derivatives.push_back(gl_traj.evaluateAcc(0));
+        start_end_derivatives.push_back(gl_traj.evaluateAcc(t));
       }
       else // Initial path generated from previous trajectory.
       {
 
         double t;
         double t_cur = (node_->now() - local_data_.start_time_).seconds();
+        t_cur = std::max(0.0, std::min(t_cur, local_data_.duration_));
 
         vector<double> pseudo_arc_length;
         vector<Eigen::Vector3d> segment_point;
@@ -245,6 +224,27 @@ namespace scan_planner
           }
         }
         t -= ts;
+
+        // EmergencyStop() creates a stationary B-spline whose remaining arc
+        // length is exactly zero. Reusing that trajectory as an initial path
+        // can make the legacy arc-length resampler spin forever. A stopped
+        // trajectory carries no useful geometric information, so restart from
+        // a fresh polynomial at the frozen robot pose.
+        const double remaining_arc_length =
+            pseudo_arc_length.empty() ? 0.0 : pseudo_arc_length.back();
+        const double minimum_reusable_arc_length =
+            std::max(1e-3, pp_.ctrl_pt_dist * 0.05);
+        if (pseudo_arc_length.size() < 2 ||
+            segment_point.size() < 2 ||
+            !std::isfinite(remaining_arc_length) ||
+            remaining_arc_length < minimum_reusable_arc_length)
+        {
+          ROS_WARN("[SCAN replan] Remaining trajectory is degenerate: samples=%zu arc_length=%.6f threshold=%.6f; regenerate polynomial initial path.",
+                   segment_point.size(), remaining_arc_length, minimum_reusable_arc_length);
+          flag_force_polynomial = true;
+          flag_regenerate = true;
+          continue;
+        }
 
         double poly_time = (local_data_.position_traj_.evaluateDeBoorT(t) - local_target_pt).norm() / pp_.max_vel_ * 2;
         if (poly_time > ts)
@@ -270,91 +270,69 @@ namespace scan_planner
           }
         }
 
-        double sample_length = 0;
-        double cps_dist = pp_.ctrl_pt_dist * 1.5; // cps_dist will be divided by 1.5 in the next
-        size_t id = 0;
-        do
+        if (pseudo_arc_length.size() < 2 || segment_point.size() < 2 ||
+            !std::isfinite(pseudo_arc_length.back()) ||
+            pseudo_arc_length.back() < minimum_reusable_arc_length)
         {
-          cps_dist /= 1.5;
-          point_set.clear();
-          sample_length = 0;
-          id = 0;
-          while ((id <= pseudo_arc_length.size() - 2) && sample_length <= pseudo_arc_length.back())
-          {
-            if (sample_length >= pseudo_arc_length[id] && sample_length < pseudo_arc_length[id + 1])
-            {
-              point_set.push_back((sample_length - pseudo_arc_length[id]) / (pseudo_arc_length[id + 1] - pseudo_arc_length[id]) * segment_point[id + 1] +
-                                  (pseudo_arc_length[id + 1] - sample_length) / (pseudo_arc_length[id + 1] - pseudo_arc_length[id]) * segment_point[id]);
-              sample_length += cps_dist;
-            }
-            else
-              id++;
-          }
-          point_set.push_back(local_target_pt);
-        } while (point_set.size() < 7); // If the start point is very close to end point, this will help
-
-        start_end_derivatives.push_back(local_data_.velocity_traj_.evaluateDeBoorT(t_cur));
-        start_end_derivatives.push_back(local_target_vel);
-        start_end_derivatives.push_back(local_data_.acceleration_traj_.evaluateDeBoorT(t_cur));
-        start_end_derivatives.push_back(Eigen::Vector3d::Zero());
-
-        if (point_set.size() > pp_.planning_horizon_ / pp_.ctrl_pt_dist * 3) // The initial path is abnormally too long!
-        {
+          ROS_WARN("Previous trajectory has too few remaining samples; regenerate polynomial initial path.");
           flag_force_polynomial = true;
           flag_regenerate = true;
+        }
+        else
+        {
+          double sample_length = 0;
+          double cps_dist = pp_.ctrl_pt_dist * 1.5; // cps_dist will be divided by 1.5 in the next
+          size_t id = 0;
+          int previous_resample_attempts = 0;
+          do
+          {
+            previous_resample_attempts++;
+            cps_dist /= 1.5;
+            point_set.clear();
+            sample_length = 0;
+            id = 0;
+            while ((id + 1 < pseudo_arc_length.size()) && sample_length <= pseudo_arc_length.back())
+            {
+              const double segment_len = pseudo_arc_length[id + 1] - pseudo_arc_length[id];
+              if (sample_length >= pseudo_arc_length[id] && sample_length < pseudo_arc_length[id + 1] && segment_len > 1e-6)
+              {
+                point_set.push_back((sample_length - pseudo_arc_length[id]) / segment_len * segment_point[id + 1] +
+                                    (pseudo_arc_length[id + 1] - sample_length) / segment_len * segment_point[id]);
+                sample_length += cps_dist;
+              }
+              else
+                id++;
+            }
+            point_set.push_back(local_target_pt);
+          } while (point_set.size() < 7 && previous_resample_attempts < 48); // If the start point is very close to end point, this will help
+
+          if (point_set.size() < 7)
+          {
+            ROS_WARN("[SCAN replan] Previous-trajectory resampling did not converge after %d attempts: points=%zu arc_length=%.6f; regenerate polynomial initial path.",
+                     previous_resample_attempts, point_set.size(), pseudo_arc_length.back());
+            flag_force_polynomial = true;
+            flag_regenerate = true;
+            continue;
+          }
+
+          start_end_derivatives.push_back(local_data_.velocity_traj_.evaluateDeBoorT(t_cur));
+          start_end_derivatives.push_back(local_target_vel);
+          start_end_derivatives.push_back(local_data_.acceleration_traj_.evaluateDeBoorT(t_cur));
+          start_end_derivatives.push_back(Eigen::Vector3d::Zero());
+
+          if (point_set.size() > pp_.planning_horizon_ / pp_.ctrl_pt_dist * 3) // The initial path is abnormally too long!
+          {
+            flag_force_polynomial = true;
+            flag_regenerate = true;
+          }
         }
       }
     } while (flag_regenerate);
 
-    // The reference path already carries the terrain-following body height.
-    // Replacing it with a straight z interpolation would flatten ramps and can
-    // jump between floors. Legacy endpoint planning still needs its original
-    // linear z profile.
-    if (!using_reference_guide)
-      applyLinearZReference(point_set, start_pt(2), local_target_pt(2));
+    applyLinearZReference(point_set, start_pt(2), local_target_pt(2));
 
     Eigen::MatrixXd ctrl_pts;
     UniformBspline::parameterizeToBspline(ts, point_set, start_end_derivatives, ctrl_pts);
-
-    bool reference_is_free = using_reference_guide;
-    if (reference_is_free)
-    {
-      const double sample_step =
-          std::max(0.02, grid_map_->getResolution());
-      for (size_t index = 0;
-           reference_is_free && index + 1 < point_set.size();
-           ++index)
-      {
-        const Eigen::Vector3d delta =
-            point_set[index + 1] - point_set[index];
-        const double length = delta.norm();
-        const int samples = std::max(
-            1, static_cast<int>(std::ceil(length / sample_step)));
-        const double yaw = std::atan2(delta(1), delta(0));
-        for (int sample = 0; sample <= samples; ++sample)
-        {
-          const Eigen::Vector3d point =
-              point_set[index] +
-              (static_cast<double>(sample) /
-               static_cast<double>(samples)) *
-                  delta;
-          if (grid_map_->getInflateOccupancy(point, yaw) != 0)
-          {
-            reference_is_free = false;
-            break;
-          }
-        }
-      }
-    }
-
-    // In free space the lateral reference term prevents smoothness from
-    // turning an L-shaped verified ground route into its endpoint chord. If
-    // any obstacle occupies the guide, remove that term completely: local
-    // A*/rebound retains full authority to leave the global reference.
-    if (reference_is_free)
-      bspline_optimizer_rebound_->setReboundReference(point_set);
-    else
-      bspline_optimizer_rebound_->clearReboundReference();
 
     vector<vector<Eigen::Vector3d>> a_star_paths;
     a_star_paths = bspline_optimizer_rebound_->initControlPoints(ctrl_pts, true);
@@ -374,6 +352,17 @@ namespace scan_planner
     {
       // visualization_->displayOptimalList( ctrl_pts, vis_id );
       continuous_failures_count_++;
+      RCLCPP_WARN(
+          node_->get_logger(),
+          "[SCAN timing] reboundReplan failed stage=optimize total=%.3f init=%.3f optimize=%.3f "
+          "start=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f) poly_init=%d random_poly=%d.",
+          (node_->now() - t_total_start).seconds(),
+          t_init.seconds(),
+          (node_->now() - t_start).seconds(),
+          start_pt(0), start_pt(1), start_pt(2),
+          local_target_pt(0), local_target_pt(1), local_target_pt(2),
+          flag_polyInit,
+          flag_randomPolyTraj);
       return false;
     }
     //visualization_->displayOptimalList( ctrl_pts, vis_id );
@@ -397,10 +386,42 @@ namespace scan_planner
         pos = UniformBspline(optimal_control_points, 3, ts);
     }
 
-    if (!flag_step_2_success || !checkDynamicFeasibility(pos))
+    bool dynamic_feasible = false;
+    bool collision_free = false;
+    if (flag_step_2_success)
     {
-      printf("\033[34mThis refined trajectory is unsafe or dynamically infeasible. Skip publishing it.\n\033[0m");
+      const rclcpp::Time t_feasibility_start = node_->now();
+      dynamic_feasible = checkDynamicFeasibility(pos);
+      t_feasibility = node_->now() - t_feasibility_start;
+
+      if (dynamic_feasible)
+      {
+        const rclcpp::Time t_collision_start = node_->now();
+        collision_free = checkCollisionFree(pos);
+        t_collision = node_->now() - t_collision_start;
+      }
+    }
+
+    if (!flag_step_2_success || !dynamic_feasible || !collision_free)
+    {
+      printf("\033[34mThis refined trajectory is unsafe, colliding, or dynamically infeasible. Skip publishing it.\n\033[0m");
       continuous_failures_count_++;
+      RCLCPP_WARN(
+          node_->get_logger(),
+          "[SCAN timing] reboundReplan failed stage=validate total=%.3f init=%.3f optimize=%.3f refine_validate=%.3f "
+          "feasibility=%.3f collision=%.3f refine_success=%d dynamic_feasible=%d collision_free=%d "
+          "start=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f).",
+          (node_->now() - t_total_start).seconds(),
+          t_init.seconds(),
+          t_opt.seconds(),
+          (node_->now() - t_start).seconds(),
+          t_feasibility.seconds(),
+          t_collision.seconds(),
+          flag_step_2_success,
+          dynamic_feasible,
+          collision_free,
+          start_pt(0), start_pt(1), start_pt(2),
+          local_target_pt(0), local_target_pt(1), local_target_pt(2));
       return false;
     }
 
@@ -410,53 +431,26 @@ namespace scan_planner
     updateTrajInfo(pos, node_->now());
 
     cout << "total time:\033[42m" << (t_init + t_opt + t_refine).seconds() << "\033[0m,optimize:" << (t_init + t_opt).seconds() << ",refine:" << t_refine.seconds() << endl;
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "[SCAN timing] reboundReplan success total=%.3f init=%.3f optimize=%.3f refine_validate=%.3f "
+        "feasibility=%.3f collision=%.3f duration=%.3f ctrl_pts=%ld start=(%.2f,%.2f,%.2f) "
+        "target=(%.2f,%.2f,%.2f) poly_init=%d random_poly=%d failures_before=%d.",
+        (node_->now() - t_total_start).seconds(),
+        t_init.seconds(),
+        t_opt.seconds(),
+        t_refine.seconds(),
+        t_feasibility.seconds(),
+        t_collision.seconds(),
+        local_data_.duration_,
+        pos.getControlPoint().cols(),
+        start_pt(0), start_pt(1), start_pt(2),
+        local_target_pt(0), local_target_pt(1), local_target_pt(2),
+        flag_polyInit,
+        flag_randomPolyTraj,
+        continuous_failures_count_);
 
     // success. YoY
-    continuous_failures_count_ = 0;
-    return true;
-  }
-
-  bool SCANPlannerManager::planVerifiedB2RecoveryLeg(
-      const Eigen::Vector3d &start_pt,
-      const Eigen::Vector3d &target_pt)
-  {
-    if (!start_pt.allFinite() || !target_pt.allFinite())
-      return false;
-
-    const double distance = (target_pt - start_pt).norm();
-    if (distance < 0.02)
-      return false;
-
-    // A clamped cubic Bezier with P0=P1 and P2=P3 follows the verified
-    // straight chord exactly and stops at both ends. The normal rebound
-    // optimizer is intentionally bypassed here: smoothing a short steering
-    // primitive can leave the already checked obstacle/ground corridor.
-    Eigen::MatrixXd control_points(3, 4);
-    control_points.col(0) = start_pt;
-    control_points.col(1) = start_pt;
-    control_points.col(2) = target_pt;
-    control_points.col(3) = target_pt;
-
-    const double velocity_duration =
-        1.5 * distance / std::max(0.05, pp_.max_vel_);
-    const double acceleration_duration =
-        std::sqrt(
-            6.0 * distance / std::max(0.05, pp_.max_acc_));
-    const double duration =
-        1.10 * std::max(
-            0.40,
-            std::max(velocity_duration, acceleration_duration));
-
-    UniformBspline trajectory(control_points, 3, duration);
-    Eigen::VectorXd knots(8);
-    knots << 0.0, 0.0, 0.0, 0.0,
-        duration, duration, duration, duration;
-    trajectory.setKnot(knots);
-
-    if (!checkDynamicFeasibility(trajectory))
-      return false;
-
-    updateTrajInfo(trajectory, node_->now());
     continuous_failures_count_ = 0;
     return true;
   }
@@ -477,6 +471,7 @@ namespace scan_planner
   bool SCANPlannerManager::planGlobalTrajWaypoints(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                                                   const std::vector<Eigen::Vector3d> &waypoints, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc)
   {
+    const rclcpp::Time t_total_start = node_->now();
 
     // generate global reference trajectory
 
@@ -552,6 +547,16 @@ namespace scan_planner
 
     auto time_now = node_->now();
     global_data_.setGlobalTraj(gl_traj, time_now);
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "[SCAN timing] planGlobalTrajWaypoints success total=%.3f input_waypoints=%zu inter_points=%d duration=%.3f "
+        "start=(%.2f,%.2f,%.2f) end=(%.2f,%.2f,%.2f).",
+        (node_->now() - t_total_start).seconds(),
+        waypoints.size(),
+        pt_num,
+        global_data_.global_duration_,
+        start_pos(0), start_pos(1), start_pos(2),
+        waypoints.back()(0), waypoints.back()(1), waypoints.back()(2));
 
     return true;
   }
@@ -559,6 +564,7 @@ namespace scan_planner
   bool SCANPlannerManager::planGlobalTraj(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                                          const Eigen::Vector3d &end_pos, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc)
   {
+    const rclcpp::Time t_total_start = node_->now();
 
     // generate global reference trajectory
 
@@ -616,6 +622,15 @@ namespace scan_planner
 
     auto time_now = node_->now();
     global_data_.setGlobalTraj(gl_traj, time_now);
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "[SCAN timing] planGlobalTraj success total=%.3f inter_points=%d duration=%.3f "
+        "start=(%.2f,%.2f,%.2f) end=(%.2f,%.2f,%.2f).",
+        (node_->now() - t_total_start).seconds(),
+        pt_num,
+        global_data_.global_duration_,
+        start_pos(0), start_pos(1), start_pos(2),
+        end_pos(0), end_pos(1), end_pos(2));
 
     return true;
   }
@@ -680,6 +695,116 @@ namespace scan_planner
         return false;
       }
     }
+
+    return true;
+  }
+
+  bool SCANPlannerManager::checkCollisionFree(UniformBspline position_traj)
+  {
+    if (!grid_map_)
+      return true;
+
+    const double duration = position_traj.getTimeSum();
+    if (duration <= 1e-6)
+      return true;
+
+    const double resolution = std::max(0.02, grid_map_->getResolution());
+    const double sample_dt = std::max(0.01, std::min(0.05, duration / std::max(1.0, position_traj.getLength(0.05) / resolution)));
+    const Eigen::Vector3d start_pos = position_traj.evaluateDeBoorT(0.0);
+    int checked_centers = 0;
+    int skipped_start_centers = 0;
+    int skipped_start_occupied_centers = 0;
+    int checked_samples = 0;
+
+    for (double t = 0.0; t < duration + 1e-6; t += sample_dt)
+    {
+      const double tc = std::min(t, duration);
+      const double tn = std::min(tc + sample_dt, duration);
+      const Eigen::Vector3d pos = position_traj.evaluateDeBoorT(tc);
+      const Eigen::Vector3d pos_next = position_traj.evaluateDeBoorT(tn);
+      const double start_distance_xy = (pos.head<2>() - start_pos.head<2>()).norm();
+      const Eigen::Vector2d diff = pos_next.head<2>() - pos.head<2>();
+      const double yaw = diff.squaredNorm() > 1e-8 ? std::atan2(diff(1), diff(0)) : 0.0;
+
+      if (start_distance_xy <= collision_check_start_clear_radius_)
+      {
+        skipped_start_centers++;
+        const int start_occ = grid_map_->getInflateOccupancy(pos, yaw);
+        if (start_occ != 0)
+        {
+          skipped_start_occupied_centers++;
+          RCLCPP_WARN_THROTTLE(
+              node_->get_logger(),
+              *node_->get_clock(),
+              1000,
+              "Corridor collision diagnostic: skipped start-clear sample is occupied "
+              "but ignored before publishing. region=start_near occ=%d t=%.3f "
+              "start_distance_xy=%.3f start_clear_radius=%.3f pos=(%.3f, %.3f, %.3f) yaw=%.3f.",
+              start_occ,
+              tc,
+              start_distance_xy,
+              collision_check_start_clear_radius_,
+              pos(0), pos(1), pos(2),
+              yaw);
+        }
+        continue;
+      }
+      checked_centers++;
+
+      const Eigen::Vector3d lateral(-std::sin(yaw), std::cos(yaw), 0.0);
+      const double lateral_step = std::max(resolution, 0.05);
+      const double z_step = std::max(resolution, 0.05);
+
+      for (double lateral_offset = -collision_check_corridor_radius_;
+           lateral_offset <= collision_check_corridor_radius_ + 1e-6;
+           lateral_offset += lateral_step)
+      {
+        for (double z_offset = -collision_check_z_tolerance_down_;
+             z_offset <= collision_check_z_tolerance_up_ + 1e-6;
+             z_offset += z_step)
+        {
+          Eigen::Vector3d sample = pos + lateral * lateral_offset;
+          sample(2) += z_offset;
+          checked_samples++;
+
+          const int occ = grid_map_->getInflateOccupancy(sample, yaw);
+          if (occ != 0)
+          {
+            ROS_WARN_STREAM("Corridor collision check failed before publishing: t="
+                            << tc << ", center=" << pos.transpose()
+                            << ", sample=" << sample.transpose()
+                            << ", region=path_ahead"
+                            << ", occ=" << occ
+                            << ", start_distance_xy=" << start_distance_xy
+                            << ", corridor_radius=" << collision_check_corridor_radius_
+                            << ", z_tolerance_down=" << collision_check_z_tolerance_down_
+                            << ", z_tolerance_up=" << collision_check_z_tolerance_up_
+                            << ", start_clear_radius=" << collision_check_start_clear_radius_);
+            return false;
+          }
+        }
+      }
+    }
+
+    RCLCPP_INFO_THROTTLE(
+        node_->get_logger(),
+        *node_->get_clock(),
+        1000,
+        "Corridor collision check passed before publishing: duration=%.3f, sample_dt=%.3f, "
+        "checked_centers=%d, skipped_start_centers=%d, skipped_start_occupied_centers=%d, checked_samples=%d, "
+        "corridor_radius=%.3f, z_tolerance_down=%.3f, z_tolerance_up=%.3f, "
+        "start_clear_radius=%.3f, resolution=%.3f.",
+        duration,
+        sample_dt,
+        checked_centers,
+        skipped_start_centers,
+        skipped_start_occupied_centers,
+        checked_samples,
+        collision_check_corridor_radius_,
+        collision_check_z_tolerance_down_,
+        collision_check_z_tolerance_up_,
+        collision_check_start_clear_radius_,
+        resolution);
 
     return true;
   }

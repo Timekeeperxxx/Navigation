@@ -56,7 +56,10 @@ save_terrain_map:
     ground_local_layer_xy_bin_size: 0.5
     ground_local_layer_radius: 3.0
     ground_local_layer_z_tolerance: 0.2
-    ground_local_layer_min_height: 0.6
+    # Save-time loop ghosts in the validation maps start around 0.45 m.
+    # The support-ratio gate below protects continuous ramps while removing
+    # sparse vertically duplicated ground layers at the same location.
+    ground_local_layer_min_height: 0.45
     ground_local_layer_max_height: 1.8
     ground_local_layer_min_lower_points: 80
     ground_local_layer_min_support_ratio: 0.75

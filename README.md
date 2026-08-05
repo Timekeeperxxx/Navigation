@@ -183,11 +183,16 @@ ROS 侧只转发安全速度，不再创建第二个 SportClient。详细数据�
 当前参数按 [Unitree B2 官方页面](https://www.unitree.com/cn/b2) 公布的站立尺寸 `1.098m x 0.450m x 0.645m` 设置。SCAN 使用双圆柱覆盖水平轮廓：
 
 ```text
-double_cylinder_radius=0.25m
-double_cylinder_offset=0.225m
-double_cylinder_center_offset=-0.45m
+lidar_mount_x_m=0.425m
+double_cylinder_radius=0.27m
+double_cylinder_offset=0.205m
+double_cylinder_center_offset=0.0m
 global_planner.inscribed_radius=0.23m
 ```
+
+`base_footprint` 位于 B2 平面旋转中心；前置 Mid360 的 `+0.425m` 纵向安装
+偏移由 TF/LIO 外参统一处理。两个碰撞圆因此位于机体中心前后 `±0.205m`，
+不能再在规划器内重复后移，否则控制器会把原地旋转误认为 XY 平移。
 
 替换前的 Unitree Go2 参数保存在 `src/nav_bringup/config/robot_size_pre_b2_20260710.yaml`，仅用于恢复 Go2 部署。
 

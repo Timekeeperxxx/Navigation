@@ -46,7 +46,7 @@ NAV_GO2_IP="${NAV_GO2_IP:-}"
 NAV_GO2_SERIAL_NUMBER="${NAV_GO2_SERIAL_NUMBER:-}"
 NAV_GO2_AES_128_KEY="${NAV_GO2_AES_128_KEY:-}"
 NAV_READY_TIMEOUT_SECONDS="${NAV_READY_TIMEOUT_SECONDS:-120}"
-NAV_LIVOX_DATA_TIMEOUT_SECONDS="${NAV_LIVOX_DATA_TIMEOUT_SECONDS:-8}"
+NAV_LIVOX_DATA_TIMEOUT_SECONDS="${NAV_LIVOX_DATA_TIMEOUT_SECONDS:-30}"
 NAV_TASK_RUNTIME_FILE="${NAV_TASK_RUNTIME_FILE:-$ROBOT_NAV_RUNTIME_ROOT/current_task.json}"
 RUN_ID="$(date +%s)-$$"
 RUN_LOG_MARKER="[Navigation][run:$RUN_ID] launch"
@@ -210,10 +210,29 @@ navigation_failure_message() {
 }
 
 wait_for_livox_data() {
-  timeout "${NAV_LIVOX_DATA_TIMEOUT_SECONDS}s" \
-    ros2 topic echo /livox/lidar --once --no-daemon --spin-time 2 \
-      --qos-profile sensor_data --field timebase \
-    >/dev/null 2>&1
+  # Verify the data through Navigation's real consumer. The previous probe
+  # wrapped `ros2 topic echo` in an 8 s timeout but also passed
+  # `--spin-time 2`; the CLI therefore gave DDS discovery only two seconds and
+  # returned failure long before the advertised timeout. Meanwhile SuperLIO
+  # was already consuming frames, so a healthy MID360 was reported offline.
+  #
+  # kf_init is called from the relocation LiDAR callback while it waits for
+  # /initialpose. A positive frame and IMU count proves that the production
+  # subscriber received actual sensor data, rather than merely discovering a
+  # publisher in the ROS graph. The current-run marker prevents stale log
+  # lines from satisfying this check.
+  local waited=0
+  while kill -0 "$LAUNCH_PID" 2>/dev/null \
+    && [ "$waited" -lt "$NAV_LIVOX_DATA_TIMEOUT_SECONDS" ]; do
+    if current_run_log_has_regex \
+      "init_frame_count=[1-9][0-9]* imu_cout=[1-9][0-9]*"; then
+      log_info "Livox 数据验证通过：重定位节点已持续收到点云和 IMU"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
 }
 
 cleanup() {
@@ -353,7 +372,7 @@ if kill -0 "$LAUNCH_PID" 2>/dev/null \
   && record_navigation_children \
   && assert_single_navigation_runtime; then
   if ! wait_for_livox_data; then
-    log_error "雷达无有效数据：${NAV_LIVOX_DATA_TIMEOUT_SECONDS} 秒内未收到 /livox/lidar 点云，请检查 Livox MID360 供电、网线和 IP 配置"
+    log_error "雷达数据链未就绪：${NAV_LIVOX_DATA_TIMEOUT_SECONDS} 秒内重定位节点未收到 /livox/lidar 点云和 /livox/imu 数据，请检查 Livox MID360 供电、网线、IP 配置及 ROS QoS"
     exit 1
   fi
   write_json_file "$READY_FILE" "{\"ready\":true,\"stage\":\"awaiting_initialpose\",\"run_id\":\"$RUN_ID\",\"scene_dir\":\"$SCENE_DIR\",\"map_pcd\":\"$MAP_PCD\",\"ground_pcd\":\"$GROUND_PCD\",\"planground_pcd\":\"$PLANGROUND_PCD\",\"pid\":$LAUNCH_PID,\"control_chain\":\"scan_planner_cmd_vel_safe\"}"

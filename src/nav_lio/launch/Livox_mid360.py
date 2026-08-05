@@ -133,12 +133,25 @@ def generate_launch_description():
     #     arguments=['--ros-args', '--log-level', 'info']
     # )
 
-    # 静态变换: base_footprint -> base_link (单位矩阵, 无平移无旋转)
+    # Exact inverse of the default B2 mount calibration
+    # T_base_footprint_lidar = xyz(0.425, 0, 0.90), rpy(0, 19.48deg, 0).
+    # Keep the standalone launch consistent with nav_bringup: base_footprint
+    # is the body rotation centre, not the point below the front-mounted lidar.
     static_tf_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_tf_base_footprint_to_base_link',
-        arguments=['0', '0', '-0.90', '0', '-0.34', '0', 'base_link', 'base_footprint'],
+        arguments=[
+            '--x', '-0.100542115095',
+            '--y', '0',
+            '--z', '-0.990210221666',
+            '--qx', '0',
+            '--qy', '-0.169177489289',
+            '--qz', '0',
+            '--qw', '0.985585601111',
+            '--frame-id', 'base_link',
+            '--child-frame-id', 'base_footprint',
+        ],
         output='screen'
     )
 

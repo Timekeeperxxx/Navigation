@@ -43,7 +43,7 @@ class SimNavigationMarkers(Node):
         self.declare_parameter("trail_spacing", 0.08)
         self.declare_parameter("trail_max_points", 800)
         self.declare_parameter("footprint_radius", 0.27)
-        self.declare_parameter("footprint_center_offsets", [-0.22, -0.63])
+        self.declare_parameter("footprint_center_offsets", [0.205, -0.205])
         self.declare_parameter("footprint_height", 0.32)
 
         self.global_frame = str(self.get_parameter("global_frame").value)

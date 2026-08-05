@@ -10,7 +10,12 @@ import pytest
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from scan_tf_pose_publisher import PoseSample, TfVelocityEstimator  # noqa: E402
+from scan_tf_pose_publisher import (  # noqa: E402
+    PoseSample,
+    RigidPose,
+    TfVelocityEstimator,
+    compose_rigid_pose,
+)
 
 
 def _estimator(**overrides) -> TfVelocityEstimator:
@@ -97,3 +102,24 @@ def test_velocity_estimator_does_not_accumulate_frozen_translation():
     velocity = estimator.update(PoseSample(1.2, 0.05, -0.02, 0.0, 0.1))
 
     assert velocity == pytest.approx((0.1, 0.0, 0.0, 0.0))
+
+
+def test_rigid_pose_composition_rotates_mount_translation():
+    half_yaw = math.pi / 4.0
+    result = compose_rigid_pose(
+        RigidPose(1.0, 2.0, 3.0, 0.0, 0.0, math.sin(half_yaw), math.cos(half_yaw)),
+        RigidPose(0.5, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0),
+    )
+
+    assert (result.x, result.y, result.z) == pytest.approx((1.0, 2.5, 2.0))
+    assert (result.qx, result.qy, result.qz, result.qw) == pytest.approx(
+        (0.0, 0.0, math.sin(half_yaw), math.cos(half_yaw))
+    )
+
+
+def test_rigid_pose_composition_rejects_invalid_quaternion():
+    with pytest.raises(ValueError):
+        compose_rigid_pose(
+            RigidPose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            RigidPose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        )

@@ -36,7 +36,10 @@ NAV_MEMINFO_FILE="${NAV_MEMINFO_FILE:-/proc/meminfo}"
 TERRAIN_SAVE_TIMEOUT_SECONDS="${TERRAIN_SAVE_TIMEOUT_SECONDS:-1800}"
 # 雷达在机器人 base_footprint 坐标系中的安装位姿。角度单位为度，
 # 正俯仰角表示雷达朝机器人前下方倾斜。
-NAV_LIDAR_MOUNT_X_M="${NAV_LIDAR_MOUNT_X_M:-0.0}"
+# Mid360 is mounted ahead of B2's planar rotation centre. This longitudinal
+# calibration keeps base_footprint at the actual body centre; the planner must
+# not compensate for it a second time in the collision-circle offsets.
+NAV_LIDAR_MOUNT_X_M="${NAV_LIDAR_MOUNT_X_M:-0.425}"
 NAV_LIDAR_MOUNT_Y_M="${NAV_LIDAR_MOUNT_Y_M:-0.0}"
 NAV_LIDAR_MOUNT_Z_M="${NAV_LIDAR_MOUNT_Z_M:-0.90}"
 NAV_LIDAR_MOUNT_ROLL_DEG="${NAV_LIDAR_MOUNT_ROLL_DEG:-0.0}"

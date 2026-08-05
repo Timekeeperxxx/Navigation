@@ -9,11 +9,15 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <sstream>
 
+#include <Eigen/SparseCholesky>
 
 using namespace BASIC;
 
@@ -168,17 +172,387 @@ inline Eigen::Matrix4f se3_to_matrix4f(const SE3& pose)
   return matrix;
 }
 
-inline Eigen::Matrix4f interpolate_correction(const Eigen::Matrix4f& correction, const float alpha)
+inline SE3 project_gravity_aligned_loop_correction(
+    const Eigen::Matrix4f& full_correction,
+    const V3& raw_later_position)
+{
+  // LiDAR-inertial odometry already observes roll and pitch from gravity.
+  // Applying a small GICP roll/pitch correction about the world origin can
+  // change Z by metres at a distant ramp and flatten real terrain.  Keep the
+  // full GICP transform for acceptance validation, then project the graph
+  // measurement to the standard gravity-aligned 4-DoF form: XYZ + yaw.
+  //
+  // Translation is recomputed about the later keyframe origin, so the
+  // projected transform sends that origin to exactly the same XYZ selected
+  // by full 6-DoF GICP.  Z remains fully optimized; only correction roll and
+  // pitch are removed.
+  const Eigen::Matrix3f full_rotation =
+      full_correction.block<3, 3>(0, 0);
+  const float yaw =
+      std::atan2(full_rotation(1, 0), full_rotation(0, 0));
+  const Eigen::Matrix3f yaw_rotation =
+      Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ())
+          .toRotationMatrix();
+  const Eigen::Vector3f anchor =
+      raw_later_position.cast<float>();
+  const Eigen::Vector3f corrected_anchor =
+      full_rotation * anchor +
+      full_correction.block<3, 1>(0, 3);
+
+  Eigen::Matrix4f projected =
+      Eigen::Matrix4f::Identity();
+  projected.block<3, 3>(0, 0) = yaw_rotation;
+  projected.block<3, 1>(0, 3) =
+      corrected_anchor - yaw_rotation * anchor;
+  return SE3(projected);
+}
+
+inline Eigen::Matrix3f interpolate_correction_rotation(
+    const Eigen::Matrix4f& correction,
+    const float alpha)
 {
   const float a = std::clamp(alpha, 0.0f, 1.0f);
   Eigen::Quaternionf q_target(correction.block<3, 3>(0, 0));
   q_target.normalize();
   Eigen::Quaternionf q = Eigen::Quaternionf::Identity().slerp(a, q_target);
+  return q.toRotationMatrix();
+}
 
-  Eigen::Matrix4f output = Eigen::Matrix4f::Identity();
-  output.block<3, 3>(0, 0) = q.toRotationMatrix();
-  output.block<3, 1>(0, 3) = a * correction.block<3, 1>(0, 3);
-  return output;
+struct PoseGraphEdge
+{
+  int from = -1;
+  int to = -1;
+  SE3 measurement;
+  float weight = 1.0f;
+  bool loop = false;
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+
+using PoseVector = std::vector<SE3, Eigen::aligned_allocator<SE3>>;
+using PoseGraphEdgeVector =
+  std::vector<PoseGraphEdge, Eigen::aligned_allocator<PoseGraphEdge>>;
+
+inline V6 pose_graph_residual(
+    const SE3& from,
+    const SE3& to,
+    const SE3& measurement)
+{
+  return (measurement.inverse() * from.inverse() * to).log_vee();
+}
+
+struct LoopConsistency
+{
+  float path_length = 0.0f;
+  float translation_residual = 0.0f;
+  float rotation_residual_deg = 0.0f;
+  float weight = 0.0f;
+};
+
+inline LoopConsistency evaluate_loop_consistency(
+    const PoseGraphEdge& edge,
+    const PoseVector& reference_poses,
+    const float path_length)
+{
+  LoopConsistency result;
+  result.path_length = std::max(path_length, 1.0e-3f);
+  const V6 residual = pose_graph_residual(
+      reference_poses[edge.from],
+      reference_poses[edge.to],
+      edge.measurement);
+  // BASIC::SE3::log_vee() stores rotation first and translation second.
+  result.translation_residual = residual.tail<3>().norm();
+  result.rotation_residual_deg =
+      residual.head<3>().norm() * 180.0f / static_cast<float>(M_PI);
+
+  // This is a trajectory uncertainty model, not an XYZ/Z distance gate.
+  // Expected uncertainty grows continuously with travelled path length and
+  // all translation axes are treated together.  A real ramp or floor change
+  // therefore remains untouched; only a loop observation that demands an
+  // implausibly different correction from the current graph is switched off.
+  const float translation_scale =
+      g_loop_translation_drift_ratio * result.path_length;
+  const float rotation_scale =
+      g_loop_rotation_drift_deg_per_m * result.path_length;
+  const float normalized_translation =
+      result.translation_residual /
+      std::max(translation_scale, 1.0e-6f);
+  const float normalized_rotation =
+      result.rotation_residual_deg /
+      std::max(rotation_scale, 1.0e-6f);
+  result.weight = 1.0f /
+      (1.0f + normalized_translation * normalized_translation +
+       normalized_rotation * normalized_rotation);
+  return result;
+}
+
+inline float pose_graph_robust_cost(
+    const PoseVector& poses,
+    const PoseGraphEdgeVector& edges)
+{
+  float cost = 0.0f;
+  for (const auto& edge : edges) {
+    V6 residual = pose_graph_residual(
+        poses[edge.from], poses[edge.to], edge.measurement);
+    residual.head<3>() *= 2.0f;
+    residual *= edge.weight;
+    const float norm = residual.norm();
+    if (edge.loop && norm > 1.0f) {
+      cost += 2.0f * norm - 1.0f;
+    } else {
+      cost += residual.squaredNorm();
+    }
+  }
+  return cost;
+}
+
+inline bool optimize_pose_graph(
+    PoseVector& poses,
+    const PoseGraphEdgeVector& edges,
+    const int max_iterations = 8)
+{
+  if (poses.size() < 2 || edges.empty()) {
+    return false;
+  }
+
+  const int variable_count =
+      static_cast<int>((poses.size() - 1) * 6);
+  // Loop corrections are small rotations (validated before reaching here),
+  // so solve the correction graph in se(3):
+  //
+  //   x_to - x_from = log(G_from_to)
+  //
+  // Identity measurements on consecutive nodes form a Laplacian smoothness
+  // term.  Loop measurements jointly deform the whole trajectory instead of
+  // applying a rigid jump at either endpoint.  Solving in double precision is
+  // important for a chain with thousands of nodes; the previous float
+  // absolute-pose Gauss-Newton system was ill-conditioned.
+  std::vector<Eigen::Matrix<double, 6, 1>> measurements;
+  measurements.reserve(edges.size());
+  for (const auto& edge : edges) {
+    measurements.push_back(
+        edge.measurement.log_vee().cast<double>());
+  }
+
+  Eigen::VectorXd solution =
+      Eigen::VectorXd::Zero(variable_count);
+  for (int iteration = 0; iteration < max_iterations; ++iteration) {
+    std::vector<Eigen::Triplet<double>> triplets;
+    triplets.reserve(edges.size() * 24 + variable_count);
+    Eigen::VectorXd rhs =
+        Eigen::VectorXd::Zero(variable_count);
+
+    auto correction_component = [&](
+        const int node, const int axis) -> double {
+      if (node <= 0) {
+        return 0.0;
+      }
+      return solution((node - 1) * 6 + axis);
+    };
+
+    for (std::size_t edge_index = 0;
+         edge_index < edges.size();
+         ++edge_index) {
+      const auto& edge = edges[edge_index];
+      const auto& measurement = measurements[edge_index];
+      Eigen::Matrix<double, 6, 1> residual;
+      for (int axis = 0; axis < 6; ++axis) {
+        residual(axis) =
+            correction_component(edge.to, axis) -
+            correction_component(edge.from, axis) -
+            measurement(axis);
+      }
+
+      Eigen::Matrix<double, 6, 1> scaled_residual =
+          edge.weight * residual;
+      scaled_residual.head<3>() *= 2.0;
+      double robust_weight = 1.0;
+      const double residual_norm = scaled_residual.norm();
+      if (edge.loop && residual_norm > 1.0) {
+        robust_weight = 1.0 / residual_norm;
+      }
+
+      for (int axis = 0; axis < 6; ++axis) {
+        const double axis_scale =
+            static_cast<double>(edge.weight) *
+            (axis < 3 ? 2.0 : 1.0);
+        const double information =
+            robust_weight * axis_scale * axis_scale;
+        const int from_offset =
+            edge.from > 0 ? (edge.from - 1) * 6 + axis : -1;
+        const int to_offset =
+            edge.to > 0 ? (edge.to - 1) * 6 + axis : -1;
+
+        if (from_offset >= 0) {
+          triplets.emplace_back(
+              from_offset, from_offset, information);
+          rhs(from_offset) -= information * measurement(axis);
+        }
+        if (to_offset >= 0) {
+          triplets.emplace_back(
+              to_offset, to_offset, information);
+          rhs(to_offset) += information * measurement(axis);
+        }
+        if (from_offset >= 0 && to_offset >= 0) {
+          triplets.emplace_back(
+              from_offset, to_offset, -information);
+          triplets.emplace_back(
+              to_offset, from_offset, -information);
+        }
+      }
+    }
+
+    for (int diagonal = 0;
+         diagonal < variable_count;
+         ++diagonal) {
+      triplets.emplace_back(diagonal, diagonal, 1.0e-10);
+    }
+    Eigen::SparseMatrix<double> hessian(
+        variable_count, variable_count);
+    hessian.setFromTriplets(
+        triplets.begin(), triplets.end());
+    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
+    solver.compute(hessian);
+    if (solver.info() != Eigen::Success) {
+      return false;
+    }
+    const Eigen::VectorXd next_solution =
+        solver.solve(rhs);
+    if (solver.info() != Eigen::Success ||
+        !next_solution.allFinite()) {
+      return false;
+    }
+    const double update =
+        (next_solution - solution).cwiseAbs().maxCoeff();
+    solution = next_solution;
+    if (update < 1.0e-7) {
+      break;
+    }
+  }
+
+  poses[0] = SE3();
+  for (std::size_t i = 1; i < poses.size(); ++i) {
+    const V6 correction =
+        solution.segment<6>((i - 1) * 6).cast<float>();
+    poses[i] = SE3(correction);
+  }
+  return true;
+}
+
+struct TimedPoseCorrection
+{
+  double timestamp = 0.0;
+  Eigen::Matrix4f correction = Eigen::Matrix4f::Identity();
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+
+using TimedPoseCorrectionVector = std::vector<
+  TimedPoseCorrection,
+  Eigen::aligned_allocator<TimedPoseCorrection>>;
+
+inline bool save_loop_trajectory_safe(
+    const std::string& filename,
+    const TimedPoseCorrectionVector& corrections)
+{
+  const auto temporary_filename = filename + ".tmp";
+  try {
+    std::ofstream output(
+        temporary_filename,
+        std::ios::out | std::ios::trunc);
+    if (!output.is_open()) {
+      return false;
+    }
+    output << "NAV_LIO_POSE_GRAPH_V1\n";
+    output << corrections.size() << "\n";
+    output << std::setprecision(17);
+    for (const auto& sample : corrections) {
+      output << sample.timestamp;
+      output << std::setprecision(9);
+      for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+          output << " " << sample.correction(row, col);
+        }
+      }
+      output << "\n" << std::setprecision(17);
+    }
+    output.flush();
+    if (!output.good()) {
+      output.close();
+      std::filesystem::remove(temporary_filename);
+      return false;
+    }
+    output.close();
+    std::error_code ec;
+    std::filesystem::rename(
+        temporary_filename, filename, ec);
+    if (ec) {
+      std::filesystem::remove(temporary_filename);
+      return false;
+    }
+    return true;
+  } catch (...) {
+    std::error_code ec;
+    std::filesystem::remove(temporary_filename, ec);
+    return false;
+  }
+}
+
+inline bool save_loop_correction_safe(
+    const std::string& filename,
+    const double candidate_timestamp,
+    const double deformation_start_timestamp,
+    const double end_timestamp,
+    const Eigen::Matrix4f& correction)
+{
+  const auto temporary_filename = filename + ".tmp";
+  try {
+    std::ofstream output(temporary_filename, std::ios::out | std::ios::trunc);
+    if (!output.is_open()) {
+      LOG(ERROR) << RED << " ---> 无法创建闭环校正元数据: "
+                 << temporary_filename << RESET;
+      return false;
+    }
+
+    output << "NAV_LIO_LOOP_CORRECTION_V2\n";
+    output << std::setprecision(17)
+           << candidate_timestamp << " "
+           << deformation_start_timestamp << " "
+           << end_timestamp << "\n";
+    output << std::setprecision(9);
+    for (int row = 0; row < 4; ++row) {
+      for (int col = 0; col < 4; ++col) {
+        if (row != 0 || col != 0) {
+          output << " ";
+        }
+        output << correction(row, col);
+      }
+    }
+    output << "\n";
+    output.flush();
+    if (!output.good()) {
+      output.close();
+      std::filesystem::remove(temporary_filename);
+      LOG(ERROR) << RED << " ---> 写入闭环校正元数据失败: "
+                 << temporary_filename << RESET;
+      return false;
+    }
+    output.close();
+
+    std::error_code ec;
+    std::filesystem::rename(temporary_filename, filename, ec);
+    if (ec) {
+      std::filesystem::remove(temporary_filename);
+      LOG(ERROR) << RED << " ---> 提交闭环校正元数据失败: "
+                 << filename << " error: " << ec.message() << RESET;
+      return false;
+    }
+    return true;
+  } catch (const std::exception& e) {
+    std::error_code ec;
+    std::filesystem::remove(temporary_filename, ec);
+    LOG(ERROR) << RED << " ---> 保存闭环校正元数据失败: "
+               << filename << " error: " << e.what() << RESET;
+    return false;
+  }
 }
 
 inline double wrap_period_signed(const double angle, const double period)
@@ -299,6 +673,7 @@ void SuperLIO::process(){
     return;
   }
   (this->*state_fn_)();
+  data_wrapper_->finish_measure();
 }
 
 
@@ -662,6 +1037,36 @@ void SuperLIO::saveLoopClosedMap()
     return;
   }
 
+  const std::string loop_map_path = g_save_map_dir + "/" + g_loop_map_name;
+  const std::string correction_path =
+      g_save_map_dir + "/loop_correction.txt";
+  const std::string trajectory_path =
+      g_save_map_dir + "/loop_pose_graph.txt";
+  const auto finalize_started = std::chrono::steady_clock::now();
+  const auto finalize_deadline = finalize_started +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(g_loop_max_finalize_seconds));
+  auto finalize_timed_out = [&]() {
+    if (std::chrono::steady_clock::now() <= finalize_deadline) {
+      return false;
+    }
+    LOG(WARNING) << YELLOW
+                 << " ---> 闭环后端超过保存时间预算，保留已原子提交的原始 map.pcd。"
+                 << " budget_seconds: " << g_loop_max_finalize_seconds
+                 << RESET;
+    return true;
+  };
+  {
+    // A repeated save into the same scene must never reuse an older accepted
+    // closure when the current run cannot validate one.
+    std::error_code ec;
+    std::filesystem::remove(loop_map_path, ec);
+    ec.clear();
+    std::filesystem::remove(correction_path, ec);
+    ec.clear();
+    std::filesystem::remove(trajectory_path, ec);
+  }
+
   if (loop_keyframes_.size() <= static_cast<std::size_t>(g_loop_keyframe_min_gap + 2)) {
     LOG(WARNING) << YELLOW << " ---> 闭环关键帧数量不足，跳过 map_loop.pcd 生成。"
                  << " keyframes: " << loop_keyframes_.size() << RESET;
@@ -670,27 +1075,77 @@ void SuperLIO::saveLoopClosedMap()
 
   const int end_idx = static_cast<int>(loop_keyframes_.size()) - 1;
   const auto& end_keyframe = loop_keyframes_[end_idx];
-  int candidate_idx = -1;
-  float best_distance = std::numeric_limits<float>::max();
+  PoseVector raw_poses;
+  raw_poses.reserve(loop_keyframes_.size());
+  std::vector<float> cumulative_route_length(
+      loop_keyframes_.size(), 0.0f);
+  for (std::size_t i = 0; i < loop_keyframes_.size(); ++i) {
+    raw_poses.push_back(loop_keyframes_[i].pose);
+    if (i > 0) {
+      cumulative_route_length[i] =
+          cumulative_route_length[i - 1] +
+          (raw_poses[i].t_ - raw_poses[i - 1].t_).norm();
+    }
+  }
+  const float raw_route_length = cumulative_route_length.back();
+  struct LoopCandidate {
+    int index = -1;
+    float horizontal_distance = std::numeric_limits<float>::max();
+  };
+  std::vector<LoopCandidate> candidates;
 
   for (int i = 0; i <= end_idx - g_loop_keyframe_min_gap; ++i) {
-    const float distance = (end_keyframe.pose.t_ - loop_keyframes_[i].pose.t_).norm();
-    if (distance < g_loop_search_radius && distance < best_distance) {
-      best_distance = distance;
-      candidate_idx = i;
+    const V3 delta = end_keyframe.pose.t_ - loop_keyframes_[i].pose.t_;
+    const float horizontal_distance =
+        static_cast<float>(std::hypot(delta.x(), delta.y()));
+    if (horizontal_distance < g_loop_search_radius) {
+      candidates.push_back({i, horizontal_distance});
     }
   }
 
-  if (candidate_idx < 0) {
-    LOG(WARNING) << YELLOW << " ---> 未找到闭环候选关键帧，跳过 map_loop.pcd 生成。"
-                 << " search_radius: " << g_loop_search_radius << RESET;
-    return;
+  if (candidates.empty()) {
+    LOG(INFO) << GREEN
+              << " ---> 终点未进入任何历史关键帧的保守搜索半径；"
+              << "不强制回起点，继续检查中途回环。"
+              << " horizontal_search_radius: "
+              << g_loop_search_radius << RESET;
+  }
+
+  // Always retain a few of the earliest candidates (the common "return to
+  // start" workflow), then fill the remaining budget by horizontal proximity.
+  // Full 3-D geometry, including Z, is validated by ICP below.
+  std::vector<LoopCandidate> selected_candidates;
+  const int early_candidate_count =
+      std::min<int>(5, static_cast<int>(candidates.size()));
+  selected_candidates.insert(
+      selected_candidates.end(),
+      candidates.begin(),
+      candidates.begin() + early_candidate_count);
+  std::sort(
+      candidates.begin(), candidates.end(),
+      [](const LoopCandidate& lhs, const LoopCandidate& rhs) {
+        return lhs.horizontal_distance < rhs.horizontal_distance;
+      });
+  for (const auto& candidate : candidates) {
+    const auto already_selected = std::find_if(
+        selected_candidates.begin(), selected_candidates.end(),
+        [&](const LoopCandidate& selected) {
+          return selected.index == candidate.index;
+        });
+    if (already_selected == selected_candidates.end()) {
+      selected_candidates.push_back(candidate);
+    }
+    if (static_cast<int>(selected_candidates.size()) >= g_loop_candidate_limit) {
+      break;
+    }
   }
 
   auto build_local_world_cloud = [&](int center_idx) {
     CloudPtr cloud(new PointCloudType());
-    const int start_idx = std::max(0, center_idx - 2);
-    const int stop_idx = std::min(end_idx, center_idx + 2);
+    const int start_idx =
+        std::max(0, center_idx - g_loop_local_window_size);
+    const int stop_idx =
+        std::min(end_idx, center_idx + g_loop_local_window_size);
     for (int i = start_idx; i <= stop_idx; ++i) {
       CloudPtr transformed(new PointCloudType());
       pcl::transformPointCloud(
@@ -706,56 +1161,712 @@ void SuperLIO::saveLoopClosedMap()
   };
 
   CloudPtr source = build_local_world_cloud(end_idx);
-  CloudPtr target = build_local_world_cloud(candidate_idx);
-  if (source->empty() || target->empty()) {
-    LOG(WARNING) << YELLOW << " ---> 闭环 ICP 输入点云为空，跳过 map_loop.pcd 生成。" << RESET;
+  if (source->empty()) {
+    LOG(WARNING) << YELLOW << " ---> 闭环 ICP 源点云为空，跳过 map_loop.pcd 生成。" << RESET;
     return;
   }
 
-  pcl::IterativeClosestPoint<PointType, PointType> icp;
-  icp.setInputSource(source);
-  icp.setInputTarget(target);
-  icp.setMaxCorrespondenceDistance(g_loop_icp_max_distance);
-  icp.setMaximumIterations(80);
-  icp.setTransformationEpsilon(1e-6);
-  icp.setEuclideanFitnessEpsilon(1e-5);
+  struct EndpointHypothesis
+  {
+    int index = -1;
+    float horizontal_distance = std::numeric_limits<float>::max();
+    double score = std::numeric_limits<double>::max();
+    float overlap_ratio = 0.0f;
+    float rotation_deg = std::numeric_limits<float>::max();
+    Eigen::Matrix4f full_correction = Eigen::Matrix4f::Identity();
+    PoseGraphEdge edge;
+    LoopConsistency consistency;
+    double selection_cost = std::numeric_limits<double>::max();
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  };
+  using EndpointHypothesisVector = std::vector<
+      EndpointHypothesis,
+      Eigen::aligned_allocator<EndpointHypothesis>>;
+  EndpointHypothesisVector endpoint_hypotheses;
+  for (const auto& candidate : selected_candidates) {
+    if (finalize_timed_out()) {
+      return;
+    }
+    CloudPtr target = build_local_world_cloud(candidate.index);
+    if (target->empty()) {
+      continue;
+    }
 
-  PointCloudType aligned;
-  icp.align(aligned);
-  const double score = icp.getFitnessScore();
-  if (!icp.hasConverged() || score > g_loop_icp_score_threshold) {
-    LOG(WARNING) << YELLOW << " ---> 闭环 ICP 未通过，跳过 map_loop.pcd 生成。"
-                 << " converged: " << icp.hasConverged()
-                 << " score: " << score
+    // The odometry already expresses both scans in one world frame. Seed ICP
+    // with the full XYZ origin offset so several metres of accumulated drift
+    // can be recovered. This is an initial guess, not a Z lock: ICP still
+    // estimates and validates all six degrees of freedom from the point clouds.
+    double candidate_best_score = std::numeric_limits<double>::max();
+    float candidate_best_overlap_ratio = 0.0f;
+    float candidate_best_rotation_deg = std::numeric_limits<float>::max();
+    float candidate_best_seed_yaw_deg = 0.0f;
+    Eigen::Matrix4f candidate_best_correction = Eigen::Matrix4f::Identity();
+    bool candidate_converged = false;
+
+    // A long route may accumulate enough yaw drift that one ICP basin is not
+    // sufficient. Search a bounded set of yaw seeds; roll, pitch, Z and the
+    // final yaw remain free variables estimated by full 3-D ICP.
+    const std::array<int, 7> seed_yaw_degrees{
+        0, -15, 15, -30, 30, -45, 45};
+    for (const int seed_yaw_deg : seed_yaw_degrees) {
+      if (finalize_timed_out()) {
+        return;
+      }
+      const float seed_yaw_rad =
+          static_cast<float>(seed_yaw_deg) *
+          static_cast<float>(M_PI) / 180.0f;
+      Eigen::Matrix4f initial_guess = Eigen::Matrix4f::Identity();
+      initial_guess.block<3, 3>(0, 0) =
+          Eigen::AngleAxisf(seed_yaw_rad, Eigen::Vector3f::UnitZ())
+              .toRotationMatrix();
+      initial_guess.block<3, 1>(0, 3) =
+          loop_keyframes_[candidate.index].pose.t_.cast<float>() -
+          initial_guess.block<3, 3>(0, 0) *
+              end_keyframe.pose.t_.cast<float>();
+
+      pcl::GeneralizedIterativeClosestPoint<PointType, PointType> icp;
+      icp.setInputSource(source);
+      icp.setInputTarget(target);
+      icp.setMaxCorrespondenceDistance(g_loop_icp_max_distance);
+      icp.setMaximumIterations(80);
+      icp.setTransformationEpsilon(1e-6);
+      icp.setEuclideanFitnessEpsilon(1e-5);
+
+      PointCloudType aligned;
+      icp.align(aligned, initial_guess);
+      const Eigen::Matrix4f attempt_correction =
+          icp.getFinalTransformation();
+      if (!icp.hasConverged() || !attempt_correction.allFinite() ||
+          aligned.empty()) {
+        continue;
+      }
+
+      pcl::search::KdTree<PointType> target_tree;
+      target_tree.setInputCloud(target);
+      std::vector<int> nearest_index(1);
+      std::vector<float> nearest_squared_distance(1);
+      std::size_t overlap_count = 0;
+      double squared_distance_sum = 0.0;
+      const float max_squared_distance =
+          g_loop_icp_max_distance * g_loop_icp_max_distance;
+      for (const auto& point : aligned.points) {
+        if (target_tree.nearestKSearch(
+                point, 1, nearest_index,
+                nearest_squared_distance) > 0 &&
+            nearest_squared_distance[0] <= max_squared_distance) {
+          ++overlap_count;
+          squared_distance_sum += nearest_squared_distance[0];
+        }
+      }
+      if (overlap_count == 0) {
+        continue;
+      }
+      const double score =
+          squared_distance_sum / static_cast<double>(overlap_count);
+      const float overlap_ratio =
+          static_cast<float>(overlap_count) /
+          static_cast<float>(aligned.size());
+
+      const Eigen::AngleAxisf rotation(
+          attempt_correction.block<3, 3>(0, 0));
+      const float rotation_deg =
+          std::abs(rotation.angle()) * 180.0f /
+          static_cast<float>(M_PI);
+      if (score < candidate_best_score) {
+        candidate_converged = true;
+        candidate_best_score = score;
+        candidate_best_overlap_ratio = overlap_ratio;
+        candidate_best_rotation_deg = rotation_deg;
+        candidate_best_seed_yaw_deg =
+            static_cast<float>(seed_yaw_deg);
+        candidate_best_correction = attempt_correction;
+      }
+
+      // Start with the odometry-aligned seed and avoid needless registration
+      // work once an attempt already satisfies every acceptance gate.
+      if (score <= g_loop_icp_score_threshold &&
+          overlap_ratio >= g_loop_min_overlap_ratio &&
+          rotation_deg <= g_loop_max_correction_rotation_deg) {
+        break;
+      }
+    }
+
+    LOG(INFO) << GREEN
+              << " ---> 闭环候选配准结果。candidate_idx: "
+              << candidate.index
+              << " horizontal_distance: "
+              << candidate.horizontal_distance
+              << " converged: " << candidate_converged
+              << " best_score: " << candidate_best_score
+              << " overlap_ratio: " << candidate_best_overlap_ratio
+              << " rotation_deg: " << candidate_best_rotation_deg
+              << " seed_yaw_deg: " << candidate_best_seed_yaw_deg
+              << RESET;
+
+    if (!candidate_converged ||
+        candidate_best_score > g_loop_icp_score_threshold ||
+        candidate_best_overlap_ratio < g_loop_min_overlap_ratio ||
+        candidate_best_rotation_deg >
+            g_loop_max_correction_rotation_deg) {
+      continue;
+    }
+
+    EndpointHypothesis hypothesis;
+    hypothesis.index = candidate.index;
+    hypothesis.horizontal_distance = candidate.horizontal_distance;
+    hypothesis.score = candidate_best_score;
+    hypothesis.overlap_ratio = candidate_best_overlap_ratio;
+    hypothesis.rotation_deg = candidate_best_rotation_deg;
+    hypothesis.full_correction = candidate_best_correction;
+    hypothesis.edge.from = candidate.index;
+    hypothesis.edge.to = end_idx;
+    hypothesis.edge.measurement =
+        project_gravity_aligned_loop_correction(
+            candidate_best_correction, raw_poses[end_idx].t_);
+    hypothesis.edge.weight = 2.0f;
+    hypothesis.edge.loop = true;
+    PoseVector identity_reference(
+        loop_keyframes_.size(), SE3());
+    const float segment_path_length =
+        cumulative_route_length[end_idx] -
+        cumulative_route_length[candidate.index];
+    hypothesis.consistency = evaluate_loop_consistency(
+        hypothesis.edge, identity_reference, segment_path_length);
+    hypothesis.selection_cost =
+        hypothesis.score +
+        (1.0 - hypothesis.consistency.weight) +
+        0.1 * (1.0 - hypothesis.overlap_ratio);
+    endpoint_hypotheses.push_back(hypothesis);
+  }
+
+  // The final keyframe has no special semantic relationship with the first
+  // keyframe. Treat each spatially distinct historical revisit as a normal
+  // graph hypothesis. Temporally overlapping windows are one observation;
+  // retain their earliest member to keep the selected edge stable.
+  std::sort(
+      endpoint_hypotheses.begin(), endpoint_hypotheses.end(),
+      [](const EndpointHypothesis& lhs, const EndpointHypothesis& rhs) {
+        return lhs.index < rhs.index;
+      });
+  EndpointHypothesisVector distinct_endpoint_hypotheses;
+  for (const auto& hypothesis : endpoint_hypotheses) {
+    if (distinct_endpoint_hypotheses.empty() ||
+        hypothesis.index - distinct_endpoint_hypotheses.back().index >
+            2 * g_loop_local_window_size) {
+      distinct_endpoint_hypotheses.push_back(hypothesis);
+    }
+  }
+
+  int candidate_idx = -1;
+  float best_horizontal_distance = std::numeric_limits<float>::max();
+  double best_score = std::numeric_limits<double>::max();
+  double best_selection_cost = std::numeric_limits<double>::max();
+  float best_consistency_weight = 0.0f;
+  Eigen::Matrix4f correction = Eigen::Matrix4f::Identity();
+  std::optional<PoseGraphEdge> endpoint_edge;
+  for (const auto& hypothesis : distinct_endpoint_hypotheses) {
+    const bool graph_consistent =
+        hypothesis.consistency.weight >= g_loop_min_consistency_weight;
+    LOG(INFO) << GREEN
+              << " ---> 终点普通回环假设。candidate_idx: "
+              << hypothesis.index
+              << " path_length: " << hypothesis.consistency.path_length
+              << " translation_residual: "
+              << hypothesis.consistency.translation_residual
+              << " rotation_residual_deg: "
+              << hypothesis.consistency.rotation_residual_deg
+              << " consistency_weight: "
+              << hypothesis.consistency.weight
+              << " selection_cost: " << hypothesis.selection_cost
+              << " graph_consistent: " << graph_consistent << RESET;
+    if (!graph_consistent) {
+      continue;
+    }
+    if (candidate_idx < 0 ||
+        (g_loop_prefer_earliest_candidate &&
+         hypothesis.index < candidate_idx) ||
+        (!g_loop_prefer_earliest_candidate &&
+         hypothesis.selection_cost < best_selection_cost)) {
+      candidate_idx = hypothesis.index;
+      best_horizontal_distance = hypothesis.horizontal_distance;
+      best_score = hypothesis.score;
+      best_selection_cost = hypothesis.selection_cost;
+      best_consistency_weight = hypothesis.consistency.weight;
+      correction = hypothesis.full_correction;
+      endpoint_edge = hypothesis.edge;
+    }
+  }
+
+  if (candidate_idx < 0) {
+    LOG(INFO) << GREEN << " ---> 终点回环未通过，继续检查中途回环。"
+                 << " candidates_tested: " << selected_candidates.size()
                  << " threshold: " << g_loop_icp_score_threshold << RESET;
+  } else {
+    LOG(INFO) << GREEN << " ---> 找到终点回环候选。candidate_idx: "
+              << candidate_idx
+              << " end_idx: " << end_idx
+              << " horizontal_pose_distance: " << best_horizontal_distance
+              << " correction_translation: "
+              << correction.block<3, 1>(0, 3).transpose()
+              << " icp_score: " << best_score
+              << " consistency_weight: " << best_consistency_weight
+              << " selection_cost: " << best_selection_cost << RESET;
+  }
+  // Optimize a deformation graph of world-frame correction poses C_i rather
+  // than the large absolute poses X_i directly:
+  //
+  //   X_i = C_i * T_i(raw)
+  //
+  // Consecutive C_i are connected by identity edges, so the correction is
+  // spread smoothly over the route.  If G maps a later raw world cloud onto
+  // an earlier raw world cloud, a loop edge measures C_earlier^-1*C_later=G.
+  // This is the same global pose-graph idea, but avoids numerical
+  // cancellation on 100 m absolute coordinates and makes the intended
+  // deformation explicit.
+  PoseVector correction_poses(
+      loop_keyframes_.size(), SE3());
+  PoseGraphEdgeVector pose_graph_edges;
+  pose_graph_edges.reserve(loop_keyframes_.size() + 32);
+  for (int i = 0; i < end_idx; ++i) {
+    PoseGraphEdge edge;
+    edge.from = i;
+    edge.to = i + 1;
+    edge.measurement = SE3();
+    edge.weight = 1.0f;
+    edge.loop = false;
+    pose_graph_edges.push_back(edge);
+  }
+
+  if (endpoint_edge.has_value()) {
+    pose_graph_edges.push_back(*endpoint_edge);
+  }
+
+  struct RevisitCandidate
+  {
+    int earlier = -1;
+    int later = -1;
+    float horizontal_distance =
+        std::numeric_limits<float>::max();
+  };
+  std::vector<RevisitCandidate> revisit_candidates;
+  // Candidate discovery grows continuously with route length instead of
+  // switching at a hard map-size boundary. Final acceptance is still decided
+  // by full 3-D registration and graph consistency below.
+  const float internal_search_radius =
+      std::min(
+          g_loop_search_radius,
+          g_loop_internal_search_radius +
+              g_loop_translation_drift_ratio * raw_route_length);
+  LOG(INFO) << GREEN
+            << " ---> 中途回环搜索范围。raw_route_length: "
+            << raw_route_length
+            << " internal_search_radius: "
+            << internal_search_radius << RESET;
+  for (int later = g_loop_keyframe_min_gap;
+       later < end_idx - g_loop_local_window_size;
+       ++later) {
+    int nearest_earlier = -1;
+    float nearest_distance =
+        std::numeric_limits<float>::max();
+    const int latest_earlier =
+        later - g_loop_keyframe_min_gap;
+    for (int earlier = 0; earlier <= latest_earlier; ++earlier) {
+      const V3 delta =
+          loop_keyframes_[later].pose.t_ -
+          loop_keyframes_[earlier].pose.t_;
+      const float distance =
+          static_cast<float>(std::hypot(delta.x(), delta.y()));
+      if (distance < nearest_distance) {
+        nearest_distance = distance;
+        nearest_earlier = earlier;
+      }
+    }
+    if (nearest_earlier >= 0 &&
+        nearest_distance < internal_search_radius) {
+      revisit_candidates.push_back(
+          {nearest_earlier, later, nearest_distance});
+    }
+  }
+  std::sort(
+      revisit_candidates.begin(),
+      revisit_candidates.end(),
+      [](const RevisitCandidate& lhs, const RevisitCandidate& rhs) {
+        return lhs.horizontal_distance < rhs.horizontal_distance;
+      });
+  std::vector<RevisitCandidate> selected_revisits;
+  const int revisit_index_separation =
+      std::max(30, 3 * g_loop_local_window_size);
+  for (const auto& candidate : revisit_candidates) {
+    bool too_close = false;
+    for (const auto& selected : selected_revisits) {
+      if (std::abs(candidate.later - selected.later) <
+          revisit_index_separation) {
+        too_close = true;
+        break;
+      }
+    }
+    if (too_close) {
+      continue;
+    }
+    selected_revisits.push_back(candidate);
+    if (static_cast<int>(selected_revisits.size()) >=
+        std::min(12, g_loop_candidate_limit)) {
+      break;
+    }
+  }
+  std::sort(
+      selected_revisits.begin(),
+      selected_revisits.end(),
+      [](const RevisitCandidate& lhs, const RevisitCandidate& rhs) {
+        return lhs.later < rhs.later;
+      });
+
+  // Endpoint-only graph is merely a reference hypothesis. It does not force
+  // the endpoint to match any particular place. Internal edges are compared
+  // against this smooth field and receive independent switch weights.
+  PoseVector consistency_reference_poses(
+      loop_keyframes_.size(), SE3());
+  if (endpoint_edge.has_value()) {
+    if (!optimize_pose_graph(
+            consistency_reference_poses, pose_graph_edges)) {
+      LOG(ERROR) << RED
+                 << " ---> 终点回环参考图优化失败，忽略该终点假设。"
+                 << RESET;
+      pose_graph_edges.pop_back();
+      endpoint_edge.reset();
+      candidate_idx = -1;
+      consistency_reference_poses.assign(
+          loop_keyframes_.size(), SE3());
+    }
+  }
+
+  int accepted_internal_loops = 0;
+  for (const auto& revisit : selected_revisits) {
+    if (finalize_timed_out()) {
+      return;
+    }
+    // The endpoint closure already aligns local windows around candidate_idx
+    // and end_idx.  An internal edge built from substantially the same points
+    // is correlated evidence, not an independent loop.  Detect it here so it
+    // can be retained at low weight without concentrating metres of
+    // correction into the first/last handful of poses.
+    const int endpoint_overlap_margin =
+        2 * g_loop_local_window_size;
+    const bool overlaps_endpoint_closure =
+        candidate_idx >= 0 &&
+        std::abs(revisit.earlier - candidate_idx) <=
+            endpoint_overlap_margin &&
+        end_idx - revisit.later <= endpoint_overlap_margin;
+    if (overlaps_endpoint_closure) {
+      LOG(INFO) << GREEN
+                << " ---> 中途回环与终点回环局部窗口重叠，按相关观测降权。"
+                << " earlier_idx: " << revisit.earlier
+                << " later_idx: " << revisit.later
+                << " endpoint_candidate_idx: " << candidate_idx
+                << " end_idx: " << end_idx
+                << " edge_weight: 0.25" << RESET;
+    }
+
+    CloudPtr revisit_source =
+        build_local_world_cloud(revisit.later);
+    CloudPtr revisit_target =
+        build_local_world_cloud(revisit.earlier);
+    if (revisit_source->empty() || revisit_target->empty()) {
+      continue;
+    }
+
+    Eigen::Matrix4f initial_guess =
+        Eigen::Matrix4f::Identity();
+    initial_guess.block<3, 1>(0, 3) =
+        loop_keyframes_[revisit.earlier].pose.t_.cast<float>() -
+        loop_keyframes_[revisit.later].pose.t_.cast<float>();
+    pcl::GeneralizedIterativeClosestPoint<PointType, PointType> icp;
+    icp.setInputSource(revisit_source);
+    icp.setInputTarget(revisit_target);
+    icp.setMaxCorrespondenceDistance(g_loop_icp_max_distance);
+    icp.setMaximumIterations(80);
+    icp.setTransformationEpsilon(1e-6);
+    icp.setEuclideanFitnessEpsilon(1e-5);
+    PointCloudType aligned;
+    icp.align(aligned, initial_guess);
+    const Eigen::Matrix4f revisit_correction =
+        icp.getFinalTransformation();
+    if (!icp.hasConverged() ||
+        !revisit_correction.allFinite() ||
+        aligned.empty()) {
+      continue;
+    }
+
+    pcl::search::KdTree<PointType> target_tree;
+    target_tree.setInputCloud(revisit_target);
+    std::vector<int> nearest_index(1);
+    std::vector<float> nearest_squared_distance(1);
+    std::size_t overlap_count = 0;
+    double squared_distance_sum = 0.0;
+    const float max_squared_distance =
+        g_loop_icp_max_distance * g_loop_icp_max_distance;
+    for (const auto& point : aligned.points) {
+      if (target_tree.nearestKSearch(
+              point, 1, nearest_index,
+              nearest_squared_distance) > 0 &&
+          nearest_squared_distance[0] <= max_squared_distance) {
+        ++overlap_count;
+        squared_distance_sum += nearest_squared_distance[0];
+      }
+    }
+    if (overlap_count == 0) {
+      continue;
+    }
+    const double score =
+        squared_distance_sum /
+        static_cast<double>(overlap_count);
+    const float overlap_ratio =
+        static_cast<float>(overlap_count) /
+        static_cast<float>(aligned.size());
+    const Eigen::AngleAxisf rotation(
+        revisit_correction.block<3, 3>(0, 0));
+    const float rotation_deg =
+        std::abs(rotation.angle()) * 180.0f /
+        static_cast<float>(M_PI);
+    const bool accepted =
+        score <= g_loop_icp_score_threshold &&
+        overlap_ratio >= g_loop_min_overlap_ratio &&
+        rotation_deg <= g_loop_max_correction_rotation_deg;
+    LOG(INFO) << GREEN
+              << " ---> 中途回环候选。earlier_idx: "
+              << revisit.earlier
+              << " later_idx: " << revisit.later
+              << " earlier_xyz: "
+              << loop_keyframes_[revisit.earlier].pose.t_.transpose()
+              << " later_xyz: "
+              << loop_keyframes_[revisit.later].pose.t_.transpose()
+              << " horizontal_distance: "
+              << revisit.horizontal_distance
+              << " score: " << score
+              << " overlap_ratio: " << overlap_ratio
+              << " rotation_deg: " << rotation_deg
+              << " accepted: " << accepted << RESET;
+    if (!accepted) {
+      continue;
+    }
+
+    PoseGraphEdge edge;
+    edge.from = revisit.earlier;
+    edge.to = revisit.later;
+    edge.measurement =
+        project_gravity_aligned_loop_correction(
+            revisit_correction,
+            raw_poses[revisit.later].t_);
+    const float segment_path_length =
+        cumulative_route_length[revisit.later] -
+        cumulative_route_length[revisit.earlier];
+    const LoopConsistency consistency = evaluate_loop_consistency(
+        edge, consistency_reference_poses, segment_path_length);
+    const bool graph_consistent =
+        consistency.weight >= g_loop_min_consistency_weight;
+    LOG(INFO) << GREEN
+              << " ---> 中途回环图一致性。earlier_idx: "
+              << revisit.earlier
+              << " later_idx: " << revisit.later
+              << " path_length: " << consistency.path_length
+              << " translation_residual: "
+              << consistency.translation_residual
+              << " rotation_residual_deg: "
+              << consistency.rotation_residual_deg
+              << " consistency_weight: " << consistency.weight
+              << " graph_consistent: " << graph_consistent << RESET;
+    if (!graph_consistent) {
+      continue;
+    }
+
+    // Overlapping endpoint/internal windows reuse most of the same points.
+    // Retain the extra observation as weak corroboration, but do not count it
+    // as an independent full-strength constraint. The switch weight is
+    // optimized from the whole XYZ+yaw residual and travelled path length.
+    edge.weight =
+        (overlaps_endpoint_closure ? 0.25f : 1.5f) *
+        consistency.weight;
+    edge.loop = true;
+    pose_graph_edges.push_back(edge);
+    ++accepted_internal_loops;
+  }
+
+  if (candidate_idx < 0 && accepted_internal_loops == 0) {
+    LOG(INFO) << GREEN
+              << " ---> 没有通过完整验证的终点或中途回环；"
+              << "保留原始 map.pcd，不生成 map_loop.pcd。" << RESET;
     return;
   }
 
-  const Eigen::Matrix4f correction = icp.getFinalTransformation();
-  LOG(INFO) << GREEN << " ---> 找到闭环候选。candidate_idx: " << candidate_idx
-            << " end_idx: " << end_idx
-            << " pose_distance: " << best_distance
-            << " icp_score: " << score << RESET;
+  if (finalize_timed_out()) {
+    return;
+  }
+
+  const float initial_graph_cost =
+      pose_graph_robust_cost(
+          correction_poses, pose_graph_edges);
+  if (!optimize_pose_graph(
+          correction_poses, pose_graph_edges)) {
+    LOG(ERROR) << RED
+               << " ---> 多回环位姿图优化失败，拒绝生成闭环地图。"
+               << RESET;
+    return;
+  }
+  const float optimized_graph_cost =
+      pose_graph_robust_cost(
+          correction_poses, pose_graph_edges);
+
+  float max_correction_translation = 0.0f;
+  float max_correction_rotation_deg = 0.0f;
+  float max_adjacent_translation = 0.0f;
+  float max_adjacent_rotation_deg = 0.0f;
+  for (std::size_t i = 0; i < correction_poses.size(); ++i) {
+    max_correction_translation =
+        std::max(
+            max_correction_translation,
+            correction_poses[i].t_.norm());
+    max_correction_rotation_deg =
+        std::max(
+            max_correction_rotation_deg,
+            correction_poses[i].so3().log_vee().norm() *
+                180.0f / static_cast<float>(M_PI));
+    if (i == 0) {
+      continue;
+    }
+    const SE3 adjacent =
+        correction_poses[i - 1].inverse() *
+        correction_poses[i];
+    max_adjacent_translation =
+        std::max(max_adjacent_translation, adjacent.t_.norm());
+    max_adjacent_rotation_deg =
+        std::max(
+            max_adjacent_rotation_deg,
+            adjacent.so3().log_vee().norm() *
+                180.0f / static_cast<float>(M_PI));
+  }
+
+  // A smooth deformation can still be globally wrong. Bound total XYZ
+  // translation by a fraction of travelled route, never by a fixed Z or
+  // fixed-metre ceiling. Reuse the per-loop rotation gate as the total yaw
+  // correction gate.
+  const float max_total_translation =
+      0.05f * raw_route_length;
+  if (!std::isfinite(optimized_graph_cost) ||
+      optimized_graph_cost >= initial_graph_cost ||
+      max_correction_translation > max_total_translation ||
+      max_correction_rotation_deg >
+          g_loop_max_correction_rotation_deg ||
+      // A correction larger than 15 cm between neighbouring 0.5 m
+      // keyframes is a local warp, even if the total graph deformation is
+      // otherwise plausible.  Reject it instead of publishing a seam.
+      max_adjacent_translation > 0.15f ||
+      max_adjacent_rotation_deg > 2.0f) {
+    LOG(ERROR) << RED
+               << " ---> 位姿图修正不可信，拒绝生成闭环地图。"
+               << " graph_cost: " << initial_graph_cost
+               << " -> " << optimized_graph_cost
+               << " raw_route_length: " << raw_route_length
+               << " max_correction_translation: "
+               << max_correction_translation
+               << " max_total_translation: "
+               << max_total_translation
+               << " max_correction_rotation_deg: "
+               << max_correction_rotation_deg
+               << " max_total_rotation_deg: "
+               << g_loop_max_correction_rotation_deg
+               << " max_adjacent_translation: "
+               << max_adjacent_translation
+               << " max_adjacent_rotation_deg: "
+               << max_adjacent_rotation_deg << RESET;
+    return;
+  }
+  LOG(INFO) << GREEN
+            << " ---> 多回环位姿图优化完成。nodes: "
+            << correction_poses.size()
+            << " internal_loops: " << accepted_internal_loops
+            << " graph_cost: " << initial_graph_cost
+            << " -> " << optimized_graph_cost
+            << " raw_route_length: " << raw_route_length
+            << " max_correction_translation: "
+            << max_correction_translation
+            << " max_correction_rotation_deg: "
+            << max_correction_rotation_deg
+            << " max_adjacent_translation: "
+            << max_adjacent_translation
+            << " max_adjacent_rotation_deg: "
+            << max_adjacent_rotation_deg << RESET;
 
   CloudPtr loop_map(new PointCloudType());
-  const float denom = static_cast<float>(std::max(1, end_idx - candidate_idx));
+  TimedPoseCorrectionVector pose_corrections;
+  pose_corrections.reserve(loop_keyframes_.size());
   for (int i = 0; i <= end_idx; ++i) {
-    const float alpha = i <= candidate_idx ? 0.0f : static_cast<float>(i - candidate_idx) / denom;
-    const Eigen::Matrix4f corrected_pose =
-        interpolate_correction(correction, alpha) * se3_to_matrix4f(loop_keyframes_[i].pose);
-
+    if ((i % 64) == 0 && finalize_timed_out()) {
+      return;
+    }
+    const SE3 optimized_pose =
+        correction_poses[i] * raw_poses[i];
     CloudPtr transformed(new PointCloudType());
-    pcl::transformPointCloud(*loop_keyframes_[i].cloud_body, *transformed, corrected_pose);
+    pcl::transformPointCloud(
+        *loop_keyframes_[i].cloud_body,
+        *transformed,
+        optimized_pose.T());
     *loop_map += *transformed;
+
+    TimedPoseCorrection sample;
+    sample.timestamp = loop_keyframes_[i].timestamp;
+    sample.correction = correction_poses[i].T();
+    pose_corrections.push_back(sample);
   }
 
   PointCloudType filtered_loop_map;
+  if (finalize_timed_out()) {
+    return;
+  }
   make_map_pcd_cloud(loop_map, filtered_loop_map, g_loop_map_ds_size, "loop final");
 
-  const std::string loop_map_path = g_save_map_dir + "/" + g_loop_map_name;
+  if (finalize_timed_out()) {
+    return;
+  }
+
   if (save_pcd_binary_safe(loop_map_path, filtered_loop_map)) {
     LOG(INFO) << GREEN << " ---> 闭环地图已保存: " << loop_map_path << RESET;
     LOG(INFO) << GREEN << " ---> 闭环地图点数: " << filtered_loop_map.size() << RESET;
+
+    const std::filesystem::path canonical_map_path =
+        std::filesystem::path(g_save_map_dir) / g_map_name;
+    const std::filesystem::path raw_map_path =
+        canonical_map_path.parent_path() /
+        (canonical_map_path.stem().string() + "_raw" +
+         canonical_map_path.extension().string());
+    std::error_code copy_error;
+    if (std::filesystem::exists(canonical_map_path)) {
+      std::filesystem::copy_file(
+          canonical_map_path,
+          raw_map_path,
+          std::filesystem::copy_options::overwrite_existing,
+          copy_error);
+      if (copy_error) {
+        LOG(WARNING) << YELLOW << " ---> 原始未闭环地图备份失败: "
+                     << raw_map_path.string()
+                     << " error: " << copy_error.message() << RESET;
+      }
+    }
+
+    if (!save_pcd_binary_safe(canonical_map_path.string(), filtered_loop_map)) {
+      LOG(ERROR) << RED << " ---> 闭环地图无法提交为正式地图: "
+                 << canonical_map_path.string() << RESET;
+      return;
+    }
+    if (!save_loop_trajectory_safe(
+            trajectory_path, pose_corrections)) {
+      LOG(ERROR) << RED
+                 << " ---> 正式地图已闭环，但位姿图轨迹保存失败。"
+                 << RESET;
+      return;
+    }
+    LOG(INFO) << GREEN << " ---> 闭环地图已提交为正式 map.pcd；"
+              << "terrain 将按同一条优化轨迹重建（不锁定 Z）。"
+              << RESET;
   }
 }
 

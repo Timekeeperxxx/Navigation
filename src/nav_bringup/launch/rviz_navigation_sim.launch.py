@@ -115,9 +115,9 @@ def generate_launch_description():
                 "marker_topic": "/nav/sim_visual_markers",
                 "global_frame": "map",
                 # Keep these identical to scan_planner.yaml:
-                # radius=0.27, centre=-0.425 +/- 0.205.
+                # radius=0.27, body-centred offsets=+/-0.205.
                 "footprint_radius": 0.27,
-                "footprint_center_offsets": [-0.22, -0.63],
+                "footprint_center_offsets": [0.205, -0.205],
                 "footprint_height": 0.32,
             }
         ],

@@ -7,82 +7,23 @@ scan_planner_node:
   ros__parameters:
     body_pose_topic: "/scan/body_pose"
     replan_request_topic: "/nav/replan_request"
-    execution_frozen_topic: "/planning/b2_execution_frozen"
 
     "fsm/navi_mode": 3
-    "fsm/thresh_replan": 1.0
+    "fsm/thresh_replan": 0.5
     "fsm/thresh_no_replan": 0.1
     # Keep the local target comfortably inside the 10x10m sliding map.  A 5m
     # target sat on the map boundary and was frequently classified as unknown.
     "fsm/planning_horizon": 3.0
-    # Disabled until local B2 yaw is an explicit trajectory state.  A raw
-    # point-cloud polyline contains harmless zigzags that must not become a
-    # stop-turn-stop sequence.
-    "fsm/reference_corner_stop_enabled": false
-    "fsm/reference_corner_stop_angle": 1.0471975512
     # Lift only the geometric SCAN planning start above base_footprint.  The
     # B2 controller remains planar and never commands linear.z.
-    "fsm/start_height_offset": 0.32
-    # A completed local lookahead is not the final destination.  Only let the
-    # SCAN FSM wait for a new target after the body reaches this XY radius.
-    "fsm/final_goal_tolerance": 0.10
+    "fsm/start_height_offset": 0.30
+    # A completed local lookahead is not the final destination.  Hand the last
+    # spline to the terminal pose controller only after the body is genuinely
+    # close; 0.50m made SCAN clear the goal visibly early on the real B2.
+    "fsm/final_goal_tolerance": 0.20
     "fsm/emergency_time_": 1.0
-    # A blocked path stays stopped while SCAN searches for a bypass.  Bound
-    # retries so a temporarily impossible route does not saturate the Jetson,
-    # and never discard the active target merely because the safety layer is
-    # holding execution frozen.
-    "fsm/frozen_replan_retry_interval": 0.50
-    # Validate every B-spline with the same continuous double-circle sweep as
-    # dynamic_avoidance_monitor before replacing the active trajectory.
-    "fsm/execution_validation_enabled": true
-    # Must match closed_loop_controller.execution_path_sample_dt.
-    "fsm/execution_validation_path_sample_dt": 0.25
-    # B2 cannot execute an XY-degenerate vertical segment. Match the simulator
-    # terrain tracker and reject cusp/slope-invalid splines before publishing.
-    "fsm/b2_maximum_path_slope": 0.70
-    # Use half the runtime monitor step so the discrete map query
-    # conservatively covers the monitor's continuous line-segment corridor.
-    "fsm/execution_validation_max_position_step": 0.025
-    "fsm/execution_validation_max_yaw_step": 0.0872664626
-    # Match the monitor's half-voxel path_corridor_radius.
-    "fsm/execution_validation_probe_radius": 0.04
-    "fsm/execution_validation_probe_count": 16
-    # The log-odds grid needs multiple LiDAR hits before a voxel reaches the
-    # occupied threshold. Never publish from a freshly empty local map.
-    "fsm/execution_validation_min_map_updates": 3
-    # Preserve bounded clearance escape only when the live footprint already
-    # begins inside the inflated shell.
-    "fsm/execution_validation_allow_occupied_start": true
-    "fsm/execution_validation_start_escape_distance": 0.60
-    # Normal B-spline tracking remains forward-only. Reverse is exposed only
-    # through the explicit, safety-preflighted straight recovery state below.
-    "fsm/b2_allow_reverse": false
-    "fsm/b2_reverse_recovery_enabled": true
-    "fsm/b2_reverse_recovery_request_period": 0.50
-    # Reverse is obstacle recovery, not a generic response to optimizer,
-    # terrain, slope, or direction-validation failures. Require two failed
-    # forward replans and a live obstacle in the current/near-forward body
-    # sweep before requesting the safety-preflighted reverse state.
-    "fsm/b2_reverse_recovery_min_replan_failures": 2
-    "fsm/b2_reverse_recovery_obstacle_probe_distance": 0.25
-    "fsm/b2_reverse_recovery_obstacle_probe_step": 0.05
-    "fsm/b2_forward_seed_speed": 0.15
-    "fsm/b2_forward_seed_clearance_distance": 0.25
-    "fsm/b2_forward_seed_sample_step": 0.025
-    "fsm/b2_forward_seed_min_reference_alignment": 0.25
-    # The legacy SCAN random polynomial is retained only as an obstacle
-    # detour seed.  It may not initially oppose the active reference or lose
-    # forward progress during the first B2 body length.
-    "fsm/b2_random_direction_probe_distance": 0.20
-    "fsm/b2_random_direction_guard_distance": 0.60
-    "fsm/b2_random_max_reference_heading_error": 1.0471975512
-    "fsm/b2_random_backtrack_tolerance": 0.03
-    # A body-forward obstacle bypass may briefly move sideways/away in map
-    # coordinates after turning. Bound that detour without treating it as a
-    # reverse command; normal controller vx remains clamped non-negative.
-    "fsm/b2_obstacle_detour_retreat_allowance": 0.35
-    "fsm/b2_obstacle_detour_minimum_progress": 0.20
-    "fsm/b2_obstacle_detour_maximum_length_ratio": 2.50
+    "fsm/emergency_min_stop_duration": 0.5
+    "fsm/emergency_replan_period": 1.0
     "fsm/fail_safe": true
     "fsm/max_replan_fail_count": 1000
     "fsm/is_real_world": true
@@ -92,63 +33,37 @@ scan_planner_node:
     "grid_map/sensor_type": "lidar"
     "grid_map/cloud_is_world": true
     "grid_map/need_extrinsic": false
-    # Keep only the Mid-360 hardware blind range here.  The pose-aware body
-    # mask below removes B2 body/leg returns without hiding nearby walls.
+    # Keep only the physical Mid-360 blind range here.  A pose-aware B2 body
+    # mask removes self returns without hiding a nearby external obstacle.
     "grid_map/lidar_min_range": 0.10
     "grid_map/self_filter_enabled": true
-    # Keep the LiDAR body-return mask independent from the larger planning
-    # footprint, otherwise close walls can be erased as if they were the robot.
     "grid_map/self_filter_radius": 0.27
     "grid_map/self_filter_padding": 0.0
     "grid_map/self_filter_z_min_offset": -0.15
     "grid_map/self_filter_z_max_above_sensor": 0.05
-    # Static ground ownership is global-only. SCAN keeps checking live LiDAR
-    # obstacles, but must not reject a local curve because sparse /mapground
-    # probes are missing while the robot is moving.
-    "grid_map/ground_support_enabled": false
-    "grid_map/ground_support_fail_closed": true
-    "grid_map/ground_support_bucket_size": 0.15
-    # 0.15 m matching radius + 5 mm voxel-centroid/numeric boundary allowance.
-    "grid_map/ground_support_xy_tolerance": 0.155
-    "grid_map/ground_support_z_tolerance": 0.20
-    "grid_map/ground_support_planning_height": 0.32
-    # Probe 0.155 m matching tolerance + 0.035 m tracking margin outside the
-    # physical circle. This erodes the allowed ground by the real 0.27 m
-    # footprint while tolerating normal 0.10 m point-cloud sampling gaps.
-    "grid_map/ground_support_footprint_probe_margin": 0.19
-    "grid_map/ground_support_perimeter_samples": 16
-    "grid_map/ground_support_radial_samples": 2
-    # Each B2 circle may miss at most 3 outer probes; centre/inner probes remain strict.
-    "grid_map/ground_support_outer_ring_max_missing_per_circle": 3
-    "grid_map/resolution": 0.05
+    "grid_map/resolution": 0.03
     "grid_map/sliding_map_size_x": 10.0
     "grid_map/sliding_map_size_y": 10.0
     "grid_map/sliding_map_size_z": 3.0
-    "grid_map/local_update_range_x": 5.0
-    "grid_map/local_update_range_y": 5.0
-    "grid_map/local_update_range_z": 1.5
+    "grid_map/local_update_range_x": 4.0
+    "grid_map/local_update_range_y": 4.0
+    "grid_map/local_update_range_z": 1.0
     "grid_map/map_sliding_en": true
     "grid_map/map_sliding_thresh": 0.2
-    # Replaces the previous Unitree Go2 collision profile backed up separately.
-    # Measured from map -> base_footprint along the robot heading, place the
-    # two B2 collision-circle centres about 0.22m and 0.63m behind the TF
-    # origin.  center_offset is their midpoint and offset is half their gap.
+    # Unitree B2 footprint: two overlapping cylinders around base_footprint.
     "grid_map/body_height": 0.32
-    # Radius 0.27m keeps more corner clearance than the old 0.225m footprint,
-    # while leaving one map voxel of start clearance in narrow corridors.
-    # The front circle stays 0.05m farther forward and both circles overlap.
     "grid_map/double_cylinder_radius": 0.27
+    # /grid_map/occupancy_inflate horizontal obstacle expansion. Keep this
+    # separate from the robot footprint radius above.
+    "grid_map/obstacles_inflation_radius": 0.20
     "grid_map/double_cylinder_offset": 0.205
-    "grid_map/double_cylinder_center_offset": -0.425
-    # One voxel of hard-layer margin keeps the planned curve off inner-corner
-    # apexes: the executor tracks the chord (time_forward lookahead + the
-    # 0.08 m/s vy clamp) and cuts inside the planned arc, so a plan touching
-    # the physical boundary gets executed into the wall.  Boundary deadlocks
-    # that this margin can create are recovered by the monitor's
-    # clearance-escape path.
-    "grid_map/collision_inflation_margin_xy": 0.05
+    "grid_map/double_cylinder_center_offset": 0.0
+    # SCAN queries collision at ground + body_height.  Floor returns must stay
+    # below that plane instead of becoming 1.65m-tall phantom obstacles.
+    # Returns from real vertical obstacles are still expanded down into the
+    # B2 body plane, so obstacle avoidance remains active.
     "grid_map/obstacles_inflation_z_up": 0.10
-    "grid_map/obstacles_inflation_z_down": 0.33
+    "grid_map/obstacles_inflation_z_down": 0.45
     "grid_map/ground_height": 0.0
     "grid_map/cx": 317.19183349609375
     "grid_map/cy": 256.4806823730469
@@ -164,114 +79,125 @@ scan_planner_node:
     "grid_map/p_min": 0.12
     "grid_map/p_max": 0.98
     "grid_map/p_occ": 0.80
-    "grid_map/max_ray_length": 5.0
+    "grid_map/max_ray_length": 3.5
+    # Lidar point clouds contain hits but not explicit max-range free rays.
+    # Decay local occupied voxels that are not hit/traversed in the current
+    # scan. Keep decay conservative so short cloud/TF jitter does not clear
+    # dynamic obstacles before avoidance can replan around them.
+    "grid_map/occupancy_decay_enabled": true
+    "grid_map/occupancy_decay_miss_scale": 0.5
+    "grid_map/occupancy_decay_period": 1
     "grid_map/vis_height": 0.3
     "grid_map/show_occ_time": false
+    "grid_map/timing_log_enabled": true
+    "grid_map/timing_log_period": 1.0
+    "grid_map/publish_inflate_sparse": true
+    "grid_map/inflate_sparse_leaf_size": 0.15
+    "grid_map/inflate_sparse_topic": "/grid_map/occupancy_inflate_sparse"
 
-    # Plan no faster than the controller can execute (max_vx 0.25): a 0.35
-    # time-parameterized plan makes the robot fall behind everywhere, and at
-    # corners the accumulated pos_err vector points through the inner apex.
     "manager/max_vel": 0.22
     "manager/max_acc": 0.50
     "manager/max_jerk": 4.0
-    "manager/control_points_distance": 0.20
+    "manager/control_points_distance": 0.30
     "manager/feasibility_tolerance": 0.5
     "manager/planning_horizon": 3.0
-    # SCAN originated as a 3D aerial planner.  B2 may detour laterally but
-    # cannot use random vertical waypoints to get around an obstacle.
-    "manager/planar_motion": true
+    # Check a small corridor around the published trajectory.  The inflated
+    # obstacle cloud can sit below the lifted SCAN body path, so use the same
+    # vertical tolerance as dynamic_avoidance_monitor.
+    "manager/collision_check_corridor_radius": 0.01
+    "manager/collision_check_z_tolerance": 0.45
+    "manager/collision_check_z_tolerance_down": 0.05
+    "manager/collision_check_z_tolerance_up": 0.45
+    # Ignore occupied samples close to the trajectory start.  The corridor
+    # checker samples laterally up to 0.40m, so this must be larger than the
+    # corridor radius to avoid rejecting a new trajectory at t=0 because of
+    # robot/self-filter or stale local-map points near the current pose.
+    "manager/collision_check_start_clear_radius": 0.10
 
     "optimization/lambda_smooth": 1.0
-    "optimization/lambda_collision": 5.0
+    "optimization/lambda_collision": 1.5
     "optimization/lambda_feasibility": 0.1
-    "optimization/lambda_fitness": 1.0
-    # Free-space reference-mode splines retain the verified global polyline
-    # through turns. This term is disabled automatically when the reference
-    # intersects an obstacle so local A*/rebound remains free to detour.
-    "optimization/lambda_reference": 3.0
-    "optimization/dist0": 0.30
-    # 起点碰撞豁免半径：机器人当前足迹陷入膨胀壳时（贴墙漂移、有人贴身），
-    # 轨迹起点附近的占用不否决整条重规划——否则所有重规划被拒、原地冻结
-    # （7月24 22:15 实跑日志：40 秒内 2030 次拒绝）。超出该半径照常拒绝；
-    # 执行安全由动态避障监控层独立把关（clearance_escape 单调脱离条件）。
-    "optimization/start_collision_exempt_radius": 0.40
-    # The downstream double-circle safety gate validates every published
-    # sample, so optimizer/init/refine must also check the complete local
-    # trajectory instead of the aerial planner's historical first 2/3.
-    "optimization/full_trajectory_collision_check": true
-    # Keep in lockstep with manager/max_vel above.
+    "optimization/lambda_fitness": 0.5
+    "optimization/dist0": 0.55
     "optimization/max_vel": 0.22
     "optimization/vel_tolerance": 1.0
     "optimization/max_acc": 0.50
-    "optimization/acc_tolerance": 1.0
+    "optimization/acc_tolerance": 1.5
 
 closed_loop_controller:
   ros__parameters:
     body_pose_topic: "/scan/body_pose"
-    goal_pose_topic: "/goal_pose"
     execution_path_topic: "/scan/execution_path"
     execution_path_frame: "map"
     safety_execution_frozen_topic: "/planning/safety_execution_frozen"
-    execution_frozen_topic: "/planning/b2_execution_frozen"
-    # Compatibility output only; new B2 components use the canonical topic.
-    legacy_execution_frozen_topic: "/planning/go2_execution_frozen"
-    execution_path_publish_period: 0.2
+    safety_speed_scale_topic: "/planning/safety_speed_scale"
+    controller_reset_topic: "/planning/controller_reset"
+    goal_position_topic: "/clicked_point"
+    task_start_reset_topics:
+      - "/nav_start"
+      - "/scheduled_task_start"
+      - "/patrol_task_start"
+    safety_speed_scale_timeout: 1.0
+    execution_path_publish_period: 0.10
     execution_path_sample_dt: 0.25
-    # Legacy fallback only. New SCAN trajectories carry the same explicit B2
-    # yaw schedule that was checked by the planner and safety monitor.
-    time_forward: 0.4
-    # Walk-while-misaligned limit.  0.8 rad (46 deg) let the robot carry a
-    # large heading offset through corners where the 0.08 m/s vy clamp then
-    # bent the executed motion toward the inner wall; 0.5 rad forces more
-    # turn-in-place at sharp corners instead.
+    time_forward: 1.0
+    # Hold linear velocity at zero until the body is roughly aligned with the
+    # trajectory heading.  This avoids walking sideways when the lookahead
+    # target changes around an obstacle.
     heading_error_threshold: 0.5
-    # Stay in turn-in-place mode until clearly aligned, preventing a curved
-    # spline from toggling rotate/walk at the 100 Hz controller rate.
+    # Remain in heading alignment until both the error and measured body yaw
+    # rate settle.  This Schmitt band prevents rotate/walk chatter at 0.5 rad.
     heading_resume_threshold: 0.35
     kp_pos: 0.8
     kp_yaw: 1.5
-    # Track the explicit B2 body-yaw schedule while walking. Without angular
-    # rate feed-forward, proportional feedback accumulates a curve-following
-    # lag and repeatedly enters the turn-in-place heading gate.
-    yaw_feedforward_gain: 1.0
-    # Conservative B2 navigation speed; dynamic avoidance can still scale it
-    # down or clamp it to zero independently.
+    # Compensate the delayed B2 yaw response using pose-derived angular rate.
+    # If a correction would reverse while the body is still turning, command
+    # zero first instead of immediately applying the opposite saturated yaw.
+    yaw_prediction_horizon: 1.0
+    yaw_rate_filter_time_constant: 0.15
+    yaw_rate_settle_threshold: 0.06
+    yaw_reversal_neutral_time: 0.35
+    desired_yaw_filter_time_constant: 0.20
+    maximum_measured_yaw_rate: 2.0
+    # B2 navigation limits. Dynamic avoidance may only scale these down.
     max_vx: 0.25
     max_vy: 0.08
-    max_vyaw: 0.30
+    max_vyaw: 0.45
     # Unitree B2 ignores very small Move() commands even when the SDK returns
     # success. Keep the pre-safety command above its effective walking floor;
     # dynamic avoidance remains downstream and can still scale or stop it.
     min_translation_speed: 0.15
-    # Minimum effective SportClient yaw while B2 is rotating in place. Normal
-    # walk-and-turn corrections remain continuous below this value.
-    min_in_place_vyaw: 0.20
+    # min_translation_speed already enforces the B2 walking floor in world
+    # velocity. Do not turn a near-zero body-forward solution into an
+    # artificial 0.15 m/s surge after every short SCAN replan.
+    min_forward_x_speed: 0.0
+    # Ordinary path tracking must approach by turning and walking forward.
+    # Reverse remains reserved for an explicit, separately validated recovery.
     allow_reverse: false
-    # Recovery never enables normal trajectory reversal. Each round commands
-    # only body-x reverse, with vy=0 and yaw_rate=0, then replans forward.
-    reverse_recovery_speed: 0.15
-    reverse_recovery_max_distance: 0.50
-    reverse_recovery_max_duration: 2.0
-    # Hold zero command while the monitor evaluates the newly published
-    # reverse path. A stale "safe" sample from the old forward path is ignored.
-    reverse_recovery_minimum_preflight_duration: 0.40
-    reverse_recovery_safety_approval_timeout: 1.5
-    reverse_recovery_odometry_timeout: 0.50
-    reverse_recovery_max_yaw_drift: 0.15
-    # Keep every execution path on the same B2 body slice used by the
-    # simulator and ground-support monitor. The round-start base z is latched
-    # by the controller, so repeated safety publications cannot ratchet z.
-    reverse_recovery_path_height_offset: 0.32
-    reverse_recovery_path_sample_step: 0.05
     finish_dist: 0.10
     enable_final_yaw: true
-    final_yaw_tolerance: 0.10
-    # Publish the complete in-place B2 double-circle sweep first. The controller
-    # remains at zero velocity long enough for dynamic_avoidance_monitor to
-    # validate every intermediate attitude against obstacles and ground.
-    final_yaw_sweep_max_step: 0.0872664626
-    final_yaw_validation_topic: "/planning/final_yaw_validation"
-    # A stale safety Bool cannot authorize a new rotation sweep. Wait for a
-    # generation-matched monitor ACK; on timeout, keep the reached XY and skip
-    # only the optional final orientation.
-    final_yaw_validation_timeout: 2.0
+    # The terminal controller holds XY while aligning yaw.  A small bounded
+    # reverse is allowed only here so turning drift can be corrected without
+    # reopening the full SCAN goal.
+    final_yaw_start_dist: 0.20
+    final_position_tolerance: 0.12
+    final_position_kp: 0.8
+    final_position_max_vx: 0.10
+    final_position_max_vy: 0.06
+    final_position_allow_reverse: true
+    final_yaw_tolerance: 0.20
+    final_yaw_kp: 0.6
+    # B2 实机对过小角速度没有动作；终点误差未达标时保持有效转向速度。
+    final_yaw_min_vyaw: 0.25
+    final_yaw_max_vyaw: 0.30
+    # Do not abort a large turn merely because a fixed wall-clock budget
+    # expired.  Do not clear the active route on a yaw dead-zone: the effective
+    # minimum angular speed above is responsible for continuing alignment.
+    final_yaw_timeout: 0.0
+    final_yaw_progress_timeout: 0.0
+    final_yaw_progress_epsilon: 0.05
+    final_yaw_reversal_hold_time: 0.35
+    final_yaw_reversal_hold_speed_scale: 0.35
+    final_yaw_timeout_mark_reached: false
+    approach_slowdown_dist: 1.5
+    approach_min_speed_scale: 0.50

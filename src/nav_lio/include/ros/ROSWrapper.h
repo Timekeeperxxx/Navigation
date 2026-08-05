@@ -9,6 +9,7 @@
 #include <execution>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 
@@ -60,6 +61,7 @@ public:
   using Ptr = std::shared_ptr<ROSWrapper>;
   bool sync_measure(MeasureGroup&);
   bool isMappingPaused() const { return mapping_paused_.load(); }
+  void finish_measure();
 
   void setESKF(ESKF::Ptr& eskf) { eskf_ = eskf;}
 
@@ -74,6 +76,10 @@ public:
     sync_window_dropped_count_ = 0;
     sync_health_unhealthy_ = false;
     sync_health_window_start_ = {};
+    input_frozen_.store(false);
+    mapping_paused_.store(false);
+    processing_measure_.store(false);
+    snapshot_target_cutoff_ = -1.0;
   }
 
   void pub_odom(const NavState&);
@@ -123,10 +129,15 @@ private:
   std::deque<IMUData>   imu_buffer_;
   std::deque<LidarData> lidar_buffer_;
   std::mutex sensor_buffer_mutex_;
+  std::condition_variable sensor_buffer_cv_;
   bool lidar_pushed_ = false;
   double last_timestamp_imu_ = -1.0;
   double last_timestamp_lidar_ = -1.0;
   std::atomic<bool> mapping_paused_{false};
+  std::atomic<bool> input_frozen_{false};
+  std::atomic<bool> processing_measure_{false};
+  double snapshot_target_cutoff_ = -1.0;
+  double pause_drain_timeout_seconds_ = 5.0;
   std::chrono::steady_clock::time_point last_lidar_arrival_time_{};
   double last_lidar_source_time_ = -1.0;
   std::chrono::steady_clock::time_point last_imu_lag_warning_time_{};
@@ -144,6 +155,7 @@ private:
   std::uint64_t sync_window_dropped_count_ = 0;
   std::uint64_t received_lidar_count_ = 0;
   std::uint64_t lidar_source_gap_count_ = 0;
+  std::uint64_t lidar_estimated_missing_count_ = 0;
   bool sync_health_unhealthy_ = false;
   std::chrono::steady_clock::time_point sync_health_window_start_{};
 
