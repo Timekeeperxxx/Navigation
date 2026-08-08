@@ -29,8 +29,6 @@
 * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include <global_planner/a_star_on_pre_graph.h>
-#include <algorithm>
-#include <cmath>
 
 AstarListPreGraph::AstarListPreGraph(perception_3d::StaticGraph& static_graph){
   static_graph_ = static_graph;
@@ -149,20 +147,16 @@ double A_Star_on_PreGraph::getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_cur
   float vx2, vy2;
   vx2 = m_pcl_expanding.x - m_pcl_current.x;
   vy2 = m_pcl_expanding.y - m_pcl_current.y;
-
-  const double len1 = std::sqrt(vx1 * vx1 + vy1 * vy1);
-  const double len2 = std::sqrt(vx2 * vx2 + vy2 * vy2);
-  if (len1 <= 1e-6 || len2 <= 1e-6) {
-    return 0.0;
-  }
-
-  double cos_theta = (vx1 * vx2 + vy1 * vy2) / (len1 * len2);
-  if (cos_theta > 1.0) {
+  float cos_theta = (vx1*vx2 + vy1*vy2)/(sqrt(vx1*vx1+vy1*vy1)*sqrt(vx2*vx2+vy2*vy2));
+  if(fabs(cos_theta)>1)
     cos_theta = 1.0;
-  } else if (cos_theta < -1.0) {
-    cos_theta = -1.0;
-  }
-  double theta_of_vector = std::acos(cos_theta);
+  double theta_of_vector = acos(cos_theta);
+  if(vx1==0 && vy1==0)
+    theta_of_vector = 0;
+  else if(vx2==0 && vy2==0)
+    theta_of_vector = 0;
+  else if(fabs(fabs(vx1)-fabs(vx2))<=0.0001)
+    theta_of_vector = 0;
   
   if(fabs(theta_of_vector)<=0.345)//cap
     theta_of_vector = 0.0;
@@ -312,18 +306,8 @@ void A_Star_on_PreGraph::getPath(
       //@ get current_parent, current, expanding to compute theta od expanding
       double theta = getThetaFromParent2Expanding(pcl_current_parent, pcl_current, pcl_expanding);
 
-      double directness_penalty = 0.0;
-      if (goal_directness_weight_ > 0.0 && current_expanding_g > 1e-6) {
-        const double current_goal_dist = std::sqrt(pcl::geometry::squaredDistance(pcl_current, pcl_goal));
-        const double expanding_goal_dist = std::sqrt(pcl::geometry::squaredDistance(pcl_expanding, pcl_goal));
-        const double goal_progress = current_goal_dist - expanding_goal_dist;
-        const double inefficient_motion = std::max(0.0, current_expanding_g - goal_progress);
-        directness_penalty = inefficient_motion * goal_directness_weight_;
-      }
-
       float new_g = current_node.g + (*it).second + factor * 1.0 + 
-                      theta*turning_weight_ + pc_original_z_up_->points[current_node.self_index].intensity +
-                      directness_penalty;
+                      theta*turning_weight_ + pc_original_z_up_->points[current_node.self_index].intensity;
 
       float new_h = sqrt(pcl::geometry::squaredDistance(pcl_expanding, pcl_goal));
       float new_f = new_g + new_h;

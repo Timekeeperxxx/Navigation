@@ -35,8 +35,8 @@
 #include <global_planner/a_star_on_pc.h>
 #include <pcl/filters/voxel_grid.h>
 #include <nav_msgs/msg/path.hpp>
-#include <algorithm>
-#include <tuple>
+#include <functional>
+#include <optional>
 
 /**
  * @brief Hybrid A* planner that fuses planground and ground point clouds into a single map.
@@ -72,6 +72,13 @@
  */
 class Hybrid_A_Star {
 public:
+  using EdgeValidator = A_Star_on_Graph::EdgeValidator;
+  using TurnValidator = std::function<bool(
+    const pcl::PointXYZI&, const pcl::PointXYZI&, const pcl::PointXYZI&)>;
+  using GoalConnectorValidator = std::function<bool(
+    const pcl::PointXYZI&, const pcl::PointXYZI&)>;
+  using CancelChecker = A_Star_on_Graph::CancelChecker;
+
   /**
    * @brief Constructor
    * @param pc_planground The planground point cloud (primary planning surface)
@@ -86,29 +93,10 @@ public:
 
   ~Hybrid_A_Star();
 
-	  /**
-	   * @brief Set the turning weight penalty
-	   */
-	  void setupTurningWeight(double weight) { turning_weight_ = weight; }
-	  void setupBacktrackingWeight(double weight) { backtracking_weight_ = weight > 0.0 ? weight : 0.0; }
-	  void setupGoalDirectnessWeight(double weight) { goal_directness_weight_ = weight > 0.0 ? weight : 0.0; }
-
-	  void setPathAcceptanceLimits(double detour_limit, double planground_margin)
-	  {
-	    path_detour_limit_ = detour_limit > 1.0 ? detour_limit : 1.0;
-	    planground_path_margin_ = planground_margin > 1.0 ? planground_margin : 1.0;
-	  }
-
-	  void setOutputSmoothingParams(int iterations,
-	                                double data_weight,
-	                                double smooth_weight,
-	                                double max_deviation)
-	  {
-	    output_smoothing_iterations_ = std::max(0, std::min(20, iterations));
-	    output_smoothing_data_weight_ = std::max(0.0, std::min(1.0, data_weight));
-	    output_smoothing_smooth_weight_ = std::max(0.0, std::min(0.5, smooth_weight));
-	    output_smoothing_max_deviation_ = max_deviation > 0.0 ? max_deviation : 0.0;
-	  }
+  /**
+   * @brief Set the turning weight penalty
+   */
+  void setupTurningWeight(double weight) { turning_weight_ = weight; }
 
   /**
    * @brief Set the planground bias weight (higher = stronger preference for planground)
@@ -134,7 +122,64 @@ public:
    * @brief Set the voxel leaf size for downsampling the hybrid cloud
    * @param leaf_size The voxel grid leaf size in meters
    */
-  void setDownsampleLeafSize(double leaf_size) { hybrid_downsample_leaf_size_ = leaf_size; }
+  void setDownsampleLeafSize(double leaf_size);
+
+  /**
+   * @brief Limit the short planground-only reference search.
+   *
+   * The reference search is used only to estimate the detour ratio and to
+   * provide a connected fallback.  It must not delay the main hybrid search
+   * when the planground graph is disconnected.
+   */
+  void setReferencePlanningTime(double seconds);
+
+  /**
+   * @brief Limit the main hybrid A* search.
+   */
+  void setMaxPlanningTime(double seconds);
+
+  /**
+   * @brief Set the weighted-A* heuristic multiplier for the main search.
+   *
+   * A value of 1.0 is ordinary A*. Values greater than 1.0 trade some path
+   * optimality for a smaller search frontier.
+   */
+  void setHeuristicWeight(double weight);
+
+  /**
+   * @brief Install a cooperative cancellation check used by both A* passes.
+   *
+   * The callback should return true when a newer goal supersedes this search.
+   * An empty callback disables cancellation.
+   */
+  void setCancelChecker(CancelChecker checker);
+
+  /**
+   * @brief Install an optional validator for every planning and output edge.
+   *
+   * The same callback is applied by both A* passes and again after smoothing,
+   * so shortcutting or spline interpolation cannot bypass the planner's
+   * traversability rule.
+   */
+  void setEdgeValidator(EdgeValidator validator);
+
+  /**
+   * @brief Validate the B2 footprint while its heading changes at a path node.
+   *
+   * A position-only graph can contain two individually traversable edges
+   * whose common vertex has no ground support for the intermediate headings.
+   * The callback closes that gap before the reference path reaches SCAN.
+   */
+  void setTurnValidator(TurnValidator validator);
+
+  /**
+   * @brief Select a safe final approach point around the exact requested goal.
+   *
+   * The hybrid graph is position-only, while the B2 footprint is directional.
+   * This callback checks both the short connector into the exact XY and the
+   * requested terminal-yaw sweep before A* commits to one nearby cloud node.
+   */
+  void setGoalConnectorValidator(GoalConnectorValidator validator);
 
   /**
    * @brief Set the detour ratio threshold for path-length-balanced cost
@@ -233,16 +278,11 @@ public:
    * @param weight Maximum edge penalty weight
    * @param falloff_rate Rate at which penalty decreases with density (higher = sharper falloff)
    */
-	  void setEdgePenaltyParams(double radius, double weight, double falloff_rate) {
-	    edge_penalty_radius_ = radius;
-	    edge_penalty_weight_ = weight;
-	    edge_penalty_falloff_rate_ = falloff_rate;
-	  }
-
-	  void setGroundTransitionPenalties(double exit_penalty, double step_penalty) {
-	    planground_exit_penalty_ = exit_penalty;
-	    ground_step_penalty_ = step_penalty;
-	  }
+  void setEdgePenaltyParams(double radius, double weight, double falloff_rate) {
+    edge_penalty_radius_ = radius;
+    edge_penalty_weight_ = weight;
+    edge_penalty_falloff_rate_ = falloff_rate;
+  }
 
   /**
    * @brief Update the planground point cloud and rebuild the hybrid map
@@ -306,7 +346,8 @@ public:
    */
   void getPathWithStartPose(const geometry_msgs::msg::PoseStamped& start_pose,
                              unsigned int goal,
-                             std::vector<unsigned int>& path);
+                             std::vector<unsigned int>& path,
+                             const pcl::PointXYZI* exact_goal = nullptr);
 
   /**
    * @brief Plan with start pose (robot current position) and goal on ground cloud
@@ -317,7 +358,8 @@ public:
    */
   void getPathWithStartPoseAndGroundGoal(const geometry_msgs::msg::PoseStamped& start_pose,
                                           unsigned int ground_goal,
-                                          std::vector<unsigned int>& path);
+                                          std::vector<unsigned int>& path,
+                                          const pcl::PointXYZI* exact_goal = nullptr);
 
   /**
    * @brief Get the hybrid point cloud (planground + ground fused)
@@ -462,12 +504,10 @@ private:
    * @param path_length Output planground path length
    * @return true if a planground path was found
    */
-	  bool planOnPlangroundOnly(const pcl::PointXYZI& start_pose,
-	                             const pcl::PointXYZI& goal_pose,
-	                             double& path_length,
-	                             std::vector<unsigned int>* path_out = nullptr);
-
-	  void relaxSmoothedPoints(std::vector<std::tuple<double, double, double>>& points);
+  bool planOnPlangroundOnly(const pcl::PointXYZI& start_pose,
+                             const pcl::PointXYZI& goal_pose,
+                             double& path_length,
+                             std::vector<unsigned int>* path_out = nullptr);
 
 public:
   /**
@@ -572,38 +612,59 @@ private:
   // A* planner for the hybrid cloud
   A_Star_on_Graph* a_star_planner_;
 
-	  // Parameters
-	  double a_star_expanding_radius_;
-	  double turning_weight_ = 0.8;
-	  double backtracking_weight_ = 0.0;
-	  double goal_directness_weight_ = 0.6;
-		  double planground_bias_ = 0.35;
-		  double max_ground_bridge_length_ = 1.5;
-	  double hybrid_downsample_leaf_size_ = 0.15; // Voxel size for downsampling hybrid cloud
+  // Parameters
+  double a_star_expanding_radius_;
+  double turning_weight_;
+  double planground_bias_ = 15.0;          // Base cost multiplier for ground points (v24: 从10.0提高到15.0)
+                                           // 进一步提高地面点基础代价，确保规划主体在planground上
+                                           // 只有planground确实严重绕路时才考虑走地面
+  double max_ground_bridge_length_ = 0.12; // Max distance from planground for ground points to be useful (v24: 从0.15降低到0.12)
+                                           // 更严格限制地面路径长度，避免绕路
+                                           // 超过此距离的地面点代价急剧上升
+  // Matches the Navigation default so construction does not build a 0.15 m
+  // cloud only to discard and rebuild it immediately at 0.20 m.
+  double hybrid_downsample_leaf_size_ = 0.20;
+  double reference_planning_time_ = 0.75;  // Short planground detour-reference budget (seconds)
+  // The robust phase has no wall-clock deadline. A newer goal can still
+  // cancel it immediately through cancel_checker_.
+  double max_planning_time_ = 0.0;
+  double heuristic_weight_ = 1.5;          // Weighted-A* multiplier for the main search
+  CancelChecker cancel_checker_;           // Cooperative cancellation for goal preemption
+  EdgeValidator edge_validator_;           // Shared A* and output-path edge validation
+  TurnValidator turn_validator_;           // B2 in-place heading transition validation
+  GoalConnectorValidator goal_connector_validator_;  // Exact-goal approach validation
+  std::optional<pcl::PointXYZI> exact_goal_connector_target_;
 
-		  double detour_ratio_threshold_ = 1.25;
-		  double max_ground_cost_ = 2.5;
-		  double min_ground_cost_ = 0.08;
-		  double distance_balance_threshold_ = 6.0;
-		  double ground_path_length_penalty_ = 0.0;
-		  double detour_balance_factor_lower_bound_ = 0.3;
-		  double detour_balance_factor_upper_bound_ = 1.6;
-		  double path_detour_limit_ = 1.12;
-		  double planground_path_margin_ = 1.02;
-		  int output_smoothing_iterations_ = 5;
-		  double output_smoothing_data_weight_ = 0.20;
-		  double output_smoothing_smooth_weight_ = 0.40;
-		  double output_smoothing_max_deviation_ = 0.20;
+  // v24: Ultra-Strong Planground Preference with Maximum Anti-Detour (加强版)
+  double detour_ratio_threshold_ = 4.0;    // Planground path length / straight-line ratio threshold (v23: 从3.0提高到4.0)
+                                           // 只有当planground绕路超过4.0倍时才允许走地面
+                                           // 避免轻微绕路就走地面导致更严重的绕路
+  double max_ground_cost_ = 250.0;         // Maximum allowed ground cost (v24: 从200.0提高到250.0)
+                                           // 提高上限以允许更高的最小代价
+  double min_ground_cost_ = 150.0;         // Minimum ground cost (v24: 从100.0提高到150.0)
+                                           // 进一步提高最小代价，确保地面点始终比planground点贵很多
+                                           // 规划器只有在planground确实严重绕路时才考虑走地面
+  double distance_balance_threshold_ = 1.5; // Distance balance threshold for short-vs-long trip trade-off (v23: 从2.0降低到1.5)
+                                           // 短距离(<1.5m)允许轻微抄近路，长距离(>=1.5m)严格禁止走地面
+                                           // 降低阈值使更多路径被视为"长距离"，避免绕路
+  double ground_path_length_penalty_ = 5.0; // v23增强: 地面路径长度惩罚系数 (从2.0提高到5.0)
+                                           // 地面路径越长，代价越高
+                                           // 每走一步地面，代价乘以 (1 + ground_path_length_penalty_ * ground_steps / total_steps)
+                                           // 确保长地面路径的代价远高于短地面路径
+  double detour_balance_factor_lower_bound_ = 0.5; // v23新增: 绕路比平衡因子下限 (从0.3提高到0.5)
+                                                   // 即使planground严重绕路，地面代价也不应降得太低
+                                                   // 确保规划器不会因为planground绕路就轻易走地面
+  double detour_balance_factor_upper_bound_ = 3.0; // v23新增: 绕路比平衡因子上限 (从2.0提高到3.0)
+                                                   // 当planground路径很直时，地面代价大幅升高
+                                                   // 确保规划器在planground路径合理时不会考虑走地面
 
   // v25 Edge penalty parameters - penalize ground points near cloud edges
   // These parameters add extra cost to ground points that are near the edge of the
   // ground point cloud (low local density), encouraging the planner to stay away
   // from cloud boundaries where the terrain data is less reliable.
-	  double edge_penalty_radius_ = 0.5;        // Search radius for counting neighbors (meters)
-		  double edge_penalty_weight_ = 1.0;        // Maximum edge penalty weight
-	  double edge_penalty_falloff_rate_ = 2.0;  // Rate at which penalty decreases with density
-	  double planground_exit_penalty_ = 0.25;
-	  double ground_step_penalty_ = 0.08;
-	};
+  double edge_penalty_radius_ = 0.5;        // Search radius for counting neighbors (meters)
+  double edge_penalty_weight_ = 200.0;      // Maximum edge penalty weight
+  double edge_penalty_falloff_rate_ = 2.0;  // Rate at which penalty decreases with density
+};
 
 #endif // HYBRID_A_STAR_H

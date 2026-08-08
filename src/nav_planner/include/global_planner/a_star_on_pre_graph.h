@@ -106,10 +106,6 @@ class A_Star_on_PreGraph{
       void getPath( unsigned int start, unsigned int goal, std::vector<unsigned int>& path);
       
       void setupTurningWeight(double m_weight){turning_weight_ = m_weight;}
-      void setupGoalDirectnessWeight(double m_weight)
-      {
-        goal_directness_weight_ = m_weight > 0.0 ? m_weight : 0.0;
-      }
       
       bool isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius);
       
@@ -131,8 +127,7 @@ class A_Star_on_PreGraph{
       AstarListPreGraph* ASLS_;
 
       //@ turning weight of the node
-      double turning_weight_ = 0.8;
-      double goal_directness_weight_ = 0.6;
+      double turning_weight_;
 
       double getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding);
 

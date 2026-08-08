@@ -160,7 +160,7 @@ closed_loop_controller:
     desired_yaw_filter_time_constant: 0.20
     maximum_measured_yaw_rate: 2.0
     # B2 navigation limits. Dynamic avoidance may only scale these down.
-    max_vx: 0.25
+    max_vx: 0.35
     max_vy: 0.08
     max_vyaw: 0.45
     # Unitree B2 ignores very small Move() commands even when the SDK returns
