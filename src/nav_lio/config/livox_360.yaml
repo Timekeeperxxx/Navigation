@@ -5,13 +5,33 @@
     lio.map.save_map_dir: "map"
     lio.map.map_name: "map.pcd"
     lio.map.ds_size: 0.2
+    # Keep only a bounded batch of final-map points in RAM. Full batches are
+    # voxelized and written by a background thread; final merge keeps only the
+    # already-downsampled global map plus one fragment in memory.
     lio.map.save_interval: -1
+    lio.map.max_points_in_memory: 2000000
+    # A wide queue absorbs temporary SSD/bag-recorder stalls. Admission is
+    # non-blocking during mapping, so even a full queue cannot stall LIO.
+    lio.map.max_pending_writes: 64
+    lio.map.cleanup_work_files: true
     # Save-time SE(3) closure. Candidate lookup is horizontal, while ICP still
     # estimates and validates full XYZ + rotation, so real ramps are preserved.
     lio.loop.enable: true
+    # A short terminal corridor may provide excellent wall overlap while its
+    # along-corridor translation remains unobservable.  Verify the ordered
+    # keyframe sequence and constrain only the observable corridor-normal,
+    # yaw and Z components.  Disable this single switch for instant rollback.
+    lio.loop.endpoint_corridor_partial.enable: true
+    # Keyframe clouds are only needed during shutdown loop closure. Persist
+    # them as they are created instead of retaining the whole route in RAM.
+    lio.loop.persist_keyframes: true
     lio.loop.map_name: "map_loop.pcd"
     lio.loop.keyframe_min_distance: 0.5
+    # Endpoint lookup keeps the conservative historical gap below. Internal
+    # revisits use non-overlapping local windows plus sensor time and travelled
+    # path, allowing a real short return without assuming a fixed Z/height.
     lio.loop.keyframe_min_gap: 80
+    lio.loop.internal_min_sensor_time_seconds: 30.0
     # A stop command does not imply that the robot returned to its start.
     # Keep endpoint lookup conservative and validate internal revisits within
     # an even smaller radius to avoid matching repetitive parallel corridors.
@@ -22,25 +42,108 @@
     lio.loop.map_ds_size: 0.1
     lio.loop.candidate_limit: 30
     lio.loop.local_window_size: 10
+    # The base yaw allowance grows with travelled path under the drift model,
+    # up to the safety cap below. Roll/pitch stay independently tight because
+    # they are already observed by gravity.
     lio.loop.max_correction_rotation_deg: 5.0
+    lio.loop.max_correction_tilt_deg: 2.0
+    lio.loop.max_adaptive_yaw_deg: 15.0
     lio.loop.min_overlap_ratio: 0.35
     # Graph-consistency noise model. Translation grows with travelled path;
     # it is not an absolute XYZ/Z height gate, so ramps and floor changes stay valid.
     lio.loop.translation_drift_ratio: 0.02
     lio.loop.rotation_drift_deg_per_m: 0.02
     lio.loop.min_consistency_weight: 0.25
-    # Raw map is committed first. If loop finalization exceeds this budget,
-    # keep the raw map instead of delaying shutdown indefinitely.
-    lio.loop.max_finalize_seconds: 30.0
+    # GICP may use a wide correspondence radius to reach the correct basin,
+    # but a loop is admitted only after a separate, tight, bidirectional
+    # geometry check. Spatial blocks prevent one long wall or floor from
+    # masquerading as a complete place match.
+    lio.loop.verification.max_distance: 0.6
+    lio.loop.verification.min_symmetric_overlap: 0.45
+    lio.loop.verification.max_trimmed_rmse: 0.30
+    lio.loop.verification.block_size: 1.0
+    lio.loop.verification.min_blocks: 6
+    lio.loop.verification.min_block_ratio: 0.50
+    lio.loop.verification.min_span: 3.0
+    lio.loop.verification.min_structural_overlap: 0.35
+    # Reject a graph that closes a loop by bending one local part of the map.
+    # These are deformation limits, not XYZ/Z pose limits; a real ramp moves
+    # rigidly and therefore does not consume this budget.
+    lio.loop.max_local_translation_strain: 0.015
+    lio.loop.max_local_translation_delta: 0.50
+    # Full-cloud GICP can let walls/ceilings bias the vertical component. After
+    # registration, compare only the locally lowest surface at matching XY
+    # cells and refine Z when a single tight residual mode has enough support.
+    # This is a loop measurement refinement, not a fixed-height constraint:
+    # matching is performed at the corrected XY positions, so ramps remain 3-D.
+    lio.loop.ground_z_refinement.enable: true
+    lio.loop.ground_z_refinement.cell_size: 0.25
+    lio.loop.ground_z_refinement.pair_xy_distance: 0.35
+    lio.loop.ground_z_refinement.min_pairs: 80
+    lio.loop.ground_z_refinement.min_inlier_ratio: 0.65
+    lio.loop.ground_z_refinement.max_mad: 0.08
+    lio.loop.ground_z_refinement.max_adjustment: 0.5
+    # Dimensionless strength relative to the accumulated odometry chain, not
+    # a fixed edge weight. When a full loop is unsafe but its ground Z is
+    # reliable, retain a weak zero-delta prior on correction XY/yaw. This does
+    # not force sensor poses together and leaves real ramps/floors intact.
+    lio.loop.ground_z_refinement.planar_hold_weight: 0.25
+    # A loop being accepted does not imply that its optimized residual is
+    # already invisible. Re-check only strict multi-anchor groups (or a strong
+    # standard endpoint consensus), progressively increase their existing
+    # information, and commit the trial only when the unchanged graph strain,
+    # adjacent-step and vertical-shape gates all remain safe. This never turns
+    # a rejected/soft/single-window match into a loop and is independently
+    # switchable for immediate rollback.
+    lio.loop.post_residual_refinement.enable: true
+    lio.loop.post_residual_refinement.min_anchors: 2
+    lio.loop.post_residual_refinement.target_translation: 0.10
+    lio.loop.post_residual_refinement.target_rotation_deg: 0.20
+    lio.loop.post_residual_refinement.max_weight_scale: 4.0
+    # Raw map is committed first. The loop-backend budget scales with saved
+    # keyframes, so a larger bag receives more time without waiting forever.
+    # budget = min(max, base + seconds_per_keyframe * keyframe_count)
+    lio.loop.finalize_base_seconds: 120.0
+    lio.loop.finalize_seconds_per_keyframe: 0.04
+    lio.loop.max_finalize_seconds: 600.0
     # Evaluate every plausible endpoint candidate and retain the best fit.
     # Stopping mapping is not itself evidence of a return-to-start closure.
     lio.loop.prefer_earliest_candidate: false
+
+    # Jetson-friendly online loop closure. The LiDAR frontend only enqueues
+    # keyframe indices; local submap loading, GICP and correction-graph solves
+    # run on one background worker. The generous queue/deadline absorb long
+    # revisits without turning registration into a realtime-thread stall.
+    # 在线回环实验已回退。最终停止保存时的离线位姿图回环仍由
+    # lio.loop.enable 控制；保持 false 可确保 terrain/ground 只累计
+    # 原始 LIO 坐标，避免在线 map->odom 与最终位姿图重复修正。
+    lio.loop.online.enable: false
+    lio.loop.online.interval_keyframes: 5
+    lio.loop.online.queue_capacity: 32
+    lio.loop.online.candidate_limit: 4
+    lio.loop.online.local_window_size: 8
+    lio.loop.online.search_radius: 8.0
+    lio.loop.online.voxel_size: 0.30
+    lio.loop.online.max_task_seconds: 60.0
+    # A strict match is applied only after an independently accumulated later
+    # window observes the same place and agrees on the correction.
+    lio.loop.online.min_confirmations: 2
+    lio.loop.online.confirmation_translation: 0.35
+    lio.loop.online.confirmation_yaw_deg: 0.50
+    # map->odom absorbs global graph updates gradually; odom->base_link remains
+    # the uninterrupted local LIO trajectory used by the controller.
+    lio.loop.online.max_translation_step: 0.05
+    lio.loop.online.max_yaw_step_deg: 0.10
 
     lio.ros.lidar_topic: "/livox/lidar"
     lio.ros.imu_topic: "/livox/imu"
     # A 10 Hz Livox frame is large; retain enough callback backlog for short
     # scheduling stalls. Same-host delivery uses FastDDS shared memory.
-    lio.ros.lidar_qos_depth: 100
+    lio.ros.imu_qos_depth: 16384
+    lio.ros.lidar_qos_depth: 256
+    # About 12k samples at 200 Hz (<1 MiB). Pending LiDAR frames additionally
+    # protect the exact older IMU anchor they still require.
+    lio.ros.imu_buffer_history_seconds: 60.0
     # Stop freezes LiDAR admission, drains all admitted scans through one
     # sensor-time cutoff, then saves an immutable snapshot.
     lio.ros.pause_drain_timeout_seconds: 5.0
@@ -102,10 +205,64 @@
     lio.kf.level_constraint.plane_distance_threshold: 0.06
     lio.kf.level_constraint.min_plane_inliers: 40
     lio.kf.level_constraint.min_plane_inlier_ratio: 0.12
-    lio.kf.level_constraint.max_plane_gravity_angle_deg: 3.0
+    # A real ramp must be supported by both plane-vs-gravity angle and the
+    # plane's world-frame tilt. This keeps transient linear acceleration from
+    # making a flat floor look sloped. The instantaneous prior fades between
+    # 1.0 and 1.5 deg; five committed dual-evidence frames latch protection.
+    lio.kf.level_constraint.slope_soft_start_angle_deg: 1.0
+    lio.kf.level_constraint.max_plane_gravity_angle_deg: 1.5
+    lio.kf.level_constraint.slope_enter_min_frames: 5
+    # Hysteresis: leave slope protection only after ten committed, high-quality
+    # plane frames put either gravity disagreement or world tilt below 0.75 deg;
+    # world tilt must remain inside the existing 6 deg safety bound. This OR
+    # condition avoids lock-in from dynamic gravity or a pre-existing tilt.
+    lio.kf.level_constraint.slope_exit_angle_deg: 0.75
+    lio.kf.level_constraint.slope_exit_min_frames: 10
+    # A pending enter/exit quorum may bridge two committed frames without a
+    # usable plane, but the third clears only that pending evidence. An active
+    # slope latch itself survives arbitrarily long plane dropouts.
+    lio.kf.level_constraint.slope_pending_max_invalid_frames: 2
+    # After leaving a ramp, restore the strong flat-ground prior over three
+    # committed valid planes (1/3, 2/3, 1) instead of in one attitude step.
+    lio.kf.level_constraint.slope_recovery_min_frames: 3
+    # A latched ramp is a spatial lease, not an unlimited time latch. Over
+    # every 5 m of committed horizontal travel, compare the measured height
+    # change with the height change predicted by the observed ground plane.
+    # Two inconsistent/unsupported windows release the latch. Once released,
+    # two consistent spatial windows are required before the long-lived latch
+    # may be armed again, preventing a bad plane from immediately re-latching.
+    # The per-frame dual-angle gate still protects a real ramp in the meantime.
+    lio.kf.level_constraint.slope_spatial_window_m: 5.0
+    lio.kf.level_constraint.slope_spatial_min_support_ratio: 0.40
+    lio.kf.level_constraint.slope_spatial_max_grade_error_deg: 0.75
+    lio.kf.level_constraint.slope_spatial_max_mismatch_windows: 2
+    lio.kf.level_constraint.slope_spatial_reentry_consistent_windows: 2
     lio.kf.level_constraint.max_attitude_innovation_deg: 6.0
     # Aggregate plane-normal uncertainty (not single-point angular noise).
+    # Strong flat-ground stabilization is safe here because the independent
+    # slope gate above fades/rejects real ramps before this prior is applied.
     lio.kf.level_constraint.attitude_stddev_deg: 0.015
+
+    # Slope-aware relative ground-height continuity.  The previous committed
+    # ground plane predicts the next ground height at the new XY position; the
+    # correction is applied after the normal LiDAR update by changing only
+    # state.p.z(); covariance, XY, attitude, velocity and biases are untouched.
+    # Plane discontinuities, steps larger than 5 cm, gaps and abrupt normal
+    # changes break the one-frame reference chain instead of being smoothed.
+    # Experimental finite-frame ground-height observation.  Disabled by
+    # default because chaining a biased local plane over a long route can
+    # accumulate vertical error; enable only for explicit offline A/B tests.
+    lio.kf.ground_height_continuity.enable: false
+    lio.kf.ground_height_continuity.max_frame_gap: 5
+    lio.kf.ground_height_continuity.max_horizontal_step_m: 1.0
+    lio.kf.ground_height_continuity.max_normal_difference_deg: 5.0
+    lio.kf.ground_height_continuity.max_innovation_m: 0.05
+    lio.kf.ground_height_continuity.max_correction_per_frame_m: 0.01
+    # This is an auxiliary-estimator influence budget, not a terrain-height
+    # limit. Real ramps remain unrestricted; only the accumulated injected
+    # offset from this optional feature is bounded.
+    lio.kf.ground_height_continuity.max_total_correction_m: 0.30
+    lio.kf.ground_height_continuity.stddev_m: 0.02
 
     # 室内外共用的自适应航向辅助：只在 LiDAR 的 yaw 几何约束较弱、且局部
     # 竖直墙面长期稳定时参与。不同区域可建立不同方向参考；无墙或结构可靠时
@@ -126,14 +283,35 @@
     lio.kf.wall_yaw_constraint.reference_radius_m: 30.0
     # 沿同一条长走廊走到参考半径的75%时，复制方向并续接一个局部锚点。
     lio.kf.wall_yaw_constraint.reference_extension_ratio: 0.75
-    lio.kf.wall_yaw_constraint.max_references: 8
-    # yaw 方向信息 / 当前最强旋转方向信息。数值越小表示 yaw 相对越退化。
+    # Mature anchors are retained for long routes instead of being displaced by
+    # a short LRU window. At the default spacing this still covers kilometres
+    # with negligible memory compared with the point map.
+    lio.kf.wall_yaw_constraint.max_references: 256
+    # Conditional yaw information after marginalizing roll/pitch and XYZ. This
+    # avoids treating a distant wall's yaw/translation coupling as strong yaw.
     lio.kf.wall_yaw_constraint.reference_min_yaw_information_ratio: 0.45
     lio.kf.wall_yaw_constraint.yaw_information_weak_ratio: 0.40
     lio.kf.wall_yaw_constraint.yaw_information_strong_ratio: 0.70
     lio.kf.wall_yaw_constraint.max_innovation_deg: 2.0
     lio.kf.wall_yaw_constraint.stddev_deg: 0.3
     lio.kf.wall_yaw_constraint.max_correction_per_frame_deg: 0.03
+    # A mature nearby anchor that disagrees by 2-8 degrees blocks learning a
+    # new truth from the current pose. A stable, tightly localized revisit
+    # quorum may re-acquire that historical direction with a softer/slower
+    # prior; ordinary wall assistance keeps the independent weak-yaw gate.
+    lio.kf.wall_yaw_constraint.recapture_max_innovation_deg: 8.0
+    lio.kf.wall_yaw_constraint.recapture_min_frames: 30
+    # Re-capture evidence is independent of the ordinary weak-yaw gate, but is
+    # accepted only inside a mature anchor's tight spatial core after the anchor
+    # has aged, and only from consistently high-quality wall planes.
+    lio.kf.wall_yaw_constraint.recapture_core_radius_ratio: 0.25
+    lio.kf.wall_yaw_constraint.recapture_min_reference_age_frames: 300
+    lio.kf.wall_yaw_constraint.recapture_min_scene_quality: 0.80
+    # Permit gradual convergence toward an old anchor during the first half of
+    # the quorum; the mature half returns to reference_max_deviation_deg.
+    lio.kf.wall_yaw_constraint.recapture_initial_max_deviation_deg: 1.5
+    lio.kf.wall_yaw_constraint.recapture_stddev_deg: 1.5
+    lio.kf.wall_yaw_constraint.recapture_max_correction_per_frame_deg: 0.01
 
     lio.output.robot: true
     lio.output.plan_env_world: false

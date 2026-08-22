@@ -2,6 +2,7 @@
 #ifndef VOXEL_GRID_CLOSEST_H
 #define VOXEL_GRID_CLOSEST_H
 
+#include <cstdint>
 
 #include <pcl/point_cloud.h>
 #include <Eigen/Core>
@@ -22,11 +23,38 @@ private:
   CloudPtr cloud_;
   float voxel_size_ = 0.5f;
   float inv_voxel_size_ = 2.0f;
-  robin_hood::unordered_flat_map<std::size_t, std::size_t> voxel_map_;
+
+  struct VoxelKey {
+    std::int32_t x;
+    std::int32_t y;
+    std::int32_t z;
+
+    bool operator==(const VoxelKey& other) const noexcept {
+      return x == other.x && y == other.y && z == other.z;
+    }
+  };
+
+  struct VoxelKeyHash {
+    std::size_t operator()(const VoxelKey& key) const noexcept {
+      // Preserve all signed coordinate bits.  The old fixed +1000 offset and
+      // 15-bit packing aliased voxels once a large map crossed that range.
+      std::size_t seed = 0xcbf29ce484222325ULL;
+      const auto mix = [&seed](const std::uint32_t value) {
+        seed ^= static_cast<std::size_t>(value);
+        seed *= 0x100000001b3ULL;
+      };
+      mix(static_cast<std::uint32_t>(key.x));
+      mix(static_cast<std::uint32_t>(key.y));
+      mix(static_cast<std::uint32_t>(key.z));
+      return seed;
+    }
+  };
+
+  robin_hood::unordered_flat_map<VoxelKey, std::size_t, VoxelKeyHash>
+      voxel_map_;
 
   std::vector<Point, Eigen::aligned_allocator<Point>> points_;
   std::vector<float> dist2_;
-  const Eigen::Vector3i offset_ = Eigen::Vector3i(1000, 1000, 1000);
 
 public:
   VoxelGridClosest() {
@@ -55,10 +83,7 @@ public:
       Eigen::Vector3f center = voxel_size_ * idx.cast<float>();
       float d2 = (pf - center).squaredNorm();
 
-      idx += offset_; // Avoid negative indices
-      const std::size_t key = ((std::size_t(idx[2])) << 30) | 
-                              ((std::size_t(idx[1])) << 15) | 
-                              ( std::size_t(idx[0]));
+      const VoxelKey key{idx.x(), idx.y(), idx.z()};
 
       auto it = voxel_map_.find(key);
       if (it == voxel_map_.end()) {

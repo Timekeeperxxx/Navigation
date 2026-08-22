@@ -100,6 +100,7 @@ def generate_launch_description():
     launch_lio = LaunchConfiguration("launch_lio")
     launch_terrain = LaunchConfiguration("launch_terrain")
     rviz = LaunchConfiguration("rviz")
+    rviz_config = LaunchConfiguration("rviz_config")
     publish_base_footprint_tf = LaunchConfiguration("publish_base_footprint_tf")
     lidar_mount_x_m = LaunchConfiguration("lidar_mount_x_m")
     lidar_mount_y_m = LaunchConfiguration("lidar_mount_y_m")
@@ -125,6 +126,11 @@ def generate_launch_description():
     imu_nbg = LaunchConfiguration("imu_nbg")
     estimate_gravity = LaunchConfiguration("estimate_gravity")
     use_query_time_undistort = LaunchConfiguration("use_query_time_undistort")
+    imu_qos_depth = LaunchConfiguration("imu_qos_depth")
+    lidar_qos_depth = LaunchConfiguration("lidar_qos_depth")
+    pause_drain_timeout_seconds = LaunchConfiguration(
+        "pause_drain_timeout_seconds"
+    )
     lidar_imu_roll_deg = LaunchConfiguration("lidar_imu_roll_deg")
     lidar_imu_pitch_deg = LaunchConfiguration("lidar_imu_pitch_deg")
     lidar_imu_yaw_deg = LaunchConfiguration("lidar_imu_yaw_deg")
@@ -134,6 +140,12 @@ def generate_launch_description():
     loop_search_radius = LaunchConfiguration("loop_search_radius")
     loop_icp_score_threshold = LaunchConfiguration("loop_icp_score_threshold")
     loop_map_ds_size = LaunchConfiguration("loop_map_ds_size")
+    loop_post_residual_refinement = LaunchConfiguration(
+        "loop_post_residual_refinement"
+    )
+    ground_height_continuity_enable = LaunchConfiguration(
+        "ground_height_continuity_enable"
+    )
     lio_config = PathJoinSubstitution([
         FindPackageShare("nav_lio"),
         "config",
@@ -144,7 +156,7 @@ def generate_launch_description():
         "config",
         "terrain_analysis.yaml",
     ])
-    rviz_config = PathJoinSubstitution([
+    default_rviz_config = PathJoinSubstitution([
         FindPackageShare("nav_bringup"),
         "rviz",
         "mapping_debug.rviz",
@@ -198,7 +210,15 @@ def generate_launch_description():
                 "lio.sensor.imu_nbg": imu_nbg,
                 "lio.sensor.use_query_time_undistort": use_query_time_undistort,
                 "lio.ros.offline_reliable_qos": offline_bag,
-                "lio.ros.lidar_qos_depth": 100,
+                "lio.ros.imu_qos_depth": ParameterValue(
+                    imu_qos_depth, value_type=int
+                ),
+                "lio.ros.lidar_qos_depth": ParameterValue(
+                    lidar_qos_depth, value_type=int
+                ),
+                "lio.ros.pause_drain_timeout_seconds": ParameterValue(
+                    pause_drain_timeout_seconds, value_type=float
+                ),
                 "lio.kf.estimate_gravity": estimate_gravity,
                 "lio.extrinsic.lidar_imu_roll_deg": lidar_imu_roll_deg,
                 "lio.extrinsic.lidar_imu_pitch_deg": lidar_imu_pitch_deg,
@@ -211,9 +231,17 @@ def generate_launch_description():
                 "lio.extrinsic.odom_robo_pitch_deg": ParameterValue(lidar_mount_pitch_deg, value_type=float),
                 "lio.extrinsic.odom_robo_yaw_deg": ParameterValue(lidar_mount_yaw_deg, value_type=float),
                 "lio.loop.enable": loop_closure,
-                "lio.loop.search_radius": loop_search_radius,
+                "lio.loop.search_radius": ParameterValue(
+                    loop_search_radius, value_type=float
+                ),
                 "lio.loop.icp_score_threshold": loop_icp_score_threshold,
                 "lio.loop.map_ds_size": loop_map_ds_size,
+                "lio.loop.post_residual_refinement.enable": ParameterValue(
+                    loop_post_residual_refinement, value_type=bool
+                ),
+                "lio.kf.ground_height_continuity.enable": ParameterValue(
+                    ground_height_continuity_enable, value_type=bool
+                ),
             },
         ],
         arguments=["--ros-args", "--log-level", "info"],
@@ -274,6 +302,7 @@ def generate_launch_description():
         DeclareLaunchArgument("launch_lio", default_value="true"),
         DeclareLaunchArgument("launch_terrain", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="false"),
+        DeclareLaunchArgument("rviz_config", default_value=default_rviz_config),
         DeclareLaunchArgument("publish_base_footprint_tf", default_value="false"),
         DeclareLaunchArgument("lidar_mount_x_m", default_value="0.425"),
         DeclareLaunchArgument("lidar_mount_y_m", default_value="0.0"),
@@ -284,6 +313,13 @@ def generate_launch_description():
         DeclareLaunchArgument("lidar_ip", default_value="192.168.123.179"),
         DeclareLaunchArgument("host_ip", default_value=""),
         DeclareLaunchArgument("lio_voxel_filter_size", default_value="0.5"),
+        # Wide bounded queues absorb temporary Jetson CPU/SSD stalls without
+        # converting callback delay into missing sensor history.
+        DeclareLaunchArgument("imu_qos_depth", default_value="16384"),
+        DeclareLaunchArgument("lidar_qos_depth", default_value="256"),
+        DeclareLaunchArgument(
+            "pause_drain_timeout_seconds", default_value="5.0"
+        ),
         DeclareLaunchArgument("map_ds_size", default_value="0.2"),
         DeclareLaunchArgument("map_preview_ds_size", default_value="0.3"),
         DeclareLaunchArgument("map_preview_publish_interval", default_value="20"),
@@ -307,6 +343,14 @@ def generate_launch_description():
         DeclareLaunchArgument("loop_search_radius", default_value="5.0"),
         DeclareLaunchArgument("loop_icp_score_threshold", default_value="1.0"),
         DeclareLaunchArgument("loop_map_ds_size", default_value="0.1"),
+        DeclareLaunchArgument(
+            "loop_post_residual_refinement", default_value="true"
+        ),
+        # Production remains fail-safe/off. Offline validation can opt in
+        # without modifying the installed YAML or racing a live mapper.
+        DeclareLaunchArgument(
+            "ground_height_continuity_enable", default_value="false"
+        ),
         DeclareLaunchArgument(
             "livox_config_path",
             default_value=PathJoinSubstitution([

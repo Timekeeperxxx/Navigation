@@ -58,11 +58,11 @@ scan_planner_node:
     "grid_map/obstacles_inflation_radius": 0.20
     "grid_map/double_cylinder_offset": 0.205
     "grid_map/double_cylinder_center_offset": 0.0
-    # SCAN queries collision at ground + body_height.  Floor returns must stay
-    # below that plane instead of becoming 1.65m-tall phantom obstacles.
-    # Returns from real vertical obstacles are still expanded down into the
-    # B2 body plane, so obstacle avoidance remains active.
-    "grid_map/obstacles_inflation_z_up": 0.10
+    # SCAN queries collision at ground + body_height. With the 0.03m voxel
+    # resolution this 0.05m setting expands upward by two cells (about 0.06m).
+    # Together with the 0.05m downward trajectory probe, the minimum effective
+    # obstacle height is about 0.20m.
+    "grid_map/obstacles_inflation_z_up": 0.05
     "grid_map/obstacles_inflation_z_down": 0.45
     "grid_map/ground_height": 0.0
     "grid_map/cx": 317.19183349609375
@@ -131,6 +131,10 @@ closed_loop_controller:
     execution_path_frame: "map"
     safety_execution_frozen_topic: "/planning/safety_execution_frozen"
     safety_speed_scale_topic: "/planning/safety_speed_scale"
+    # dynamic_avoidance_monitor is the final /cmd_vel_safe gateway and applies
+    # this scale there. Applying it again inside the controller squares 0.35
+    # into 0.1225 and drops B2 below its continuous walking speed.
+    apply_safety_speed_scale_in_controller: false
     controller_reset_topic: "/planning/controller_reset"
     goal_position_topic: "/clicked_point"
     task_start_reset_topics:
@@ -185,7 +189,9 @@ closed_loop_controller:
     final_position_max_vx: 0.10
     final_position_max_vy: 0.06
     final_position_allow_reverse: true
-    final_yaw_tolerance: 0.20
+    # Keep this identical to waypoint_progress_monitor reach_tolerance_yaw so
+    # the controller cannot stop turning before any task waypoint is complete.
+    final_yaw_tolerance: 0.10
     final_yaw_kp: 0.6
     # B2 实机对过小角速度没有动作；终点误差未达标时保持有效转向速度。
     final_yaw_min_vyaw: 0.25

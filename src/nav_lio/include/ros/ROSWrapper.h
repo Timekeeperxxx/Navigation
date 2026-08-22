@@ -22,6 +22,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -79,12 +80,25 @@ public:
     input_frozen_.store(false);
     mapping_paused_.store(false);
     processing_measure_.store(false);
+    received_lidar_count_.store(0);
+    admitted_lidar_count_.store(0);
+    completed_lidar_count_.store(0);
+    dropped_lidar_count_.store(0);
     snapshot_target_cutoff_ = -1.0;
   }
 
   void pub_odom(const NavState&);
+  void pub_relocation_odom(
+      const NavState& map_state,
+      const BASIC::SE3& odom_pose,
+      const BASIC::SE3& map_to_odom,
+      bool localization_valid);
   void pub_cloud_world(const BASIC::CloudPtr& pc, double time);
   void pub_map_accumulated(const BASIC::CloudPtr& pc, double time);
+  void pub_online_loop_paths(
+      const BASIC::VV3& raw_path,
+      const BASIC::VV3& corrected_path,
+      double time);
   void pub_cloud2planner(const BASIC::CloudPtr& pc, double time);
   void pub_cloud_world_pose(const BASIC::CloudPtr& pc, 
                             const NavState& state);
@@ -122,6 +136,7 @@ private:
   rclcpp::CallbackGroup::SharedPtr cb_lidar_;
   rclcpp::CallbackGroup::SharedPtr cb_processing_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr pause_mapping_service_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr mapping_status_service_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_lidar_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_lidar_std_;
@@ -133,6 +148,7 @@ private:
   bool lidar_pushed_ = false;
   double last_timestamp_imu_ = -1.0;
   double last_timestamp_lidar_ = -1.0;
+  double imu_buffer_history_seconds_ = 60.0;
   std::atomic<bool> mapping_paused_{false};
   std::atomic<bool> input_frozen_{false};
   std::atomic<bool> processing_measure_{false};
@@ -148,12 +164,16 @@ private:
   std::uint64_t lidar_missing_imu_start_count_ = 0;
   std::uint64_t lidar_imu_gap_count_ = 0;
   std::uint64_t lidar_invalid_time_count_ = 0;
+  std::uint64_t lidar_out_of_order_count_ = 0;
   std::uint64_t rejected_imu_clock_count_ = 0;
   std::uint64_t rejected_lidar_clock_count_ = 0;
   std::uint64_t pruned_imu_buffer_count_ = 0;
   std::uint64_t sync_window_completed_count_ = 0;
   std::uint64_t sync_window_dropped_count_ = 0;
-  std::uint64_t received_lidar_count_ = 0;
+  std::atomic<std::uint64_t> received_lidar_count_{0};
+  std::atomic<std::uint64_t> admitted_lidar_count_{0};
+  std::atomic<std::uint64_t> completed_lidar_count_{0};
+  std::atomic<std::uint64_t> dropped_lidar_count_{0};
   std::uint64_t lidar_source_gap_count_ = 0;
   std::uint64_t lidar_estimated_missing_count_ = 0;
   bool sync_health_unhealthy_ = false;
@@ -162,18 +182,26 @@ private:
   ESKF::Ptr eskf_{nullptr};
 
   nav_msgs::msg::Path path_;
+  nav_msgs::msg::Path raw_compare_path_;
+  nav_msgs::msg::Path online_compare_path_;
   geometry_msgs::msg::PoseStamped msg2uav_;
   sensor_msgs::msg::PointCloud2 global_map_msg_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
   BASIC::V3 last_path_point_ = BASIC::V3(0, 0, -100);
+  BASIC::V3 last_raw_compare_path_point_ = BASIC::V3(0, 0, -100);
+  BASIC::V3 last_online_compare_path_point_ = BASIC::V3(0, 0, -100);
 
 /// output.
 private:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;       /// lidar fre --> IMU frame
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_local_odom_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_localization_valid_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_imu_odom_;   /// IMU fre   --> IMU frame
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_robo_odom_;  /// IMU fre   --> Robot frame
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_raw_compare_path_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_online_compare_path_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_world_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_map_accumulated_;
 };

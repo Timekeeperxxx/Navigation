@@ -22,13 +22,13 @@
 #include <cstdint>
 #include <thread>
 #include <map>
-#include <tuple>
 #include <utility>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "Eigen/Geometry"
 #include "nav_msgs/msg/odometry.hpp"
@@ -503,14 +503,41 @@ public:
       // 的过滤复杂度由近似 O(N * 邻域点数) 降为 O(N + 层数 * 邻域网格数)。
       const float vertical_bin_size = std::max(
         0.05f, std::min(ground_z_layer_size_, ground_local_layer_z_tolerance_));
-      using LayerKey = std::tuple<int64_t, int64_t, int64_t>;
+      struct LayerKey
+      {
+        int64_t x;
+        int64_t y;
+        int64_t z;
+
+        bool operator==(const LayerKey & other) const
+        {
+          return x == other.x && y == other.y && z == other.z;
+        }
+      };
+      struct LayerKeyHash
+      {
+        std::size_t operator()(const LayerKey & key) const
+        {
+          std::size_t seed = std::hash<int64_t>{}(key.x);
+          seed ^= std::hash<int64_t>{}(key.y) + 0x9e3779b97f4a7c15ULL +
+            (seed << 6) + (seed >> 2);
+          seed ^= std::hash<int64_t>{}(key.z) + 0x9e3779b97f4a7c15ULL +
+            (seed << 6) + (seed >> 2);
+          return seed;
+        }
+      };
       struct LayerAggregate
       {
         std::size_t count = 0;
         double z_sum = 0.0;
       };
 
-      std::map<LayerKey, LayerAggregate> layer_aggregates;
+      // Saving used to spend most of its time in ordered-tree operations here
+      // (about 55 s for 3.9 M points). The filter only needs exact-key lookup;
+      // iteration order has no semantic meaning, so a hash table preserves the
+      // decision rule while making aggregation and lookup effectively O(1).
+      std::unordered_map<LayerKey, LayerAggregate, LayerKeyHash> layer_aggregates;
+      layer_aggregates.reserve(current.points.size() / 8 + 1);
       for (const auto & point : current.points) {
         const auto key = LayerKey{
           static_cast<int64_t>(std::floor(point.x / ground_local_layer_xy_bin_size_)),
@@ -523,17 +550,17 @@ public:
 
       struct LayerSummary
       {
-        LayerKey key;
         float mean_z;
         std::size_t count;
       };
-      std::map<std::pair<int64_t, int64_t>, std::vector<LayerSummary>> xy_layers;
+      std::unordered_map<LayerKey, std::vector<LayerSummary>, LayerKeyHash> xy_layers;
+      xy_layers.reserve(layer_aggregates.size());
       for (const auto & entry : layer_aggregates) {
-        const auto bx = std::get<0>(entry.first);
-        const auto by = std::get<1>(entry.first);
+        const auto bx = entry.first.x;
+        const auto by = entry.first.y;
         const auto mean_z = static_cast<float>(entry.second.z_sum / entry.second.count);
-        xy_layers[std::make_pair(bx, by)].push_back(
-          LayerSummary{entry.first, mean_z, entry.second.count});
+        xy_layers[LayerKey{bx, by, 0}].push_back(
+          LayerSummary{mean_z, entry.second.count});
       }
 
       const int bin_radius = static_cast<int>(
@@ -541,11 +568,12 @@ public:
       const float bin_margin = ground_local_layer_xy_bin_size_ * std::sqrt(2.0f);
       const float aggregate_radius = ground_local_layer_radius_ + bin_margin;
       const float aggregate_radius2 = aggregate_radius * aggregate_radius;
-      std::map<LayerKey, bool> remove_layer;
+      std::unordered_set<LayerKey, LayerKeyHash> remove_layers;
+      remove_layers.reserve(layer_aggregates.size() / 8 + 1);
 
       for (const auto & entry : layer_aggregates) {
-        const auto bx = std::get<0>(entry.first);
-        const auto by = std::get<1>(entry.first);
+        const auto bx = entry.first.x;
+        const auto by = entry.first.y;
         const float point_z = static_cast<float>(entry.second.z_sum / entry.second.count);
         std::size_t same_layer_count = 0;
         std::size_t lower_layer_count = 0;
@@ -558,7 +586,7 @@ public:
               continue;
             }
 
-            const auto layers_it = xy_layers.find(std::make_pair(bx + dx, by + dy));
+            const auto layers_it = xy_layers.find(LayerKey{bx + dx, by + dy, 0});
             if (layers_it == xy_layers.end()) {
               continue;
             }
@@ -581,7 +609,9 @@ public:
         const bool weak_current_layer =
           static_cast<float>(same_layer_count) <
           static_cast<float>(lower_layer_count) * ground_local_layer_min_support_ratio_;
-        remove_layer[entry.first] = has_strong_lower_layer && weak_current_layer;
+        if (has_strong_lower_layer && weak_current_layer) {
+          remove_layers.insert(entry.first);
+        }
       }
 
       std::size_t removed_count = 0;
@@ -593,7 +623,7 @@ public:
           static_cast<int64_t>(std::floor(point.x / ground_local_layer_xy_bin_size_)),
           static_cast<int64_t>(std::floor(point.y / ground_local_layer_xy_bin_size_)),
           static_cast<int64_t>(std::floor(point.z / vertical_bin_size))};
-        if (remove_layer[key]) {
+        if (remove_layers.find(key) != remove_layers.end()) {
           removed_count++;
           continue;
         }
@@ -664,11 +694,22 @@ private:
     int64_t y;
     int64_t z;
 
-    bool operator<(const GridKey & other) const
+    bool operator==(const GridKey & other) const
     {
-      if (x != other.x) return x < other.x;
-      if (y != other.y) return y < other.y;
-      return z < other.z;
+      return x == other.x && y == other.y && z == other.z;
+    }
+  };
+
+  struct GridKeyHash
+  {
+    std::size_t operator()(const GridKey & key) const
+    {
+      std::size_t seed = std::hash<int64_t>{}(key.x);
+      seed ^= std::hash<int64_t>{}(key.y) + 0x9e3779b97f4a7c15ULL +
+        (seed << 6) + (seed >> 2);
+      seed ^= std::hash<int64_t>{}(key.z) + 0x9e3779b97f4a7c15ULL +
+        (seed << 6) + (seed >> 2);
+      return seed;
     }
   };
 
@@ -685,7 +726,7 @@ private:
     const double timestamp,
     const pcl::PointCloud<pcl::PointXYZI>::Ptr & dst,
     std::vector<double> & timestamps,
-    std::map<GridKey, std::size_t> & grid_index)
+    std::unordered_map<GridKey, std::size_t, GridKeyHash> & grid_index)
   {
     if (!ground_xy_dedup_) {
       *dst += src;
@@ -866,21 +907,32 @@ private:
     }
     std::unordered_map<double, Eigen::Matrix4f>
       correction_cache;
-    correction_cache.reserve(corrections.size());
+    correction_cache.reserve(corrections.size() * 4);
+    double active_timestamp =
+      std::numeric_limits<double>::quiet_NaN();
+    Eigen::Matrix3f active_rotation = Eigen::Matrix3f::Identity();
+    Eigen::Vector3f active_translation = Eigen::Vector3f::Zero();
     for (std::size_t i = 0; i < cloud.size(); ++i) {
-      auto correction_it =
-        correction_cache.find(timestamps[i]);
-      if (correction_it == correction_cache.end()) {
-        correction_it = correction_cache.emplace(
-          timestamps[i],
-          poseGraphCorrectionAt(
-            corrections, timestamps[i])).first;
+      // Most points from one terrain message are contiguous and share an
+      // identical timestamp. Avoid millions of repeated double hash lookups
+      // while retaining the cache for cells updated by a later revisit.
+      if (timestamps[i] != active_timestamp) {
+        active_timestamp = timestamps[i];
+        auto correction_it =
+          correction_cache.find(active_timestamp);
+        if (correction_it == correction_cache.end()) {
+          correction_it = correction_cache.emplace(
+            active_timestamp,
+            poseGraphCorrectionAt(
+              corrections, active_timestamp)).first;
+        }
+        active_rotation = correction_it->second.block<3, 3>(0, 0);
+        active_translation = correction_it->second.block<3, 1>(0, 3);
       }
       auto & point = cloud.points[i];
       const Eigen::Vector3f corrected =
-        correction_it->second.block<3, 3>(0, 0) *
-        Eigen::Vector3f(point.x, point.y, point.z) +
-        correction_it->second.block<3, 1>(0, 3);
+        active_rotation * Eigen::Vector3f(point.x, point.y, point.z) +
+        active_translation;
       point.x = corrected.x();
       point.y = corrected.y();
       point.z = corrected.z();
@@ -1275,8 +1327,9 @@ private:
   pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_base_footprint_fill_cloud_;
   std::vector<double> accumulated_ground_timestamps_;
   std::vector<double> accumulated_base_footprint_fill_timestamps_;
-  std::map<GridKey, std::size_t> accumulated_ground_grid_index_;
-  std::map<GridKey, std::size_t> accumulated_base_footprint_fill_grid_index_;
+  std::unordered_map<GridKey, std::size_t, GridKeyHash> accumulated_ground_grid_index_;
+  std::unordered_map<GridKey, std::size_t, GridKeyHash>
+    accumulated_base_footprint_fill_grid_index_;
   std::vector<TimedPosition> odom_positions_;
   bool loop_correction_applied_ = false;
 

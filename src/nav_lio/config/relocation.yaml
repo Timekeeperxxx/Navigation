@@ -56,4 +56,30 @@
     lio.relocation.update_map: false
     lio.relocation.init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
+    # A single scan-to-map update can slide along a long wall or settle in a
+    # repeated corridor.  The relocation anchor independently registers a
+    # short odom-frame multi-scan submap against the immutable PCD.  Only
+    # corrections supported by both temporal halves and by non-ground
+    # structure are allowed to update map->odom.
+    lio.relocation.anchor.enable: true
+    lio.relocation.anchor.interval_frames: 10
+    lio.relocation.anchor.window_frames: 20
+    lio.relocation.anchor.min_frames: 8
+    lio.relocation.anchor.max_failures: 5
+    lio.relocation.anchor.map_radius: 35.0
+    lio.relocation.anchor.voxel_size: 0.5
+    lio.relocation.anchor.max_correspondence_distance: 1.5
+    lio.relocation.anchor.verification_distance: 0.6
+    lio.relocation.anchor.min_overlap: 0.55
+    lio.relocation.anchor.max_rmse: 0.35
+    lio.relocation.anchor.max_translation: 2.0
+    lio.relocation.anchor.max_yaw_deg: 5.0
+    lio.relocation.anchor.max_tilt_deg: 1.5
+    lio.relocation.anchor.max_translation_step: 0.35
+    lio.relocation.anchor.max_yaw_step_deg: 0.75
+    lio.relocation.anchor.min_motion: 1.0
+    lio.relocation.anchor.min_support_major: 4.0
+    lio.relocation.anchor.min_support_minor: 2.0
+    lio.relocation.anchor.min_structural_points: 80
+
     lio.eva.timer: true

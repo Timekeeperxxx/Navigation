@@ -11,6 +11,7 @@
 
 
 #include <atomic>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -37,10 +38,20 @@ namespace LI2Sup{
   extern std::string g_save_map_dir;
   extern float g_map_ds_size;
   extern int   g_pcd_save_interval;
+  extern std::int64_t g_map_max_points_in_memory;
+  extern int   g_map_max_pending_writes;
+  extern bool  g_map_cleanup_work_files;
   extern bool  g_loop_closure_enable;
+  // Safe fallback for a terminal revisit observed in a short, repetitive
+  // corridor.  It verifies ordered trajectory overlap and leaves translation
+  // along the corridor unconstrained instead of accepting an ambiguous full
+  // SE(3) closure.
+  extern bool  g_loop_endpoint_corridor_partial_enable;
+  extern bool  g_loop_persist_keyframes;
   extern std::string g_loop_map_name;
   extern float g_loop_keyframe_min_distance;
   extern int   g_loop_keyframe_min_gap;
+  extern double g_loop_internal_min_sensor_time_seconds;
   extern float g_loop_search_radius;
   extern float g_loop_internal_search_radius;
   extern float g_loop_icp_max_distance;
@@ -49,12 +60,57 @@ namespace LI2Sup{
   extern int   g_loop_candidate_limit;
   extern int   g_loop_local_window_size;
   extern float g_loop_max_correction_rotation_deg;
+  extern float g_loop_max_correction_tilt_deg;
+  extern float g_loop_max_adaptive_yaw_deg;
   extern float g_loop_min_overlap_ratio;
   extern float g_loop_translation_drift_ratio;
   extern float g_loop_rotation_drift_deg_per_m;
   extern float g_loop_min_consistency_weight;
+  extern float g_loop_verification_max_distance;
+  extern float g_loop_min_symmetric_overlap;
+  extern float g_loop_max_trimmed_rmse;
+  extern float g_loop_verification_block_size;
+  extern int   g_loop_min_verification_blocks;
+  extern float g_loop_min_verification_block_ratio;
+  extern float g_loop_min_verification_span;
+  extern float g_loop_min_structural_overlap;
+  extern float g_loop_max_local_translation_strain;
+  extern float g_loop_max_local_translation_delta;
+  extern bool  g_loop_ground_z_refinement_enable;
+  extern float g_loop_ground_z_cell_size;
+  extern float g_loop_ground_z_pair_xy_distance;
+  extern int   g_loop_ground_z_min_pairs;
+  extern float g_loop_ground_z_min_inlier_ratio;
+  extern float g_loop_ground_z_max_mad;
+  extern float g_loop_ground_z_max_adjustment;
+  extern float g_loop_ground_z_planar_hold_weight;
+  // Re-optimize only already accepted, independently supported loop groups
+  // when their post-graph residual is still visible. The trial is committed
+  // only if every original graph-safety gate continues to pass.
+  extern bool  g_loop_post_residual_refinement_enable;
+  extern int   g_loop_post_residual_refinement_min_anchors;
+  extern float g_loop_post_residual_refinement_target_translation;
+  extern float g_loop_post_residual_refinement_target_rotation_deg;
+  extern float g_loop_post_residual_refinement_max_weight_scale;
+  extern double g_loop_finalize_base_seconds;
+  extern double g_loop_finalize_seconds_per_keyframe;
   extern double g_loop_max_finalize_seconds;
   extern bool  g_loop_prefer_earliest_candidate;
+  // Low-frequency loop closure that runs while mapping. It never executes
+  // registration or graph optimization on the LiDAR processing thread.
+  extern bool   g_loop_online_enable;
+  extern int    g_loop_online_interval_keyframes;
+  extern int    g_loop_online_queue_capacity;
+  extern int    g_loop_online_candidate_limit;
+  extern int    g_loop_online_local_window_size;
+  extern float  g_loop_online_search_radius;
+  extern float  g_loop_online_voxel_size;
+  extern double g_loop_online_max_task_seconds;
+  extern int    g_loop_online_min_confirmations;
+  extern float  g_loop_online_confirmation_translation;
+  extern float  g_loop_online_confirmation_yaw_deg;
+  extern float  g_loop_online_max_translation_step;
+  extern float  g_loop_online_max_yaw_step_deg;
   
   extern std::string g_imu_topic;
   extern std::string g_lidar_topic;
@@ -108,9 +164,36 @@ namespace LI2Sup{
   extern double g_level_plane_distance_threshold;
   extern int g_level_min_plane_inliers;
   extern double g_level_min_plane_inlier_ratio;
+  extern double g_level_slope_soft_start_angle_deg;
   extern double g_level_max_plane_gravity_angle_deg;
+  extern int g_level_slope_enter_min_frames;
+  extern double g_level_slope_exit_angle_deg;
+  extern int g_level_slope_exit_min_frames;
+  extern int g_level_slope_pending_max_invalid_frames;
+  extern int g_level_slope_recovery_min_frames;
+  extern double g_level_slope_spatial_window_m;
+  extern double g_level_slope_spatial_min_support_ratio;
+  extern double g_level_slope_spatial_max_grade_error_deg;
+  extern int g_level_slope_spatial_max_mismatch_windows;
+  extern int g_level_slope_spatial_reentry_consistent_windows;
   extern double g_level_max_attitude_innovation_deg;
   extern double g_level_attitude_stddev_deg;
+
+  /// Consecutive committed ground planes provide a slope-aware relative
+  /// height aid. It runs after the joint ESKF update and directly adjusts
+  /// world Z only; covariance, XY, attitude, velocity and biases are untouched.
+  /// Discontinuities automatically break the short reference chain.
+  extern bool g_ground_height_continuity_enable;
+  extern int g_ground_height_continuity_max_frame_gap;
+  extern double g_ground_height_continuity_max_horizontal_step_m;
+  extern double g_ground_height_continuity_max_normal_difference_deg;
+  extern double g_ground_height_continuity_max_innovation_m;
+  extern double g_ground_height_continuity_max_correction_per_frame_m;
+  /// Maximum signed world-Z offset that this auxiliary feature may inject
+  /// during one mapping session. This bounds estimator influence; it is not a
+  /// terrain-height or map-elevation limit.
+  extern double g_ground_height_continuity_max_total_correction_m;
+  extern double g_ground_height_continuity_stddev_m;
 
   /// 由稳定垂直墙面提供的 Manhattan 航向参考。
   /// 该约束只观测绕世界竖直轴的旋转，不限制位置、横滚或俯仰。
@@ -135,6 +218,14 @@ namespace LI2Sup{
   extern double g_wall_yaw_max_innovation_deg;
   extern double g_wall_yaw_stddev_deg;
   extern double g_wall_yaw_max_correction_per_frame_deg;
+  extern double g_wall_yaw_recapture_max_innovation_deg;
+  extern int g_wall_yaw_recapture_min_frames;
+  extern double g_wall_yaw_recapture_core_radius_ratio;
+  extern int g_wall_yaw_recapture_min_reference_age_frames;
+  extern double g_wall_yaw_recapture_min_scene_quality;
+  extern double g_wall_yaw_recapture_initial_max_deviation_deg;
+  extern double g_wall_yaw_recapture_stddev_deg;
+  extern double g_wall_yaw_recapture_max_correction_per_frame_deg;
 
   /// submaps
   extern double g_submap_resolution;
@@ -172,6 +263,26 @@ namespace LI2Sup{
   /// for relocation
   extern bool g_update_map;
   extern double g_init_px, g_init_py, g_init_pz, g_init_roll, g_init_pitch, g_init_yaw;
+  extern bool g_relocation_anchor_enable;
+  extern int g_relocation_anchor_interval_frames;
+  extern int g_relocation_anchor_window_frames;
+  extern int g_relocation_anchor_min_frames;
+  extern int g_relocation_anchor_max_failures;
+  extern double g_relocation_anchor_map_radius;
+  extern double g_relocation_anchor_voxel_size;
+  extern double g_relocation_anchor_max_correspondence_distance;
+  extern double g_relocation_anchor_verification_distance;
+  extern double g_relocation_anchor_min_overlap;
+  extern double g_relocation_anchor_max_rmse;
+  extern double g_relocation_anchor_max_translation;
+  extern double g_relocation_anchor_max_yaw_deg;
+  extern double g_relocation_anchor_max_tilt_deg;
+  extern double g_relocation_anchor_max_translation_step;
+  extern double g_relocation_anchor_max_yaw_step_deg;
+  extern double g_relocation_anchor_min_motion;
+  extern double g_relocation_anchor_min_support_major;
+  extern double g_relocation_anchor_min_support_minor;
+  extern int g_relocation_anchor_min_structural_points;
 
 }
 

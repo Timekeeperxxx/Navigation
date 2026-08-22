@@ -99,6 +99,7 @@ bool have_goal_position = false;
 bool have_goal_yaw = false;
 bool safety_execution_frozen = false;
 bool have_safety_speed_scale = false;
+bool apply_safety_speed_scale_in_controller = true;
 bool final_yaw_aligning = false;
 bool final_goal_reached = false;
 bool execution_path_cleared_after_goal = false;
@@ -159,6 +160,8 @@ bool loadParams()
       "safety_execution_frozen_topic", "/planning/safety_execution_frozen");
   safety_speed_scale_topic = getParamWithDefault<std::string>(
       "safety_speed_scale_topic", "/planning/safety_speed_scale");
+  apply_safety_speed_scale_in_controller = getParamWithDefault<bool>(
+      "apply_safety_speed_scale_in_controller", true);
   controller_reset_topic = getParamWithDefault<std::string>(
       "controller_reset_topic", "/planning/controller_reset");
   goal_position_topic = getParamWithDefault<std::string>(
@@ -395,6 +398,8 @@ double estimateDesiredYaw(double t_cur, const Eigen::Vector3d &pos_des)
 
 double effectiveSafetySpeedScale(const rclcpp::Time &now)
 {
+  if (!apply_safety_speed_scale_in_controller)
+    return 1.0;
   if (!have_safety_speed_scale)
     return 1.0;
   if (safety_speed_scale_timeout > 0.0 &&
@@ -1089,8 +1094,18 @@ int main(int argc, char **argv)
       "goal_yaw", 10, goalYawCallback);
   safety_execution_frozen_sub = node->create_subscription<std_msgs::msg::Bool>(
       safety_execution_frozen_topic, 10, safetyExecutionFrozenCallback);
-  safety_speed_scale_sub = node->create_subscription<std_msgs::msg::Float64>(
-      safety_speed_scale_topic, 10, safetySpeedScaleCallback);
+  if (apply_safety_speed_scale_in_controller)
+  {
+    safety_speed_scale_sub = node->create_subscription<std_msgs::msg::Float64>(
+        safety_speed_scale_topic, 10, safetySpeedScaleCallback);
+  }
+  else
+  {
+    RCLCPP_INFO(
+        node->get_logger(),
+        "[closed_loop_controller] controller safety scaling disabled; "
+        "downstream /cmd_vel_safe filter owns speed scaling.");
+  }
   controller_reset_sub = node->create_subscription<std_msgs::msg::Bool>(
       controller_reset_topic, 10, controllerResetCallback);
   for (const auto &topic : task_start_reset_topics)

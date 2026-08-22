@@ -2,6 +2,7 @@ import json
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import rclpy
@@ -79,12 +80,52 @@ def _context(*, is_final, x=1.0, y=-2.0, z=0.3):
     }))
 
 
-def test_intermediate_task_waypoint_does_not_require_yaw(monitor):
+def test_intermediate_task_waypoint_requires_yaw(monitor):
     monitor._on_waypoint_context(_context(is_final=False))
     monitor._on_clicked_point(_goal())
 
     assert monitor.active_task_waypoint_context is not None
-    assert monitor._goal_requires_yaw() is False
+    assert monitor.active_goal_yaw == pytest.approx(1.2)
+    assert monitor._goal_requires_yaw() is True
+
+
+def test_intermediate_task_waypoint_waits_until_yaw_is_aligned(monitor):
+    class _TransformBuffer:
+        def __init__(self, yaw):
+            self.yaw = yaw
+
+        def lookup_transform(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                transform=SimpleNamespace(
+                    translation=SimpleNamespace(x=1.0, y=-2.0, z=0.3),
+                    rotation=SimpleNamespace(
+                        x=0.0,
+                        y=0.0,
+                        z=math.sin(self.yaw / 2.0),
+                        w=math.cos(self.yaw / 2.0),
+                    ),
+                )
+            )
+
+    monitor._on_waypoint_context(_context(is_final=False))
+    monitor._on_clicked_point(_goal())
+    monitor.navigation_enabled = True
+    monitor.tf_buffer = _TransformBuffer(yaw=0.0)
+    reached = []
+    monitor._publish_reached = reached.append
+
+    monitor._check_progress()
+
+    assert reached == []
+    assert monitor.active_goal is not None
+    assert monitor.last_status == "running"
+
+    monitor.tf_buffer.yaw = 1.2
+    monitor._check_progress()
+
+    assert reached == [True]
+    assert monitor.active_goal is None
+    assert monitor.last_status == "reached"
 
 
 def test_final_task_waypoint_still_requires_yaw(monitor):
@@ -98,7 +139,9 @@ def test_final_task_waypoint_still_requires_yaw(monitor):
 
 def test_context_for_a_different_goal_cannot_change_completion_rule(monitor):
     monitor._on_waypoint_context(_context(is_final=False, x=9.0))
+    monitor._on_goal_yaw(Float64(data=-0.4))
     monitor._on_clicked_point(_goal())
 
     assert monitor.active_task_waypoint_context is None
+    assert monitor.active_goal_yaw == pytest.approx(-0.4)
     assert monitor._goal_requires_yaw() is True

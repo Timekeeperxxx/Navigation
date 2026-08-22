@@ -128,7 +128,9 @@ class WaypointProgressMonitor(Node):
         self.create_timer(period, self._check_progress)
         self.get_logger().info(
             f"航点进度监测已启动：{self.global_frame} -> {self.robot_frame}, "
-            f"xy容差={self.reach_tolerance_xy:.2f}m"
+            f"xy容差={self.reach_tolerance_xy:.2f}m, "
+            f"yaw容差={self.reach_tolerance_yaw:.2f}rad, "
+            "任务中途点与终点均要求姿态对齐"
         )
 
     def _on_clicked_point(self, msg: PointStamped) -> None:
@@ -243,10 +245,23 @@ class WaypointProgressMonitor(Node):
             return
         if math.hypot(dx, dy) <= 0.02 and abs(dz) <= 0.05:
             self.active_task_waypoint_context = context
+            # Task context carries the same requested yaw as goal_yaw.  Bind
+            # it here as well so DDS delivery order across context/yaw/point
+            # topics cannot let an intermediate waypoint skip alignment.
+            try:
+                self.active_goal_yaw = self._normalize_angle(
+                    float(goal_context["yaw"])
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
 
     def _goal_requires_yaw(self) -> bool:
-        context = self.active_task_waypoint_context
-        return not (isinstance(context, dict) and context.get("is_final") is False)
+        # Every task waypoint is a full pose target.  ``is_final`` remains
+        # useful task metadata, but it must not relax intermediate completion.
+        return (
+            isinstance(self.active_task_waypoint_context, dict)
+            or self.active_goal_yaw is not None
+        )
 
     def _check_progress(self) -> None:
         if self.active_goal is None:

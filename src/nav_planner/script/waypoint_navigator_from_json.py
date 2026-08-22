@@ -340,7 +340,7 @@ class WaypointNavigator(Node):
         self.publish_current_waypoint()
 
     def publish_waypoint_context(self, *, active, waypoint_index=None):
-        """Tell the progress monitor whether the active goal is task-final."""
+        """Publish task metadata and the full requested pose for this waypoint."""
         payload = {
             'active': bool(active),
             'task_id': self.task_id,

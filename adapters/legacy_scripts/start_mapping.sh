@@ -17,11 +17,11 @@ LOG_FILE="$ROBOT_NAV_LOG_ROOT/start_mapping_debug.log"
 PID_FILE="$ROBOT_NAV_RUNTIME_ROOT/mapping.pid"
 READY_FILE="$MAP_DIR/.ground_generation_started"
 STATUS_FILE="$ROBOT_NAV_RUNTIME_ROOT/mapping_status.json"
-MAPPING_READY_TIMEOUT_SECONDS="${MAPPING_READY_TIMEOUT_SECONDS:-55}"
-MAPPING_LIVOX_DATA_TIMEOUT_SECONDS="${MAPPING_LIVOX_DATA_TIMEOUT_SECONDS:-8}"
+MAPPING_READY_TIMEOUT_SECONDS="${MAPPING_READY_TIMEOUT_SECONDS:-120}"
+MAPPING_STATUS_COMMAND_TIMEOUT_SECONDS="${MAPPING_STATUS_COMMAND_TIMEOUT_SECONDS:-5}"
 MAPPING_LOOP_CLOSURE="${MAPPING_LOOP_CLOSURE:-true}"
 MAPPING_LOOP_SEARCH_RADIUS="${MAPPING_LOOP_SEARCH_RADIUS:-10.0}"
-SUPERLIO_SAVE_TIMEOUT_SECONDS="${SUPERLIO_SAVE_TIMEOUT_SECONDS:-100}"
+SUPERLIO_SAVE_TIMEOUT_SECONDS="${SUPERLIO_SAVE_TIMEOUT_SECONDS:-660}"
 SUPERLIO_PAUSE_TIMEOUT_SECONDS="${SUPERLIO_PAUSE_TIMEOUT_SECONDS:-30}"
 LAUNCH_STOP_TIMEOUT_SECONDS="${LAUNCH_STOP_TIMEOUT_SECONDS:-15}"
 LAUNCH_TERM_TIMEOUT_SECONDS="${LAUNCH_TERM_TIMEOUT_SECONDS:-10}"
@@ -258,43 +258,65 @@ mapping_log_has() {
 }
 
 mapping_service_ready() {
-  [ "$(ros2 service type /save_terrain_map 2>/dev/null || true)" = "std_srvs/srv/Trigger" ]
+  [ "$(timeout "${MAPPING_STATUS_COMMAND_TIMEOUT_SECONDS}s" \
+    ros2 service type /save_terrain_map 2>/dev/null || true)" = "std_srvs/srv/Trigger" ]
 }
 
-wait_for_livox_data() {
-  # topic 由本脚本启动的 Livox 驱动创建；只有收到真实帧才允许写 ready。
-  # `ros2 topic echo` 在 Humble 支持 sensor_data QoS，field 可避免展开整帧点云。
-  timeout "${MAPPING_LIVOX_DATA_TIMEOUT_SECONDS}s" \
-    ros2 topic echo /livox/lidar --once --qos-profile sensor_data --field timebase \
-    >/dev/null 2>&1
+mapping_lio_status_snapshot() {
+  timeout "${MAPPING_STATUS_COMMAND_TIMEOUT_SECONDS}s" \
+    ros2 service call /lio/mapping_status std_srvs/srv/Trigger "{}" \
+    2>/dev/null || true
 }
 
-ready_waited=0
-while kill -0 "$LAUNCH_PID" 2>/dev/null && [ "$ready_waited" -lt "$MAPPING_READY_TIMEOUT_SECONDS" ]; do
+ready_deadline=$((SECONDS + MAPPING_READY_TIMEOUT_SECONDS))
+while kill -0 "$LAUNCH_PID" 2>/dev/null && [ "$SECONDS" -lt "$ready_deadline" ]; do
   if mapping_log_has "publish use livox custom format" \
     && mapping_log_has "Map init done" \
     && mapping_service_ready; then
     break
   fi
   sleep 1
-  ready_waited=$((ready_waited + 1))
 done
 
 if kill -0 "$LAUNCH_PID" 2>/dev/null \
   && mapping_log_has "publish use livox custom format" \
   && mapping_log_has "Map init done" \
   && mapping_service_ready; then
-  if ! wait_for_livox_data; then
-    MAPPING_FAILURE_MESSAGE="雷达无有效数据：${MAPPING_LIVOX_DATA_TIMEOUT_SECONDS} 秒内未收到 /livox/lidar 点云，请检查 Livox MID360 供电、网线和 IP 配置"
-    log_error "$MAPPING_FAILURE_MESSAGE"
-    exit 1
+  # `Map init done` 来自本次 launch 的新增日志，只有 SuperLIO 已经收到并
+  # 处理 LiDAR+IMU 后才会出现，因此它本身就是真实数据证据。不再启动一个
+  # `ros2 topic echo --once` 作为硬门槛：新 CLI 订阅者在 DDS 冷启动时可能发现
+  # 超时，误杀已经正常建图的进程。
+  lio_status="$(mapping_lio_status_snapshot)"
+  received_lidar="$(printf '%s\n' "$lio_status" | sed -n 's/.*received_lidar=\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
+  admitted_lidar="$(printf '%s\n' "$lio_status" | sed -n 's/.*admitted_lidar=\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
+  completed_lidar="$(printf '%s\n' "$lio_status" | sed -n 's/.*completed_lidar=\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
+  if [[ "$received_lidar" =~ ^[0-9]+$ ]] \
+    && [[ "$admitted_lidar" =~ ^[0-9]+$ ]] \
+    && [[ "$completed_lidar" =~ ^[0-9]+$ ]]; then
+    log_info "SuperLIO 启动数据证据：received_lidar=$received_lidar admitted_lidar=$admitted_lidar completed_lidar=$completed_lidar"
+  else
+    # 独立 ROS2 CLI 服务调用仍可能受冷启动发现影响；它只用于诊断，不再否定
+    # 已经出现的当前运行 `Map init done` 证据。
+    received_lidar=-1
+    admitted_lidar=-1
+    completed_lidar=-1
+    log_warn "未能读取 /lio/mapping_status 启动计数，已使用本次 Map init done 作为数据就绪证据"
   fi
   date '+%Y-%m-%d %H:%M:%S' > "$READY_FILE"
-  write_json_file "$STATUS_FILE" "{\"running\":true,\"map_dir\":\"$MAP_DIR\",\"pid\":$LAUNCH_PID,\"stage\":\"running\"}"
+  write_json_file "$STATUS_FILE" "{\"running\":true,\"map_dir\":\"$MAP_DIR\",\"pid\":$LAUNCH_PID,\"stage\":\"running\",\"startup_evidence\":\"current_run_map_init\",\"received_lidar\":$received_lidar,\"admitted_lidar\":$admitted_lidar,\"completed_lidar\":$completed_lidar}"
   log_info "建图进程已启动：PID=$LAUNCH_PID"
   log_info "ready 文件：$READY_FILE"
 else
-  log_error "建图链路在 ${MAPPING_READY_TIMEOUT_SECONDS}s 内未就绪，请检查 Livox、SuperLIO 和 terrain 服务：$LOG_FILE"
+  if ! mapping_log_has "publish use livox custom format"; then
+    MAPPING_FAILURE_MESSAGE="Livox 驱动在 ${MAPPING_READY_TIMEOUT_SECONDS} 秒内未就绪，请检查驱动、供电、网线和 IP 配置"
+  elif ! mapping_log_has "Map init done"; then
+    MAPPING_FAILURE_MESSAGE="SuperLIO 在 ${MAPPING_READY_TIMEOUT_SECONDS} 秒内未完成 Map init，请检查 Livox LiDAR/IMU 是否持续出帧"
+  elif ! mapping_service_ready; then
+    MAPPING_FAILURE_MESSAGE="terrain 保存服务在 ${MAPPING_READY_TIMEOUT_SECONDS} 秒内未就绪"
+  else
+    MAPPING_FAILURE_MESSAGE="建图链路在 ${MAPPING_READY_TIMEOUT_SECONDS} 秒内未就绪"
+  fi
+  log_error "$MAPPING_FAILURE_MESSAGE：$LOG_FILE"
   exit 1
 fi
 

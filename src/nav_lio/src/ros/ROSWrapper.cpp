@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -18,8 +19,6 @@ namespace LI2Sup{
 namespace {
 
 constexpr double kSensorTimeEpsilon = 1e-6;
-constexpr double kMaxImuBufferAgeSeconds = 3.0;
-
 IMUData interpolateImu(const IMUData& before, const IMUData& after, double time)
 {
   const double interval = after.secs - before.secs;
@@ -65,8 +64,47 @@ void LoadParamFromRos(rclcpp::Node& node)
   node.declare_parameter<int>("lio.map.save_interval", 1);
   node.get_parameter("lio.map.save_interval", g_pcd_save_interval);
 
+  node.declare_parameter<std::int64_t>(
+      "lio.map.max_points_in_memory", 0);
+  node.get_parameter(
+      "lio.map.max_points_in_memory",
+      g_map_max_points_in_memory);
+  if (g_map_max_points_in_memory < 0) {
+    throw std::invalid_argument(
+        "lio.map.max_points_in_memory must be non-negative");
+  }
+  if (g_map_max_points_in_memory > 0 && !g_if_filter) {
+    throw std::invalid_argument(
+        "bounded map persistence requires lio.map.if_filter=true");
+  }
+
+  node.declare_parameter<int>("lio.map.max_pending_writes", 64);
+  node.get_parameter(
+      "lio.map.max_pending_writes",
+      g_map_max_pending_writes);
+  if (g_map_max_pending_writes < 1 ||
+      g_map_max_pending_writes > 256) {
+    throw std::invalid_argument(
+        "lio.map.max_pending_writes must be in [1, 256]");
+  }
+
+  node.declare_parameter<bool>("lio.map.cleanup_work_files", true);
+  node.get_parameter(
+      "lio.map.cleanup_work_files",
+      g_map_cleanup_work_files);
+
   node.declare_parameter<bool>("lio.loop.enable", false);
   node.get_parameter("lio.loop.enable", g_loop_closure_enable);
+  node.declare_parameter<bool>(
+      "lio.loop.endpoint_corridor_partial.enable", true);
+  node.get_parameter(
+      "lio.loop.endpoint_corridor_partial.enable",
+      g_loop_endpoint_corridor_partial_enable);
+
+  node.declare_parameter<bool>("lio.loop.persist_keyframes", false);
+  node.get_parameter(
+      "lio.loop.persist_keyframes",
+      g_loop_persist_keyframes);
 
   node.declare_parameter<std::string>("lio.loop.map_name", "map_loop.pcd");
   node.get_parameter("lio.loop.map_name", g_loop_map_name);
@@ -75,9 +113,29 @@ void LoadParamFromRos(rclcpp::Node& node)
   double loop_keyframe_min_distance = 0.5;
   node.get_parameter("lio.loop.keyframe_min_distance", loop_keyframe_min_distance);
   g_loop_keyframe_min_distance = static_cast<float>(loop_keyframe_min_distance);
+  if (!std::isfinite(g_loop_keyframe_min_distance) ||
+      g_loop_keyframe_min_distance <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.keyframe_min_distance must be finite and positive");
+  }
 
   node.declare_parameter<int>("lio.loop.keyframe_min_gap", 80);
   node.get_parameter("lio.loop.keyframe_min_gap", g_loop_keyframe_min_gap);
+  if (g_loop_keyframe_min_gap < 1) {
+    throw std::invalid_argument(
+        "lio.loop.keyframe_min_gap must be positive");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.internal_min_sensor_time_seconds", 30.0);
+  node.get_parameter(
+      "lio.loop.internal_min_sensor_time_seconds",
+      g_loop_internal_min_sensor_time_seconds);
+  if (!std::isfinite(g_loop_internal_min_sensor_time_seconds) ||
+      g_loop_internal_min_sensor_time_seconds <= 0.0) {
+    throw std::invalid_argument(
+        "lio.loop.internal_min_sensor_time_seconds must be finite and positive");
+  }
 
   node.declare_parameter<double>("lio.loop.search_radius", 5.0);
   double loop_search_radius = 5.0;
@@ -104,6 +162,11 @@ void LoadParamFromRos(rclcpp::Node& node)
   double loop_icp_max_distance = 2.0;
   node.get_parameter("lio.loop.icp_max_distance", loop_icp_max_distance);
   g_loop_icp_max_distance = static_cast<float>(loop_icp_max_distance);
+  if (!std::isfinite(g_loop_icp_max_distance) ||
+      g_loop_icp_max_distance <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.icp_max_distance must be finite and positive");
+  }
 
   node.declare_parameter<double>("lio.loop.icp_score_threshold", 1.0);
   double loop_icp_score_threshold = 1.0;
@@ -138,6 +201,36 @@ void LoadParamFromRos(rclcpp::Node& node)
       g_loop_max_correction_rotation_deg > 180.0f) {
     throw std::invalid_argument(
         "lio.loop.max_correction_rotation_deg must be in (0, 180]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.max_correction_tilt_deg", 2.0);
+  double loop_max_correction_tilt_deg = 2.0;
+  node.get_parameter(
+      "lio.loop.max_correction_tilt_deg",
+      loop_max_correction_tilt_deg);
+  g_loop_max_correction_tilt_deg =
+      static_cast<float>(loop_max_correction_tilt_deg);
+  if (g_loop_max_correction_tilt_deg <= 0.0f ||
+      g_loop_max_correction_tilt_deg > 45.0f) {
+    throw std::invalid_argument(
+        "lio.loop.max_correction_tilt_deg must be in (0, 45]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.max_adaptive_yaw_deg", 15.0);
+  double loop_max_adaptive_yaw_deg = 15.0;
+  node.get_parameter(
+      "lio.loop.max_adaptive_yaw_deg",
+      loop_max_adaptive_yaw_deg);
+  g_loop_max_adaptive_yaw_deg =
+      static_cast<float>(loop_max_adaptive_yaw_deg);
+  if (g_loop_max_adaptive_yaw_deg <
+          g_loop_max_correction_rotation_deg ||
+      g_loop_max_adaptive_yaw_deg > 90.0f) {
+    throw std::invalid_argument(
+        "lio.loop.max_adaptive_yaw_deg must be no smaller than "
+        "lio.loop.max_correction_rotation_deg and no greater than 90");
   }
 
   node.declare_parameter<double>("lio.loop.min_overlap_ratio", 0.35);
@@ -191,13 +284,325 @@ void LoadParamFromRos(rclcpp::Node& node)
   }
 
   node.declare_parameter<double>(
-      "lio.loop.max_finalize_seconds", 30.0);
+      "lio.loop.verification.max_distance", 0.6);
+  double loop_verification_max_distance = 0.6;
+  node.get_parameter(
+      "lio.loop.verification.max_distance",
+      loop_verification_max_distance);
+  g_loop_verification_max_distance =
+      static_cast<float>(loop_verification_max_distance);
+  if (g_loop_verification_max_distance <= 0.0f ||
+      g_loop_verification_max_distance > g_loop_icp_max_distance) {
+    throw std::invalid_argument(
+        "lio.loop.verification.max_distance must be positive and no greater than lio.loop.icp_max_distance");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.verification.min_symmetric_overlap", 0.45);
+  double loop_min_symmetric_overlap = 0.45;
+  node.get_parameter(
+      "lio.loop.verification.min_symmetric_overlap",
+      loop_min_symmetric_overlap);
+  g_loop_min_symmetric_overlap =
+      static_cast<float>(loop_min_symmetric_overlap);
+  if (g_loop_min_symmetric_overlap <= 0.0f ||
+      g_loop_min_symmetric_overlap > 1.0f) {
+    throw std::invalid_argument(
+        "lio.loop.verification.min_symmetric_overlap must be in (0, 1]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.verification.max_trimmed_rmse", 0.30);
+  double loop_max_trimmed_rmse = 0.30;
+  node.get_parameter(
+      "lio.loop.verification.max_trimmed_rmse",
+      loop_max_trimmed_rmse);
+  g_loop_max_trimmed_rmse =
+      static_cast<float>(loop_max_trimmed_rmse);
+  if (g_loop_max_trimmed_rmse <= 0.0f ||
+      g_loop_max_trimmed_rmse > g_loop_verification_max_distance) {
+    throw std::invalid_argument(
+        "lio.loop.verification.max_trimmed_rmse must be positive and no greater than verification.max_distance");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.verification.block_size", 1.0);
+  double loop_verification_block_size = 1.0;
+  node.get_parameter(
+      "lio.loop.verification.block_size",
+      loop_verification_block_size);
+  g_loop_verification_block_size =
+      static_cast<float>(loop_verification_block_size);
+  if (g_loop_verification_block_size <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.verification.block_size must be positive");
+  }
+
+  node.declare_parameter<int>(
+      "lio.loop.verification.min_blocks", 6);
+  node.get_parameter(
+      "lio.loop.verification.min_blocks",
+      g_loop_min_verification_blocks);
+  if (g_loop_min_verification_blocks < 1) {
+    throw std::invalid_argument(
+        "lio.loop.verification.min_blocks must be positive");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.verification.min_block_ratio", 0.50);
+  double loop_min_verification_block_ratio = 0.50;
+  node.get_parameter(
+      "lio.loop.verification.min_block_ratio",
+      loop_min_verification_block_ratio);
+  g_loop_min_verification_block_ratio =
+      static_cast<float>(loop_min_verification_block_ratio);
+  if (g_loop_min_verification_block_ratio <= 0.0f ||
+      g_loop_min_verification_block_ratio > 1.0f) {
+    throw std::invalid_argument(
+        "lio.loop.verification.min_block_ratio must be in (0, 1]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.verification.min_span", 3.0);
+  double loop_min_verification_span = 3.0;
+  node.get_parameter(
+      "lio.loop.verification.min_span",
+      loop_min_verification_span);
+  g_loop_min_verification_span =
+      static_cast<float>(loop_min_verification_span);
+  if (g_loop_min_verification_span <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.verification.min_span must be positive");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.verification.min_structural_overlap", 0.35);
+  double loop_min_structural_overlap = 0.35;
+  node.get_parameter(
+      "lio.loop.verification.min_structural_overlap",
+      loop_min_structural_overlap);
+  g_loop_min_structural_overlap =
+      static_cast<float>(loop_min_structural_overlap);
+  if (g_loop_min_structural_overlap <= 0.0f ||
+      g_loop_min_structural_overlap > 1.0f) {
+    throw std::invalid_argument(
+        "lio.loop.verification.min_structural_overlap must be in (0, 1]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.max_local_translation_strain", 0.015);
+  double loop_max_local_translation_strain = 0.015;
+  node.get_parameter(
+      "lio.loop.max_local_translation_strain",
+      loop_max_local_translation_strain);
+  g_loop_max_local_translation_strain =
+      static_cast<float>(loop_max_local_translation_strain);
+  if (g_loop_max_local_translation_strain <= 0.0f ||
+      g_loop_max_local_translation_strain > 0.10f) {
+    throw std::invalid_argument(
+        "lio.loop.max_local_translation_strain must be in (0, 0.10]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.max_local_translation_delta", 0.50);
+  double loop_max_local_translation_delta = 0.50;
+  node.get_parameter(
+      "lio.loop.max_local_translation_delta",
+      loop_max_local_translation_delta);
+  g_loop_max_local_translation_delta =
+      static_cast<float>(loop_max_local_translation_delta);
+  if (g_loop_max_local_translation_delta <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.max_local_translation_delta must be positive");
+  }
+
+  node.declare_parameter<bool>(
+      "lio.loop.ground_z_refinement.enable", true);
+  node.get_parameter(
+      "lio.loop.ground_z_refinement.enable",
+      g_loop_ground_z_refinement_enable);
+
+  node.declare_parameter<double>(
+      "lio.loop.ground_z_refinement.cell_size", 0.25);
+  double loop_ground_z_cell_size = 0.25;
+  node.get_parameter(
+      "lio.loop.ground_z_refinement.cell_size",
+      loop_ground_z_cell_size);
+  g_loop_ground_z_cell_size =
+      static_cast<float>(loop_ground_z_cell_size);
+  if (g_loop_ground_z_cell_size <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.ground_z_refinement.cell_size must be positive");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.ground_z_refinement.pair_xy_distance", 0.35);
+  double loop_ground_z_pair_xy_distance = 0.35;
+  node.get_parameter(
+      "lio.loop.ground_z_refinement.pair_xy_distance",
+      loop_ground_z_pair_xy_distance);
+  g_loop_ground_z_pair_xy_distance =
+      static_cast<float>(loop_ground_z_pair_xy_distance);
+  if (g_loop_ground_z_pair_xy_distance <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.ground_z_refinement.pair_xy_distance must be positive");
+  }
+
+  node.declare_parameter<int>(
+      "lio.loop.ground_z_refinement.min_pairs", 80);
+  node.get_parameter(
+      "lio.loop.ground_z_refinement.min_pairs",
+      g_loop_ground_z_min_pairs);
+  if (g_loop_ground_z_min_pairs < 10) {
+    throw std::invalid_argument(
+        "lio.loop.ground_z_refinement.min_pairs must be at least 10");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.ground_z_refinement.min_inlier_ratio", 0.65);
+  double loop_ground_z_min_inlier_ratio = 0.65;
+  node.get_parameter(
+      "lio.loop.ground_z_refinement.min_inlier_ratio",
+      loop_ground_z_min_inlier_ratio);
+  g_loop_ground_z_min_inlier_ratio =
+      static_cast<float>(loop_ground_z_min_inlier_ratio);
+  if (g_loop_ground_z_min_inlier_ratio <= 0.0f ||
+      g_loop_ground_z_min_inlier_ratio > 1.0f) {
+    throw std::invalid_argument(
+        "lio.loop.ground_z_refinement.min_inlier_ratio must be in (0, 1]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.ground_z_refinement.max_mad", 0.08);
+  double loop_ground_z_max_mad = 0.08;
+  node.get_parameter(
+      "lio.loop.ground_z_refinement.max_mad",
+      loop_ground_z_max_mad);
+  g_loop_ground_z_max_mad =
+      static_cast<float>(loop_ground_z_max_mad);
+  if (g_loop_ground_z_max_mad <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.ground_z_refinement.max_mad must be positive");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.ground_z_refinement.max_adjustment", 0.5);
+  double loop_ground_z_max_adjustment = 0.5;
+  node.get_parameter(
+      "lio.loop.ground_z_refinement.max_adjustment",
+      loop_ground_z_max_adjustment);
+  g_loop_ground_z_max_adjustment =
+      static_cast<float>(loop_ground_z_max_adjustment);
+  if (g_loop_ground_z_max_adjustment <= 0.0f) {
+    throw std::invalid_argument(
+        "lio.loop.ground_z_refinement.max_adjustment must be positive");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.ground_z_refinement.planar_hold_weight", 0.25);
+  double loop_ground_z_planar_hold_weight = 0.25;
+  node.get_parameter(
+      "lio.loop.ground_z_refinement.planar_hold_weight",
+      loop_ground_z_planar_hold_weight);
+  g_loop_ground_z_planar_hold_weight =
+      static_cast<float>(loop_ground_z_planar_hold_weight);
+  if (g_loop_ground_z_planar_hold_weight <= 0.0f ||
+      g_loop_ground_z_planar_hold_weight > 1.0f) {
+    throw std::invalid_argument(
+        "lio.loop.ground_z_refinement.planar_hold_weight must be in (0, 1]");
+  }
+
+  node.declare_parameter<bool>(
+      "lio.loop.post_residual_refinement.enable", true);
+  node.get_parameter(
+      "lio.loop.post_residual_refinement.enable",
+      g_loop_post_residual_refinement_enable);
+
+  node.declare_parameter<int>(
+      "lio.loop.post_residual_refinement.min_anchors", 2);
+  node.get_parameter(
+      "lio.loop.post_residual_refinement.min_anchors",
+      g_loop_post_residual_refinement_min_anchors);
+  if (g_loop_post_residual_refinement_min_anchors < 2 ||
+      g_loop_post_residual_refinement_min_anchors > 8) {
+    throw std::invalid_argument(
+        "lio.loop.post_residual_refinement.min_anchors must be in [2, 8]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.post_residual_refinement.target_translation", 0.10);
+  double loop_post_residual_target_translation = 0.10;
+  node.get_parameter(
+      "lio.loop.post_residual_refinement.target_translation",
+      loop_post_residual_target_translation);
+  g_loop_post_residual_refinement_target_translation =
+      static_cast<float>(loop_post_residual_target_translation);
+  if (!std::isfinite(g_loop_post_residual_refinement_target_translation) ||
+      g_loop_post_residual_refinement_target_translation < 0.03f ||
+      g_loop_post_residual_refinement_target_translation > 0.30f) {
+    throw std::invalid_argument(
+        "lio.loop.post_residual_refinement.target_translation must be in [0.03, 0.30]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.post_residual_refinement.target_rotation_deg", 0.20);
+  double loop_post_residual_target_rotation_deg = 0.20;
+  node.get_parameter(
+      "lio.loop.post_residual_refinement.target_rotation_deg",
+      loop_post_residual_target_rotation_deg);
+  g_loop_post_residual_refinement_target_rotation_deg =
+      static_cast<float>(loop_post_residual_target_rotation_deg);
+  if (!std::isfinite(g_loop_post_residual_refinement_target_rotation_deg) ||
+      g_loop_post_residual_refinement_target_rotation_deg < 0.05f ||
+      g_loop_post_residual_refinement_target_rotation_deg > 1.0f) {
+    throw std::invalid_argument(
+        "lio.loop.post_residual_refinement.target_rotation_deg must be in [0.05, 1.0]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.post_residual_refinement.max_weight_scale", 4.0);
+  double loop_post_residual_max_weight_scale = 4.0;
+  node.get_parameter(
+      "lio.loop.post_residual_refinement.max_weight_scale",
+      loop_post_residual_max_weight_scale);
+  g_loop_post_residual_refinement_max_weight_scale =
+      static_cast<float>(loop_post_residual_max_weight_scale);
+  if (!std::isfinite(g_loop_post_residual_refinement_max_weight_scale) ||
+      g_loop_post_residual_refinement_max_weight_scale < 1.0f ||
+      g_loop_post_residual_refinement_max_weight_scale > 8.0f) {
+    throw std::invalid_argument(
+        "lio.loop.post_residual_refinement.max_weight_scale must be in [1, 8]");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.finalize_base_seconds", 120.0);
+  node.get_parameter(
+      "lio.loop.finalize_base_seconds",
+      g_loop_finalize_base_seconds);
+  if (g_loop_finalize_base_seconds <= 0.0) {
+    throw std::invalid_argument(
+        "lio.loop.finalize_base_seconds must be positive");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.finalize_seconds_per_keyframe", 0.04);
+  node.get_parameter(
+      "lio.loop.finalize_seconds_per_keyframe",
+      g_loop_finalize_seconds_per_keyframe);
+  if (g_loop_finalize_seconds_per_keyframe < 0.0) {
+    throw std::invalid_argument(
+        "lio.loop.finalize_seconds_per_keyframe must be non-negative");
+  }
+
+  node.declare_parameter<double>(
+      "lio.loop.max_finalize_seconds", 600.0);
   node.get_parameter(
       "lio.loop.max_finalize_seconds",
       g_loop_max_finalize_seconds);
-  if (g_loop_max_finalize_seconds <= 0.0) {
+  if (g_loop_max_finalize_seconds < g_loop_finalize_base_seconds) {
     throw std::invalid_argument(
-        "lio.loop.max_finalize_seconds must be positive");
+        "lio.loop.max_finalize_seconds must be no smaller than "
+        "lio.loop.finalize_base_seconds");
   }
 
   node.declare_parameter<bool>(
@@ -205,6 +610,111 @@ void LoadParamFromRos(rclcpp::Node& node)
   node.get_parameter(
       "lio.loop.prefer_earliest_candidate",
       g_loop_prefer_earliest_candidate);
+
+  node.declare_parameter<bool>("lio.loop.online.enable", false);
+  node.get_parameter("lio.loop.online.enable", g_loop_online_enable);
+
+  node.declare_parameter<int>("lio.loop.online.interval_keyframes", 5);
+  node.get_parameter(
+      "lio.loop.online.interval_keyframes",
+      g_loop_online_interval_keyframes);
+  if (g_loop_online_interval_keyframes < 1) {
+    throw std::invalid_argument(
+        "lio.loop.online.interval_keyframes must be positive");
+  }
+
+  node.declare_parameter<int>("lio.loop.online.queue_capacity", 32);
+  node.get_parameter(
+      "lio.loop.online.queue_capacity", g_loop_online_queue_capacity);
+  if (g_loop_online_queue_capacity < 4 ||
+      g_loop_online_queue_capacity > 64) {
+    throw std::invalid_argument(
+        "lio.loop.online.queue_capacity must be in [4, 64]");
+  }
+
+  node.declare_parameter<int>("lio.loop.online.candidate_limit", 4);
+  node.get_parameter(
+      "lio.loop.online.candidate_limit", g_loop_online_candidate_limit);
+  if (g_loop_online_candidate_limit < 1 ||
+      g_loop_online_candidate_limit > 12) {
+    throw std::invalid_argument(
+        "lio.loop.online.candidate_limit must be in [1, 12]");
+  }
+
+  node.declare_parameter<int>("lio.loop.online.local_window_size", 8);
+  node.get_parameter(
+      "lio.loop.online.local_window_size",
+      g_loop_online_local_window_size);
+  if (g_loop_online_local_window_size < 3 ||
+      g_loop_online_local_window_size > 20) {
+    throw std::invalid_argument(
+        "lio.loop.online.local_window_size must be in [3, 20]");
+  }
+
+  const auto read_online_loop_double = [&node](
+      const char* name,
+      const double default_value,
+      float& value,
+      const double minimum,
+      const double maximum) {
+    double parameter = default_value;
+    node.declare_parameter<double>(name, default_value);
+    node.get_parameter(name, parameter);
+    if (!std::isfinite(parameter) ||
+        parameter < minimum || parameter > maximum) {
+      throw std::invalid_argument(
+          std::string(name) + " must be finite and in [" +
+          std::to_string(minimum) + ", " +
+          std::to_string(maximum) + "]");
+    }
+    value = static_cast<float>(parameter);
+  };
+  read_online_loop_double(
+      "lio.loop.online.search_radius", 8.0,
+      g_loop_online_search_radius, 2.0, 20.0);
+  read_online_loop_double(
+      "lio.loop.online.voxel_size", 0.30,
+      g_loop_online_voxel_size, 0.3, 2.0);
+
+  node.declare_parameter<double>(
+      "lio.loop.online.max_task_seconds", 60.0);
+  node.get_parameter(
+      "lio.loop.online.max_task_seconds",
+      g_loop_online_max_task_seconds);
+  if (!std::isfinite(g_loop_online_max_task_seconds) ||
+      g_loop_online_max_task_seconds < 5.0 ||
+      g_loop_online_max_task_seconds > 120.0) {
+    throw std::invalid_argument(
+        "lio.loop.online.max_task_seconds must be in [5, 120]");
+  }
+
+  node.declare_parameter<int>(
+      "lio.loop.online.min_confirmations", 2);
+  node.get_parameter(
+      "lio.loop.online.min_confirmations",
+      g_loop_online_min_confirmations);
+  if (g_loop_online_min_confirmations < 2 ||
+      g_loop_online_min_confirmations > 4) {
+    throw std::invalid_argument(
+        "lio.loop.online.min_confirmations must be in [2, 4]");
+  }
+  read_online_loop_double(
+      "lio.loop.online.confirmation_translation", 0.35,
+      g_loop_online_confirmation_translation, 0.05, 1.0);
+  read_online_loop_double(
+      "lio.loop.online.confirmation_yaw_deg", 0.50,
+      g_loop_online_confirmation_yaw_deg, 0.05, 2.0);
+  read_online_loop_double(
+      "lio.loop.online.max_translation_step", 0.05,
+      g_loop_online_max_translation_step, 0.005, 0.5);
+  read_online_loop_double(
+      "lio.loop.online.max_yaw_step_deg", 0.10,
+      g_loop_online_max_yaw_step_deg, 0.01, 1.0);
+
+  if (g_loop_online_enable && !g_loop_closure_enable) {
+    throw std::invalid_argument(
+        "lio.loop.online.enable requires lio.loop.enable=true");
+  }
 
   node.declare_parameter<std::string>("lio.ros.lidar_topic", "/lidar");
   node.get_parameter("lio.ros.lidar_topic", g_lidar_topic);
@@ -461,12 +971,104 @@ void LoadParamFromRos(rclcpp::Node& node)
       g_level_min_plane_inlier_ratio, 0.01, 0.9);
 
   node.declare_parameter<double>(
-      "lio.kf.level_constraint.max_plane_gravity_angle_deg", 3.0);
+      "lio.kf.level_constraint.slope_soft_start_angle_deg", 1.0);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_soft_start_angle_deg",
+      g_level_slope_soft_start_angle_deg);
+
+  node.declare_parameter<double>(
+      "lio.kf.level_constraint.max_plane_gravity_angle_deg", 1.5);
   node.get_parameter(
       "lio.kf.level_constraint.max_plane_gravity_angle_deg",
       g_level_max_plane_gravity_angle_deg);
   g_level_max_plane_gravity_angle_deg = std::clamp(
       g_level_max_plane_gravity_angle_deg, 0.5, 15.0);
+  g_level_slope_soft_start_angle_deg = std::clamp(
+      g_level_slope_soft_start_angle_deg,
+      0.1,
+      g_level_max_plane_gravity_angle_deg - 0.1);
+
+  node.declare_parameter<int>(
+      "lio.kf.level_constraint.slope_enter_min_frames", 5);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_enter_min_frames",
+      g_level_slope_enter_min_frames);
+  g_level_slope_enter_min_frames = std::clamp(
+      g_level_slope_enter_min_frames, 2, 100);
+
+  node.declare_parameter<double>(
+      "lio.kf.level_constraint.slope_exit_angle_deg", 0.75);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_exit_angle_deg",
+      g_level_slope_exit_angle_deg);
+  g_level_slope_exit_angle_deg = std::clamp(
+      g_level_slope_exit_angle_deg,
+      0.05,
+      g_level_slope_soft_start_angle_deg);
+
+  node.declare_parameter<int>(
+      "lio.kf.level_constraint.slope_exit_min_frames", 10);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_exit_min_frames",
+      g_level_slope_exit_min_frames);
+  g_level_slope_exit_min_frames = std::clamp(
+      g_level_slope_exit_min_frames, 2, 200);
+
+  node.declare_parameter<int>(
+      "lio.kf.level_constraint.slope_pending_max_invalid_frames", 2);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_pending_max_invalid_frames",
+      g_level_slope_pending_max_invalid_frames);
+  g_level_slope_pending_max_invalid_frames = std::clamp(
+      g_level_slope_pending_max_invalid_frames, 0, 20);
+
+  node.declare_parameter<int>(
+      "lio.kf.level_constraint.slope_recovery_min_frames", 3);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_recovery_min_frames",
+      g_level_slope_recovery_min_frames);
+  g_level_slope_recovery_min_frames = std::clamp(
+      g_level_slope_recovery_min_frames, 1, 20);
+
+  node.declare_parameter<double>(
+      "lio.kf.level_constraint.slope_spatial_window_m", 5.0);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_spatial_window_m",
+      g_level_slope_spatial_window_m);
+  g_level_slope_spatial_window_m = std::clamp(
+      g_level_slope_spatial_window_m, 2.0, 30.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.level_constraint.slope_spatial_min_support_ratio", 0.40);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_spatial_min_support_ratio",
+      g_level_slope_spatial_min_support_ratio);
+  g_level_slope_spatial_min_support_ratio = std::clamp(
+      g_level_slope_spatial_min_support_ratio, 0.10, 1.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.level_constraint.slope_spatial_max_grade_error_deg", 0.75);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_spatial_max_grade_error_deg",
+      g_level_slope_spatial_max_grade_error_deg);
+  g_level_slope_spatial_max_grade_error_deg = std::clamp(
+      g_level_slope_spatial_max_grade_error_deg, 0.20, 5.0);
+
+  node.declare_parameter<int>(
+      "lio.kf.level_constraint.slope_spatial_max_mismatch_windows", 2);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_spatial_max_mismatch_windows",
+      g_level_slope_spatial_max_mismatch_windows);
+  g_level_slope_spatial_max_mismatch_windows = std::clamp(
+      g_level_slope_spatial_max_mismatch_windows, 1, 10);
+
+  node.declare_parameter<int>(
+      "lio.kf.level_constraint.slope_spatial_reentry_consistent_windows", 2);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_spatial_reentry_consistent_windows",
+      g_level_slope_spatial_reentry_consistent_windows);
+  g_level_slope_spatial_reentry_consistent_windows = std::clamp(
+      g_level_slope_spatial_reentry_consistent_windows, 1, 10);
 
   node.declare_parameter<double>(
       "lio.kf.level_constraint.max_attitude_innovation_deg", 6.0);
@@ -483,6 +1085,70 @@ void LoadParamFromRos(rclcpp::Node& node)
       g_level_attitude_stddev_deg);
   g_level_attitude_stddev_deg = std::clamp(
       g_level_attitude_stddev_deg, 0.005, 10.0);
+
+  node.declare_parameter<bool>(
+      "lio.kf.ground_height_continuity.enable", false);
+  node.get_parameter(
+      "lio.kf.ground_height_continuity.enable",
+      g_ground_height_continuity_enable);
+
+  node.declare_parameter<int>(
+      "lio.kf.ground_height_continuity.max_frame_gap", 5);
+  node.get_parameter(
+      "lio.kf.ground_height_continuity.max_frame_gap",
+      g_ground_height_continuity_max_frame_gap);
+  g_ground_height_continuity_max_frame_gap = std::clamp(
+      g_ground_height_continuity_max_frame_gap, 1, 50);
+
+  node.declare_parameter<double>(
+      "lio.kf.ground_height_continuity.max_horizontal_step_m", 1.0);
+  node.get_parameter(
+      "lio.kf.ground_height_continuity.max_horizontal_step_m",
+      g_ground_height_continuity_max_horizontal_step_m);
+  g_ground_height_continuity_max_horizontal_step_m = std::clamp(
+      g_ground_height_continuity_max_horizontal_step_m, 0.1, 5.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.ground_height_continuity.max_normal_difference_deg", 5.0);
+  node.get_parameter(
+      "lio.kf.ground_height_continuity.max_normal_difference_deg",
+      g_ground_height_continuity_max_normal_difference_deg);
+  g_ground_height_continuity_max_normal_difference_deg = std::clamp(
+      g_ground_height_continuity_max_normal_difference_deg, 0.5, 30.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.ground_height_continuity.max_innovation_m", 0.05);
+  node.get_parameter(
+      "lio.kf.ground_height_continuity.max_innovation_m",
+      g_ground_height_continuity_max_innovation_m);
+  g_ground_height_continuity_max_innovation_m = std::clamp(
+      g_ground_height_continuity_max_innovation_m, 0.01, 0.5);
+
+  node.declare_parameter<double>(
+      "lio.kf.ground_height_continuity.max_correction_per_frame_m", 0.01);
+  node.get_parameter(
+      "lio.kf.ground_height_continuity.max_correction_per_frame_m",
+      g_ground_height_continuity_max_correction_per_frame_m);
+  g_ground_height_continuity_max_correction_per_frame_m = std::clamp(
+      g_ground_height_continuity_max_correction_per_frame_m,
+      0.001,
+      g_ground_height_continuity_max_innovation_m);
+
+  node.declare_parameter<double>(
+      "lio.kf.ground_height_continuity.max_total_correction_m", 0.30);
+  node.get_parameter(
+      "lio.kf.ground_height_continuity.max_total_correction_m",
+      g_ground_height_continuity_max_total_correction_m);
+  g_ground_height_continuity_max_total_correction_m = std::clamp(
+      g_ground_height_continuity_max_total_correction_m, 0.05, 1.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.ground_height_continuity.stddev_m", 0.02);
+  node.get_parameter(
+      "lio.kf.ground_height_continuity.stddev_m",
+      g_ground_height_continuity_stddev_m);
+  g_ground_height_continuity_stddev_m = std::clamp(
+      g_ground_height_continuity_stddev_m, 0.002, 0.2);
 
   node.declare_parameter<bool>(
       "lio.kf.wall_yaw_constraint.enable", false);
@@ -594,12 +1260,12 @@ void LoadParamFromRos(rclcpp::Node& node)
       g_wall_yaw_reference_extension_ratio, 0.25, 0.95);
 
   node.declare_parameter<int>(
-      "lio.kf.wall_yaw_constraint.max_references", 8);
+      "lio.kf.wall_yaw_constraint.max_references", 256);
   node.get_parameter(
       "lio.kf.wall_yaw_constraint.max_references",
       g_wall_yaw_max_references);
   g_wall_yaw_max_references = std::clamp(
-      g_wall_yaw_max_references, 1, 64);
+      g_wall_yaw_max_references, 1, 4096);
 
   node.declare_parameter<double>(
       "lio.kf.wall_yaw_constraint.reference_min_yaw_information_ratio", 0.45);
@@ -648,6 +1314,76 @@ void LoadParamFromRos(rclcpp::Node& node)
       g_wall_yaw_max_correction_per_frame_deg);
   g_wall_yaw_max_correction_per_frame_deg = std::clamp(
       g_wall_yaw_max_correction_per_frame_deg, 0.001, 1.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.recapture_max_innovation_deg", 8.0);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.recapture_max_innovation_deg",
+      g_wall_yaw_recapture_max_innovation_deg);
+  g_wall_yaw_recapture_max_innovation_deg = std::clamp(
+      g_wall_yaw_recapture_max_innovation_deg,
+      g_wall_yaw_max_innovation_deg + 0.1, 45.0);
+
+  node.declare_parameter<int>(
+      "lio.kf.wall_yaw_constraint.recapture_min_frames", 30);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.recapture_min_frames",
+      g_wall_yaw_recapture_min_frames);
+  g_wall_yaw_recapture_min_frames = std::clamp(
+      g_wall_yaw_recapture_min_frames, 3, 1000);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.recapture_core_radius_ratio", 0.25);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.recapture_core_radius_ratio",
+      g_wall_yaw_recapture_core_radius_ratio);
+  g_wall_yaw_recapture_core_radius_ratio = std::clamp(
+      g_wall_yaw_recapture_core_radius_ratio, 0.10, 0.50);
+
+  node.declare_parameter<int>(
+      "lio.kf.wall_yaw_constraint.recapture_min_reference_age_frames", 300);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.recapture_min_reference_age_frames",
+      g_wall_yaw_recapture_min_reference_age_frames);
+  g_wall_yaw_recapture_min_reference_age_frames = std::clamp(
+      g_wall_yaw_recapture_min_reference_age_frames, 0, 100000);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.recapture_min_scene_quality", 0.80);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.recapture_min_scene_quality",
+      g_wall_yaw_recapture_min_scene_quality);
+  g_wall_yaw_recapture_min_scene_quality = std::clamp(
+      g_wall_yaw_recapture_min_scene_quality, 0.50, 1.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.recapture_initial_max_deviation_deg", 1.5);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.recapture_initial_max_deviation_deg",
+      g_wall_yaw_recapture_initial_max_deviation_deg);
+  g_wall_yaw_recapture_initial_max_deviation_deg = std::clamp(
+      g_wall_yaw_recapture_initial_max_deviation_deg,
+      g_wall_yaw_reference_max_deviation_deg,
+      std::min(g_wall_yaw_recapture_max_innovation_deg, 5.0));
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.recapture_stddev_deg", 1.5);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.recapture_stddev_deg",
+      g_wall_yaw_recapture_stddev_deg);
+  g_wall_yaw_recapture_stddev_deg = std::clamp(
+      g_wall_yaw_recapture_stddev_deg,
+      g_wall_yaw_stddev_deg, 20.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.wall_yaw_constraint.recapture_max_correction_per_frame_deg",
+      0.01);
+  node.get_parameter(
+      "lio.kf.wall_yaw_constraint.recapture_max_correction_per_frame_deg",
+      g_wall_yaw_recapture_max_correction_per_frame_deg);
+  g_wall_yaw_recapture_max_correction_per_frame_deg = std::clamp(
+      g_wall_yaw_recapture_max_correction_per_frame_deg,
+      0.0005, g_wall_yaw_max_correction_per_frame_deg);
 
   // submaps
   node.declare_parameter<double>("lio.submap.submap_resolution", 0.0);
@@ -722,6 +1458,108 @@ void LoadParamFromRos(rclcpp::Node& node)
   g_init_roll  = init_pose[3];
   g_init_pitch = init_pose[4];
   g_init_yaw   = init_pose[5];
+
+  node.declare_parameter<bool>("lio.relocation.anchor.enable", true);
+  node.get_parameter(
+      "lio.relocation.anchor.enable", g_relocation_anchor_enable);
+
+  node.declare_parameter<int>(
+      "lio.relocation.anchor.interval_frames", 10);
+  node.get_parameter(
+      "lio.relocation.anchor.interval_frames",
+      g_relocation_anchor_interval_frames);
+  g_relocation_anchor_interval_frames =
+      std::max(1, g_relocation_anchor_interval_frames);
+
+  node.declare_parameter<int>(
+      "lio.relocation.anchor.window_frames", 20);
+  node.get_parameter(
+      "lio.relocation.anchor.window_frames",
+      g_relocation_anchor_window_frames);
+  g_relocation_anchor_window_frames =
+      std::max(4, g_relocation_anchor_window_frames);
+
+  node.declare_parameter<int>(
+      "lio.relocation.anchor.min_frames", 8);
+  node.get_parameter(
+      "lio.relocation.anchor.min_frames",
+      g_relocation_anchor_min_frames);
+  g_relocation_anchor_min_frames = std::clamp(
+      g_relocation_anchor_min_frames, 4,
+      g_relocation_anchor_window_frames);
+
+  node.declare_parameter<int>(
+      "lio.relocation.anchor.max_failures", 5);
+  node.get_parameter(
+      "lio.relocation.anchor.max_failures",
+      g_relocation_anchor_max_failures);
+  g_relocation_anchor_max_failures =
+      std::max(1, g_relocation_anchor_max_failures);
+
+  const auto read_positive_relocation_double = [&node](
+      const char* name, double default_value, double& value,
+      double minimum, double maximum) {
+    node.declare_parameter<double>(name, default_value);
+    node.get_parameter(name, value);
+    if (!std::isfinite(value)) {
+      value = default_value;
+    }
+    value = std::clamp(value, minimum, maximum);
+  };
+  read_positive_relocation_double(
+      "lio.relocation.anchor.map_radius", 35.0,
+      g_relocation_anchor_map_radius, 5.0, 100.0);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.voxel_size", 0.5,
+      g_relocation_anchor_voxel_size, 0.1, 2.0);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.max_correspondence_distance", 1.5,
+      g_relocation_anchor_max_correspondence_distance, 0.2, 5.0);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.verification_distance", 0.6,
+      g_relocation_anchor_verification_distance, 0.1,
+      g_relocation_anchor_max_correspondence_distance);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.min_overlap", 0.55,
+      g_relocation_anchor_min_overlap, 0.1, 0.95);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.max_rmse", 0.35,
+      g_relocation_anchor_max_rmse, 0.05, 1.0);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.max_translation", 2.0,
+      g_relocation_anchor_max_translation, 0.1, 5.0);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.max_yaw_deg", 5.0,
+      g_relocation_anchor_max_yaw_deg, 0.1, 15.0);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.max_tilt_deg", 1.5,
+      g_relocation_anchor_max_tilt_deg, 0.1, 5.0);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.max_translation_step", 0.35,
+      g_relocation_anchor_max_translation_step, 0.02,
+      g_relocation_anchor_max_translation);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.max_yaw_step_deg", 0.75,
+      g_relocation_anchor_max_yaw_step_deg, 0.05,
+      g_relocation_anchor_max_yaw_deg);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.min_motion", 1.0,
+      g_relocation_anchor_min_motion, 0.1, 10.0);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.min_support_major", 4.0,
+      g_relocation_anchor_min_support_major, 1.0, 20.0);
+  read_positive_relocation_double(
+      "lio.relocation.anchor.min_support_minor", 2.0,
+      g_relocation_anchor_min_support_minor, 0.5,
+      g_relocation_anchor_min_support_major);
+
+  node.declare_parameter<int>(
+      "lio.relocation.anchor.min_structural_points", 80);
+  node.get_parameter(
+      "lio.relocation.anchor.min_structural_points",
+      g_relocation_anchor_min_structural_points);
+  g_relocation_anchor_min_structural_points =
+      std::max(20, g_relocation_anchor_min_structural_points);
 
   LOG(INFO) << GREEN << " ---> [Params]: Load from ROS2 parameter server."
             << RESET;
@@ -845,12 +1683,20 @@ void ROSWrapper::setupIO(){
     throw std::invalid_argument(
         "lio.ros.pause_drain_timeout_seconds must be positive");
   }
+  imu_buffer_history_seconds_ = this->declare_parameter<double>(
+      "lio.ros.imu_buffer_history_seconds", 60.0);
+  if (!std::isfinite(imu_buffer_history_seconds_) ||
+      imu_buffer_history_seconds_ < 5.0 ||
+      imu_buffer_history_seconds_ > 600.0) {
+    throw std::invalid_argument(
+        "lio.ros.imu_buffer_history_seconds must be in [5, 600]");
+  }
   const int imu_qos_depth =
       this->declare_parameter<int>(
-          "lio.ros.imu_qos_depth", offline_reliable_qos ? 2048 : 512);
+          "lio.ros.imu_qos_depth", 16384);
   const int lidar_qos_depth =
       this->declare_parameter<int>(
-          "lio.ros.lidar_qos_depth", 100);
+          "lio.ros.lidar_qos_depth", offline_reliable_qos ? 1024 : 256);
   if (imu_qos_depth < 2 || lidar_qos_depth < 2) {
     throw std::invalid_argument("sensor QoS depth must be at least 2");
   }
@@ -870,7 +1716,9 @@ void ROSWrapper::setupIO(){
             << " ---> [SuperLIO]: sensor QoS mode="
             << (offline_reliable_qos ? "offline-reliable" : "live-best-effort")
             << " imu_depth=" << imu_qos_depth
-            << " lidar_depth=" << lidar_qos_depth << RESET;
+            << " lidar_depth=" << lidar_qos_depth
+            << " imu_history_seconds=" << imu_buffer_history_seconds_
+            << RESET;
 
   sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
       g_imu_topic,
@@ -899,10 +1747,66 @@ void ROSWrapper::setupIO(){
       std::bind(
           &ROSWrapper::pauseMapping, this,
           std::placeholders::_1, std::placeholders::_2));
+  mapping_status_service_ = this->create_service<std_srvs::srv::Trigger>(
+      "/lio/mapping_status",
+      [this](
+          const std_srvs::srv::Trigger::Request::SharedPtr,
+          std_srvs::srv::Trigger::Response::SharedPtr response) {
+        std::size_t pending_lidar = 0;
+        bool lidar_pushed = false;
+        std::uint64_t missing_imu_start = 0;
+        std::uint64_t imu_gap = 0;
+        std::uint64_t invalid_time = 0;
+        std::uint64_t out_of_order = 0;
+        std::uint64_t pruned_imu = 0;
+        {
+          std::lock_guard<std::mutex> lock(sensor_buffer_mutex_);
+          pending_lidar = lidar_buffer_.size();
+          lidar_pushed = lidar_pushed_;
+          missing_imu_start = lidar_missing_imu_start_count_;
+          imu_gap = lidar_imu_gap_count_;
+          invalid_time = lidar_invalid_time_count_;
+          out_of_order = lidar_out_of_order_count_;
+          pruned_imu = pruned_imu_buffer_count_;
+        }
+        response->success = true;
+        response->message =
+            "received_lidar=" +
+            std::to_string(received_lidar_count_.load()) +
+            " admitted_lidar=" +
+            std::to_string(admitted_lidar_count_.load()) +
+            " completed_lidar=" +
+            std::to_string(completed_lidar_count_.load()) +
+            " dropped_lidar=" +
+            std::to_string(dropped_lidar_count_.load()) +
+            " missing_imu_start=" +
+            std::to_string(missing_imu_start) +
+            " imu_gap=" + std::to_string(imu_gap) +
+            " invalid_time=" + std::to_string(invalid_time) +
+            " out_of_order=" + std::to_string(out_of_order) +
+            " pruned_imu=" + std::to_string(pruned_imu) +
+            " pending_lidar=" + std::to_string(pending_lidar) +
+            " lidar_pushed=" +
+            std::string(lidar_pushed ? "true" : "false") +
+            " processing=" +
+            std::string(processing_measure_.load() ? "true" : "false") +
+            " mapping_paused=" +
+            std::string(mapping_paused_.load() ? "true" : "false") +
+            " input_frozen=" +
+            std::string(input_frozen_.load() ? "true" : "false");
+      });
 
   /// output ======================================
   pub_odom_ = this->create_publisher<nav_msgs::msg::Odometry>(
       "/lio/odom", 100);
+
+  // Relocation publishes a continuous local odometry stream separately from
+  // the existing map-frame pose topic.  Keeping /lio/odom unchanged avoids
+  // breaking terrain/SCAN consumers that currently require map coordinates.
+  pub_local_odom_ = this->create_publisher<nav_msgs::msg::Odometry>(
+      "/lio/local_odom", 100);
+  pub_localization_valid_ = this->create_publisher<std_msgs::msg::Bool>(
+      "/lio/localization_valid", 10);
 
   pub_imu_odom_ = this->create_publisher<nav_msgs::msg::Odometry>(
       "/lio/imu/odom", 10);
@@ -912,6 +1816,10 @@ void ROSWrapper::setupIO(){
 
   pub_path_ = this->create_publisher<nav_msgs::msg::Path>(
       "/lio/path", 10);
+  pub_raw_compare_path_ = this->create_publisher<nav_msgs::msg::Path>(
+      "/lio/path_raw_compare", 10);
+  pub_online_compare_path_ = this->create_publisher<nav_msgs::msg::Path>(
+      "/lio/path_online_compare", 10);
 
   // Both clouds are visualization/terrain inputs. Best effort with one sample
   // prevents a slow RViz or terrain reader from retaining stale large clouds
@@ -978,20 +1886,34 @@ void ROSWrapper::pauseMapping(
     mapping_paused_.store(true);
     if (!drained) {
       dropped_at_timeout = lidar_buffer_.size();
+      dropped_lidar_count_.fetch_add(dropped_at_timeout);
       lidar_buffer_.clear();
       lidar_pushed_ = false;
     }
   }
 
   const double committed_cutoff = last_timestamp_lidar_;
-  response->success = true;
+  response->success = drained;
   response->message =
       "SuperLIO snapshot frozen; target_cutoff=" +
       std::to_string(target_cutoff) +
       " committed_cutoff=" + std::to_string(committed_cutoff) +
       " drained=" + std::string(drained ? "true" : "false") +
+      " dropped_at_timeout=" + std::to_string(dropped_at_timeout) +
       " received_lidar=" +
-      std::to_string(received_lidar_count_) +
+      std::to_string(received_lidar_count_.load()) +
+      " admitted_lidar=" +
+      std::to_string(admitted_lidar_count_.load()) +
+      " completed_lidar=" +
+      std::to_string(completed_lidar_count_.load()) +
+      " dropped_lidar=" +
+      std::to_string(dropped_lidar_count_.load()) +
+      " missing_imu_start=" +
+      std::to_string(lidar_missing_imu_start_count_) +
+      " imu_gap=" + std::to_string(lidar_imu_gap_count_) +
+      " invalid_time=" + std::to_string(lidar_invalid_time_count_) +
+      " out_of_order=" + std::to_string(lidar_out_of_order_count_) +
+      " pruned_imu=" + std::to_string(pruned_imu_buffer_count_) +
       " source_gaps=" + std::to_string(lidar_source_gap_count_) +
       " estimated_missing_lidar=" +
       std::to_string(lidar_estimated_missing_count_);
@@ -1002,7 +1924,15 @@ void ROSWrapper::pauseMapping(
             << " pending_lidar_at_freeze=" << pending_lidar_at_freeze
             << " drained=" << drained
             << " dropped_at_timeout=" << dropped_at_timeout
-            << " received_lidar=" << received_lidar_count_
+            << " received_lidar=" << received_lidar_count_.load()
+            << " admitted_lidar=" << admitted_lidar_count_.load()
+            << " completed_lidar=" << completed_lidar_count_.load()
+            << " dropped_lidar=" << dropped_lidar_count_.load()
+            << " missing_imu_start=" << lidar_missing_imu_start_count_
+            << " imu_gap=" << lidar_imu_gap_count_
+            << " invalid_time=" << lidar_invalid_time_count_
+            << " out_of_order=" << lidar_out_of_order_count_
+            << " pruned_imu=" << pruned_imu_buffer_count_
             << " source_gaps=" << lidar_source_gap_count_
             << " estimated_missing_lidar=" << lidar_estimated_missing_count_
             << RESET;
@@ -1067,11 +1997,18 @@ void ROSWrapper::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg){
   last_timestamp_imu_ = data.secs;
   sensor_buffer_cv_.notify_all();
 
-  // Bound application memory by sensor time rather than by an arbitrary point
-  // count. Three seconds is well above a normal scan-matching spike while
-  // preventing unbounded growth when LiDAR is disconnected.
+  // Keep a generous sensor-time history, and never prune past the oldest
+  // LiDAR frame already waiting for scan matching. A slow disk write or map
+  // preview must not turn frontend backlog into an unrecoverable IMU gap.
+  double prune_before = data.secs - imu_buffer_history_seconds_;
+  if (!lidar_buffer_.empty() &&
+      std::isfinite(lidar_buffer_.front().start_time)) {
+    prune_before = std::min(prune_before, lidar_buffer_.front().start_time);
+  }
+  // Retain the last sample at/before prune_before so scan-start interpolation
+  // always has a historical anchor.
   while (imu_buffer_.size() > 2 &&
-         data.secs - imu_buffer_.front().secs > kMaxImuBufferAgeSeconds) {
+         imu_buffer_[1].secs <= prune_before) {
     imu_buffer_.pop_front();
     ++pruned_imu_buffer_count_;
   }
@@ -1164,6 +2101,7 @@ void ROSWrapper::livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
       return;
     }
     lidar_buffer_.push_back(std::move(lidar_data));
+    admitted_lidar_count_.fetch_add(1);
     sensor_buffer_cv_.notify_all();
   }
 }
@@ -1172,6 +2110,8 @@ void ROSWrapper::livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
 void ROSWrapper::stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
   if (mapping_paused_.load() || input_frozen_.load()) return;
   if(msg->data.size() < 10) return;
+
+  received_lidar_count_.fetch_add(1);
   
   LidarData lidar_data;
   lidar_data.pc.reset(new pcl::PointCloud<LI2Sup::PointXTZIT>());
@@ -1260,6 +2200,7 @@ void ROSWrapper::stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr ms
       return;
     }
     lidar_buffer_.push_back(std::move(lidar_data));
+    admitted_lidar_count_.fetch_add(1);
     sensor_buffer_cv_.notify_all();
   }
 }
@@ -1330,6 +2271,8 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
   if(last_timestamp_lidar_ > meas.lidar.end_time){
     lidar_buffer_.pop_front();
     lidar_pushed_ = false;
+    ++lidar_out_of_order_count_;
+    dropped_lidar_count_.fetch_add(1);
     sensor_buffer_cv_.notify_all();
     return false;
   }
@@ -1351,6 +2294,7 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
       }
       lidar_buffer_.pop_front();
       lidar_pushed_ = false;
+      dropped_lidar_count_.fetch_add(1);
       record_sync_result(true);
       sensor_buffer_cv_.notify_all();
       return false;
@@ -1514,6 +2458,7 @@ void ROSWrapper::finish_measure()
 {
   {
     std::lock_guard<std::mutex> lock(sensor_buffer_mutex_);
+    completed_lidar_count_.fetch_add(1);
     processing_measure_.store(false);
   }
   sensor_buffer_cv_.notify_all();
@@ -1596,6 +2541,143 @@ void ROSWrapper::pub_odom(const NavState& state){
 }
 
 
+void ROSWrapper::pub_relocation_odom(
+    const NavState& map_state,
+    const SE3& odom_pose,
+    const SE3& map_to_odom,
+    const bool localization_valid)
+{
+  const auto stamp = toRosTime(map_state.timestamp);
+
+  // Backward-compatible global pose.  Terrain analysis and SCAN currently
+  // consume /lio/odom together with /lio/cloud_world, both in map.
+  nav_msgs::msg::Odometry map_odom;
+  map_odom.header.stamp = stamp;
+  map_odom.header.frame_id = "map";
+  map_odom.child_frame_id = "base_link";
+  map_odom.pose.pose.position.x = map_state.p.x();
+  map_odom.pose.pose.position.y = map_state.p.y();
+  map_odom.pose.pose.position.z = map_state.p.z();
+  const Quat map_base_quaternion =
+      Quat(map_state.R.R_).normalized();
+  map_odom.pose.pose.orientation.x = map_base_quaternion.x();
+  map_odom.pose.pose.orientation.y = map_base_quaternion.y();
+  map_odom.pose.pose.orientation.z = map_base_quaternion.z();
+  map_odom.pose.pose.orientation.w = map_base_quaternion.w();
+  map_odom.twist.twist.linear.x = map_state.v.x();
+  map_odom.twist.twist.linear.y = map_state.v.y();
+  map_odom.twist.twist.linear.z = map_state.v.z();
+  pub_odom_->publish(map_odom);
+
+  // Standards-compliant continuous local odometry.  Pose is odom->base_link;
+  // twist is expressed in the child/base frame as required by Odometry.
+  nav_msgs::msg::Odometry local_odom;
+  local_odom.header.stamp = stamp;
+  local_odom.header.frame_id = "odom";
+  local_odom.child_frame_id = "base_link";
+  local_odom.pose.pose.position.x = odom_pose.t_.x();
+  local_odom.pose.pose.position.y = odom_pose.t_.y();
+  local_odom.pose.pose.position.z = odom_pose.t_.z();
+  const Quat odom_base_quaternion =
+      Quat(odom_pose.R_).normalized();
+  local_odom.pose.pose.orientation.x = odom_base_quaternion.x();
+  local_odom.pose.pose.orientation.y = odom_base_quaternion.y();
+  local_odom.pose.pose.orientation.z = odom_base_quaternion.z();
+  local_odom.pose.pose.orientation.w = odom_base_quaternion.w();
+  const V3 base_velocity = map_state.R.R_.transpose() * map_state.v;
+  local_odom.twist.twist.linear.x = base_velocity.x();
+  local_odom.twist.twist.linear.y = base_velocity.y();
+  local_odom.twist.twist.linear.z = base_velocity.z();
+  pub_local_odom_->publish(local_odom);
+
+  std_msgs::msg::Bool health;
+  health.data = localization_valid;
+  pub_localization_valid_->publish(health);
+
+  V3 robo_position =
+      map_state.R.R_ * (-g_odom_robo.R_ * g_odom_robo.t_) + map_state.p;
+  if (g_2_robot) {
+    static auto pub_msg2uav_ =
+        this->create_publisher<geometry_msgs::msg::PoseStamped>(
+            "/mavros/vision_pose/pose", 10);
+    const M3 robo_rotation = map_state.R.R_ * g_odom_robo.R_;
+    const Quat robo_quaternion = Quat(robo_rotation).normalized();
+    msg2uav_.header.stamp = stamp;
+    msg2uav_.pose.position.x = robo_position.x();
+    msg2uav_.pose.position.y = robo_position.y();
+    msg2uav_.pose.position.z = robo_position.z();
+    msg2uav_.pose.orientation.x = robo_quaternion.x();
+    msg2uav_.pose.orientation.y = robo_quaternion.y();
+    msg2uav_.pose.orientation.z = robo_quaternion.z();
+    msg2uav_.pose.orientation.w = robo_quaternion.w();
+    pub_msg2uav_->publish(msg2uav_);
+  }
+
+  if ((last_path_point_ - robo_position).norm() > 0.1) {
+    path_.header.stamp = stamp;
+    geometry_msgs::msg::PoseStamped point;
+    point.header = map_odom.header;
+    point.pose = map_odom.pose.pose;
+    path_.poses.push_back(point);
+    pub_path_->publish(path_);
+    last_path_point_ = robo_position;
+  }
+
+  // Lightweight visualization-only comparison.  Both messages deliberately
+  // use map as their frame: red keeps untouched LIO coordinates, while green
+  // is replaced by the optimized keyframe path whenever an online loop is
+  // accepted.  A one-metre spacing keeps RViz cheap on Jetson.
+  const V3 raw_compare_position = odom_pose.t_;
+  if ((last_raw_compare_path_point_ - raw_compare_position).norm() > 1.0) {
+    raw_compare_path_.header = map_odom.header;
+    geometry_msgs::msg::PoseStamped point;
+    point.header = map_odom.header;
+    point.pose = local_odom.pose.pose;
+    raw_compare_path_.poses.push_back(point);
+    pub_raw_compare_path_->publish(raw_compare_path_);
+    last_raw_compare_path_point_ = raw_compare_position;
+  }
+  const V3 online_compare_position = map_state.p;
+  if ((last_online_compare_path_point_ - online_compare_position).norm() > 1.0) {
+    online_compare_path_.header = map_odom.header;
+    geometry_msgs::msg::PoseStamped point;
+    point.header = map_odom.header;
+    point.pose = map_odom.pose.pose;
+    online_compare_path_.poses.push_back(point);
+    pub_online_compare_path_->publish(online_compare_path_);
+    last_online_compare_path_point_ = online_compare_position;
+  }
+
+  geometry_msgs::msg::TransformStamped map_to_odom_tf;
+  map_to_odom_tf.header.stamp = stamp;
+  map_to_odom_tf.header.frame_id = "map";
+  map_to_odom_tf.child_frame_id = "odom";
+  map_to_odom_tf.transform.translation.x = map_to_odom.t_.x();
+  map_to_odom_tf.transform.translation.y = map_to_odom.t_.y();
+  map_to_odom_tf.transform.translation.z = map_to_odom.t_.z();
+  const Quat map_odom_quaternion =
+      Quat(map_to_odom.R_).normalized();
+  map_to_odom_tf.transform.rotation.x = map_odom_quaternion.x();
+  map_to_odom_tf.transform.rotation.y = map_odom_quaternion.y();
+  map_to_odom_tf.transform.rotation.z = map_odom_quaternion.z();
+  map_to_odom_tf.transform.rotation.w = map_odom_quaternion.w();
+
+  geometry_msgs::msg::TransformStamped odom_to_base_tf;
+  odom_to_base_tf.header.stamp = stamp;
+  odom_to_base_tf.header.frame_id = "odom";
+  odom_to_base_tf.child_frame_id = "base_link";
+  odom_to_base_tf.transform.translation.x = odom_pose.t_.x();
+  odom_to_base_tf.transform.translation.y = odom_pose.t_.y();
+  odom_to_base_tf.transform.translation.z = odom_pose.t_.z();
+  odom_to_base_tf.transform.rotation.x = odom_base_quaternion.x();
+  odom_to_base_tf.transform.rotation.y = odom_base_quaternion.y();
+  odom_to_base_tf.transform.rotation.z = odom_base_quaternion.z();
+  odom_to_base_tf.transform.rotation.w = odom_base_quaternion.w();
+
+  tf_broadcaster_->sendTransform({map_to_odom_tf, odom_to_base_tf});
+}
+
+
 void ROSWrapper::pub_cloud_world(const CloudPtr& pc, double time){
   sensor_msgs::msg::PointCloud2 cloud;
   pcl::toROSMsg(*pc, cloud);
@@ -1611,6 +2693,47 @@ void ROSWrapper::pub_map_accumulated(const CloudPtr& pc, double time){
   cloud.header.frame_id = "map";
   cloud.header.stamp = toRosTime(time);
   pub_map_accumulated_->publish(cloud);
+}
+
+
+void ROSWrapper::pub_online_loop_paths(
+    const VV3& raw_path,
+    const VV3& corrected_path,
+    const double time){
+  const auto stamp = toRosTime(time);
+  const auto build_display_path = [&](const VV3& positions) {
+    nav_msgs::msg::Path message;
+    message.header.frame_id = "map";
+    message.header.stamp = stamp;
+    V3 last = V3::Constant(std::numeric_limits<scalar>::infinity());
+    for (std::size_t index = 0; index < positions.size(); ++index) {
+      const bool endpoint = index + 1U == positions.size();
+      if (!message.poses.empty() && !endpoint &&
+          (positions[index] - last).norm() < 1.0) {
+        continue;
+      }
+      geometry_msgs::msg::PoseStamped point;
+      point.header = message.header;
+      point.pose.position.x = positions[index].x();
+      point.pose.position.y = positions[index].y();
+      point.pose.position.z = positions[index].z();
+      point.pose.orientation.w = 1.0;
+      message.poses.push_back(point);
+      last = positions[index];
+    }
+    return message;
+  };
+
+  raw_compare_path_ = build_display_path(raw_path);
+  online_compare_path_ = build_display_path(corrected_path);
+  if (!raw_path.empty()) {
+    last_raw_compare_path_point_ = raw_path.back();
+  }
+  if (!corrected_path.empty()) {
+    last_online_compare_path_point_ = corrected_path.back();
+  }
+  pub_raw_compare_path_->publish(raw_compare_path_);
+  pub_online_compare_path_->publish(online_compare_path_);
 }
 
 
