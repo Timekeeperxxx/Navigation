@@ -255,6 +255,11 @@ protected:
   int level_slope_pending_invalid_count_ = 0;
   bool level_slope_recovery_active_ = false;
   int level_slope_recovery_count_ = 0;
+  double level_slope_bounded_lease_path_m_ = 0.0;
+  bool level_slope_bounded_lease_reentry_blocked_ = false;
+  double level_slope_bounded_lease_reentry_path_m_ = 0.0;
+  int level_slope_bounded_lease_reentry_flat_count_ = 0;
+  std::uint64_t level_slope_bounded_lease_expired_count_ = 0;
   double level_slope_spatial_path_m_ = 0.0;
   double level_slope_spatial_supported_path_m_ = 0.0;
   double level_slope_spatial_observed_dz_m_ = 0.0;

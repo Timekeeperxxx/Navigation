@@ -1030,6 +1030,36 @@ void LoadParamFromRos(rclcpp::Node& node)
   g_level_slope_recovery_min_frames = std::clamp(
       g_level_slope_recovery_min_frames, 1, 20);
 
+  node.declare_parameter<bool>(
+      "lio.kf.level_constraint.slope_bounded_lease_enable", true);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_bounded_lease_enable",
+      g_level_slope_bounded_lease_enable);
+
+  node.declare_parameter<double>(
+      "lio.kf.level_constraint.slope_bounded_lease_max_path_m", 5.0);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_bounded_lease_max_path_m",
+      g_level_slope_bounded_lease_max_path_m);
+  g_level_slope_bounded_lease_max_path_m = std::clamp(
+      g_level_slope_bounded_lease_max_path_m, 1.0, 30.0);
+
+  node.declare_parameter<double>(
+      "lio.kf.level_constraint.slope_bounded_lease_reentry_path_m", 15.0);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_bounded_lease_reentry_path_m",
+      g_level_slope_bounded_lease_reentry_path_m);
+  g_level_slope_bounded_lease_reentry_path_m = std::clamp(
+      g_level_slope_bounded_lease_reentry_path_m,
+      g_level_slope_bounded_lease_max_path_m,
+      100.0);
+
+  node.declare_parameter<bool>(
+      "lio.kf.level_constraint.slope_spatial_enable", false);
+  node.get_parameter(
+      "lio.kf.level_constraint.slope_spatial_enable",
+      g_level_slope_spatial_enable);
+
   node.declare_parameter<double>(
       "lio.kf.level_constraint.slope_spatial_window_m", 5.0);
   node.get_parameter(

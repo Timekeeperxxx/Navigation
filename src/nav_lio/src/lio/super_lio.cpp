@@ -890,8 +890,11 @@ inline GroundZOnlyEvidence estimate_ground_z_only(
             return lhs.major < rhs.major;
           });
       const std::size_t split = projected_blocks.size() / 2;
+      const float minimum_wide_ground_span = std::max(
+          g_loop_min_verification_span,
+          5.0f * g_loop_verification_block_size);
       if (split >= 6 && projected_blocks.size() - split >= 6 &&
-          result.support_span >= 8.0f &&
+          result.support_span >= minimum_wide_ground_span &&
           result.support_minor_span >=
               2.0f * g_loop_verification_block_size) {
         std::vector<float> first_region_residuals;
@@ -921,7 +924,11 @@ inline GroundZOnlyEvidence estimate_ground_z_only(
         result.independent_region_z_difference = std::abs(
             robust_median(first_region_residuals) -
             robust_median(second_region_residuals));
-        if (result.independent_region_separation >= 4.0f &&
+        const float minimum_region_separation = std::max(
+            2.0f * g_loop_verification_block_size,
+            0.4f * minimum_wide_ground_span);
+        if (result.independent_region_separation >=
+                minimum_region_separation &&
             result.independent_region_z_difference <= 0.08f) {
           result.independent_regions = 2;
         }
@@ -955,11 +962,14 @@ inline GroundZOnlyEvidence estimate_ground_z_only(
       result.support_span >= distributed_minimum_span &&
       result.support_minor_span >= g_loop_verification_block_size &&
       result.block_residual_mad <= kMaximumZOnlyBlockMad;
+  const float minimum_wide_ground_span = std::max(
+      g_loop_min_verification_span,
+      5.0f * g_loop_verification_block_size);
   result.wide_valid =
       result.residual_mad <= maximum_wide_z_only_mad &&
       result.supported_blocks >=
           2 * g_loop_min_verification_blocks &&
-      result.support_span >= 8.0f &&
+      result.support_span >= minimum_wide_ground_span &&
       result.support_minor_span >=
           2.0f * g_loop_verification_block_size &&
       result.block_residual_mad <= kMaximumZOnlyBlockMad &&
@@ -2960,6 +2970,11 @@ bool SuperLIO::kf_init(){
   level_slope_pending_invalid_count_ = 0;
   level_slope_recovery_active_ = false;
   level_slope_recovery_count_ = 0;
+  level_slope_bounded_lease_path_m_ = 0.0;
+  level_slope_bounded_lease_reentry_blocked_ = false;
+  level_slope_bounded_lease_reentry_path_m_ = 0.0;
+  level_slope_bounded_lease_reentry_flat_count_ = 0;
+  level_slope_bounded_lease_expired_count_ = 0;
   level_slope_spatial_path_m_ = 0.0;
   level_slope_spatial_supported_path_m_ = 0.0;
   level_slope_spatial_observed_dz_m_ = 0.0;
@@ -7494,6 +7509,12 @@ void SuperLIO::saveLoopClosedMap()
   struct InternalGroundZOnlyProposal
   {
     PoseGraphEdge edge;
+    // A ground observation proves only Z by itself.  When the same local
+    // crop also has a tightly bounded, single-mode planar registration, keep
+    // that yaw/XY component as a provisional companion.  It is promoted only
+    // after the complete revisit ground independently passes the wide check;
+    // it never contributes endpoint support and never constrains roll/pitch/Z.
+    PoseGraphEdge planar_companion_edge;
     Eigen::Vector3f center = Eigen::Vector3f::Zero();
     GroundZOnlyEvidence evidence;
     LoopConsistency consistency;
@@ -7508,6 +7529,9 @@ void SuperLIO::saveLoopClosedMap()
     float tight_overlap = 0.0f;
     float tight_rmse = std::numeric_limits<float>::max();
     float raw_weight = 0.0f;
+    float planar_companion_translation = 0.0f;
+    float planar_companion_yaw_deg = 0.0f;
+    bool planar_companion_valid = false;
     bool full_ground_footprint = false;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   };
@@ -8289,9 +8313,79 @@ void SuperLIO::saveLoopClosedMap()
       constexpr int kMaximumLocalAnchorsPerRevisit = 3;
       const float minimum_anchor_separation =
           2.0f * minimum_crop_radius;
+
+      // A farthest-point sampler tends to spend the remaining anchor budget
+      // on the extreme end of a long wall or floor.  Those voxels may be far
+      // from the vehicle in both passes and therefore have no temporally
+      // complete local frame window, even though a second dense part of the
+      // revisited corridor is available.  Rank centers by reciprocal-match
+      // support in a bounded neighbourhood, then apply spatial NMS.  This
+      // changes only which local hypotheses are verified; every selected
+      // anchor still has to pass the existing independent window, geometry,
+      // consistency and graph-safety gates below.
+      std::vector<int> anchor_neighbourhood_support(
+          support_voxels.size(), 0);
+      const float anchor_neighbourhood_radius_squared =
+          minimum_crop_radius * minimum_crop_radius;
+      std::map<InternalVoxelKey, std::size_t> support_voxel_by_key;
+      for (std::size_t voxel = 0;
+           voxel < support_voxels.size();
+           ++voxel) {
+        support_voxel_by_key.emplace(
+            internal_voxel_key(
+                support_voxels[voxel].center,
+                g_loop_verification_block_size),
+            voxel);
+      }
+      const int anchor_neighbourhood_voxel_radius =
+          std::max(
+              1,
+              static_cast<int>(std::ceil(
+                  minimum_crop_radius /
+                  std::max(g_loop_verification_block_size, 1.0e-3f))));
+      for (std::size_t candidate = 0;
+           candidate < support_voxels.size();
+           ++candidate) {
+        int support = 0;
+        const InternalVoxelKey candidate_key = internal_voxel_key(
+            support_voxels[candidate].center,
+            g_loop_verification_block_size);
+        const int candidate_x = std::get<0>(candidate_key);
+        const int candidate_y = std::get<1>(candidate_key);
+        const int candidate_z = std::get<2>(candidate_key);
+        for (int dx = -anchor_neighbourhood_voxel_radius;
+             dx <= anchor_neighbourhood_voxel_radius;
+             ++dx) {
+          for (int dy = -anchor_neighbourhood_voxel_radius;
+               dy <= anchor_neighbourhood_voxel_radius;
+               ++dy) {
+            for (int dz = -anchor_neighbourhood_voxel_radius;
+                 dz <= anchor_neighbourhood_voxel_radius;
+                 ++dz) {
+              const auto neighbour = support_voxel_by_key.find(
+                  std::make_tuple(
+                      candidate_x + dx,
+                      candidate_y + dy,
+                      candidate_z + dz));
+              if (neighbour == support_voxel_by_key.end()) {
+                continue;
+              }
+              const auto& neighbour_voxel =
+                  support_voxels[neighbour->second];
+              if ((support_voxels[candidate].center -
+                   neighbour_voxel.center).squaredNorm() <=
+                  anchor_neighbourhood_radius_squared) {
+                support += neighbour_voxel.match_count;
+              }
+            }
+          }
+        }
+        anchor_neighbourhood_support[candidate] = support;
+      }
       while (static_cast<int>(anchor_centers.size()) <
              kMaximumLocalAnchorsPerRevisit) {
         std::size_t best_voxel = support_voxels.size();
+        int best_support = -1;
         float best_separation = -1.0f;
         for (std::size_t voxel = 0;
              voxel < support_voxels.size();
@@ -8302,13 +8396,19 @@ void SuperLIO::saveLoopClosedMap()
                 nearest_center,
                 (support_voxels[voxel].center - center).norm());
           }
-          if (nearest_center > best_separation) {
+          if (nearest_center < minimum_anchor_separation) {
+            continue;
+          }
+          const int support = anchor_neighbourhood_support[voxel];
+          if (support > best_support ||
+              (support == best_support &&
+               nearest_center > best_separation)) {
+            best_support = support;
             best_separation = nearest_center;
             best_voxel = voxel;
           }
         }
-        if (best_voxel >= support_voxels.size() ||
-            best_separation < minimum_anchor_separation) {
+        if (best_voxel >= support_voxels.size()) {
           break;
         }
         anchor_centers.push_back(
@@ -8389,6 +8489,7 @@ void SuperLIO::saveLoopClosedMap()
                   << " seed_translation_mode: "
                   << attempt.seed_translation_mode
                   << " anchor_id: " << anchor
+                  << " anchor_selection: reciprocal_density_nms"
                   << " anchor_xyz: "
                   << anchor_centers[anchor].transpose()
                   << " crop_radius: " << selected_radius
@@ -8607,6 +8708,51 @@ void SuperLIO::saveLoopClosedMap()
             ground_z_only.distributed_valid &&
             ground_z_only_scene_valid &&
             ground_z_only_consistent;
+        V6 planar_companion_measurement = edge.measurement.log_vee();
+        planar_companion_measurement(0) = 0.0f;
+        planar_companion_measurement(1) = 0.0f;
+        planar_companion_measurement(5) = 0.0f;
+        PoseGraphEdge planar_companion_edge = edge;
+        planar_companion_edge.measurement = SE3(planar_companion_measurement);
+        planar_companion_edge.loop = true;
+        planar_companion_edge.ground_z_valid = false;
+        planar_companion_edge.ground_z_planar_hold = false;
+        planar_companion_edge.proactive_ground_z_only = false;
+        planar_companion_edge.proactive_planar_companion = true;
+        planar_companion_edge.prediction_consistent = false;
+        const V3 planar_corrected_anchor =
+            planar_companion_edge.measurement * raw_poses[local_to].t_;
+        const float planar_companion_translation = std::hypot(
+            planar_corrected_anchor.x() - raw_poses[local_to].t_.x(),
+            planar_corrected_anchor.y() - raw_poses[local_to].t_.y());
+        const float planar_companion_yaw_deg =
+            std::abs(planar_companion_measurement(2)) *
+            180.0f / static_cast<float>(M_PI);
+        // A repeated ground patch supplies the independent height evidence,
+        // but a small yaw/XY component must still be justified by the full
+        // local scene.  This gate is deliberately much tighter than the
+        // ordinary soft fallback: no weak overlap, no second residual mode,
+        // and no metre-scale extrapolation beyond a bounded local correction.
+        // The candidate remains provisional until the complete revisit ground
+        // passes the wide two-region check below.
+        constexpr float kGroundAssistedPlanarMinimumOverlap = 0.85f;
+        constexpr float kGroundAssistedPlanarMaximumRmse = 0.16f;
+        constexpr float kGroundAssistedPlanarMaximumTranslation = 1.25f;
+        constexpr float kGroundAssistedPlanarMaximumYawDeg = 1.0f;
+        constexpr int kGroundAssistedPlanarMinimumMatches = 100;
+        const bool planar_companion_valid =
+            ground_z_only_proposal_valid && geometry.main_valid &&
+            graph_consistent && local_support_valid && local_mode_valid &&
+            geometry.symmetric_overlap >=
+                kGroundAssistedPlanarMinimumOverlap &&
+            geometry.symmetric_trimmed_rmse <=
+                kGroundAssistedPlanarMaximumRmse &&
+            static_cast<int>(local_matches.size()) >=
+                kGroundAssistedPlanarMinimumMatches &&
+            planar_companion_translation <=
+                kGroundAssistedPlanarMaximumTranslation &&
+            planar_companion_yaw_deg <=
+                kGroundAssistedPlanarMaximumYawDeg;
         const double selection_cost =
             local_score +
             (1.0 - static_cast<double>(consistency.weight)) +
@@ -8712,6 +8858,14 @@ void SuperLIO::saveLoopClosedMap()
                   << ground_z_only_consistency.weight
                   << " proactive_z_proposal_valid: "
                   << ground_z_only_proposal_valid
+                  << " planar_companion_main_valid: "
+                  << geometry.main_valid
+                  << " planar_companion_translation: "
+                  << planar_companion_translation
+                  << " planar_companion_yaw_deg: "
+                  << planar_companion_yaw_deg
+                  << " planar_companion_valid: "
+                  << planar_companion_valid
                   << " consistency_weight: "
                   << consistency.weight
                   << " selection_cost: " << selection_cost
@@ -8740,6 +8894,12 @@ void SuperLIO::saveLoopClosedMap()
               local_support.support_minor_span;
           proposal.tight_overlap = geometry.symmetric_overlap;
           proposal.tight_rmse = geometry.symmetric_trimmed_rmse;
+          proposal.planar_companion_edge = planar_companion_edge;
+          proposal.planar_companion_translation =
+              planar_companion_translation;
+          proposal.planar_companion_yaw_deg =
+              planar_companion_yaw_deg;
+          proposal.planar_companion_valid = planar_companion_valid;
           proposal.full_ground_footprint = ground_z_only.valid;
           const float pair_quality = std::min(
               1.0f, static_cast<float>(ground_z_only.inlier_count) /
@@ -8781,6 +8941,15 @@ void SuperLIO::saveLoopClosedMap()
                     << ground_z_only_consistency.weight
                     << " raw_weight: "
                     << ground_z_only_proposals.back().raw_weight
+                    << " planar_companion_translation: "
+                    << ground_z_only_proposals.back()
+                           .planar_companion_translation
+                    << " planar_companion_yaw_deg: "
+                    << ground_z_only_proposals.back()
+                           .planar_companion_yaw_deg
+                    << " planar_companion_valid: "
+                    << ground_z_only_proposals.back()
+                           .planar_companion_valid
                     << " full_se3_accepted: false" << RESET;
         }
         if (!local_valid) {
@@ -9081,6 +9250,178 @@ void SuperLIO::saveLoopClosedMap()
         ground_z_only_proposals.push_back(std::move(proposal));
       }
     }
+
+    // A valid narrow pure-Z proposal already proves a local same-place
+    // overlap, even when the full-SE3 fallback is rejected because the scene
+    // has no independent wall/column support.  Verify the *complete* revisit
+    // ground once and promote the observation only if two separated ground
+    // regions reproduce the same scalar Z.  This avoids both failure modes of
+    // enlarging a single crop: its adaptive frame picker can lose the common
+    // footprint, while lowering local support thresholds would admit aliases.
+    const InternalGroundZOnlyProposal* best_narrow_z_proposal = nullptr;
+    if (!best_soft_fallback.has_value()) {
+      for (const auto& proposal : ground_z_only_proposals) {
+        if (proposal.evidence_group_id != revisit.evidence_group_id ||
+            proposal.original_earlier != revisit.earlier ||
+            proposal.original_later != revisit.later ||
+            proposal.full_ground_footprint ||
+            !proposal.evidence.distributed_valid) {
+          continue;
+        }
+        if (!best_narrow_z_proposal ||
+            proposal.raw_weight > best_narrow_z_proposal->raw_weight) {
+          best_narrow_z_proposal = &proposal;
+        }
+      }
+    }
+    if (best_narrow_z_proposal) {
+      const CloudPtr full_source_ground =
+          extract_loop_ground_envelope(
+              revisit_source, raw_poses[revisit.later].t_);
+      const CloudPtr full_target_ground =
+          extract_loop_ground_envelope(
+              revisit_target, raw_poses[revisit.earlier].t_);
+      const GroundZOnlyEvidence full_ground_z_only =
+          estimate_ground_z_only(
+              full_source_ground, full_target_ground);
+      V6 full_ground_z_measurement = V6::Zero();
+      full_ground_z_measurement(5) =
+          full_ground_z_only.z_adjustment;
+      PoseGraphEdge full_ground_z_edge;
+      full_ground_z_edge.from = revisit.earlier;
+      full_ground_z_edge.to = revisit.later;
+      full_ground_z_edge.measurement = SE3(full_ground_z_measurement);
+      full_ground_z_edge.loop = true;
+      full_ground_z_edge.ground_z_valid =
+          full_ground_z_only.wide_valid;
+      full_ground_z_edge.proactive_ground_z_only = true;
+      const LoopConsistency full_ground_z_consistency =
+          evaluate_loop_consistency(
+              full_ground_z_edge, raw_consistency_reference_poses,
+              segment_path_length, raw_poses[revisit.later].t_);
+      constexpr float kNarrowVerifiedWideMinimumOverlap = 0.80f;
+      constexpr float kNarrowVerifiedWideMaximumRmse = 0.15f;
+      constexpr float kNarrowWideMaximumZDifference = 0.12f;
+      const bool same_height_hypothesis =
+          full_ground_z_only.z_adjustment *
+              best_narrow_z_proposal->evidence.z_adjustment > 0.0f &&
+          std::abs(
+              full_ground_z_only.z_adjustment -
+              best_narrow_z_proposal->evidence.z_adjustment) <=
+              kNarrowWideMaximumZDifference;
+      const bool narrow_scene_valid =
+          best_narrow_z_proposal->tight_overlap >=
+              kNarrowVerifiedWideMinimumOverlap &&
+          best_narrow_z_proposal->tight_rmse <=
+              kNarrowVerifiedWideMaximumRmse &&
+          best_narrow_z_proposal->consistency.weight >=
+              std::max(0.80f, g_loop_min_consistency_weight) &&
+          best_narrow_z_proposal->reciprocal_matches >= 80 &&
+          best_narrow_z_proposal->support_voxels >= 12;
+      const bool full_ground_proposal_valid =
+          full_ground_z_only.wide_valid &&
+          same_height_hypothesis && narrow_scene_valid &&
+          full_ground_z_consistency.weight >=
+              std::max(0.80f, g_loop_min_consistency_weight);
+      LOG(INFO) << (full_ground_proposal_valid ? GREEN : YELLOW)
+                << " ---> 中途回环窄锚确认后的完整重访宽地面复核。"
+                << " group_id: " << revisit.evidence_group_id
+                << " original_pair: " << revisit.earlier
+                << " -> " << revisit.later
+                << " narrow_z_adjustment: "
+                << best_narrow_z_proposal->evidence.z_adjustment
+                << " wide_z_adjustment: "
+                << full_ground_z_only.z_adjustment
+                << " z_difference: "
+                << std::abs(
+                       full_ground_z_only.z_adjustment -
+                       best_narrow_z_proposal->evidence.z_adjustment)
+                << " pairs: " << full_ground_z_only.pair_count
+                << " blocks: "
+                << full_ground_z_only.supported_blocks
+                << " ground_span: "
+                << full_ground_z_only.support_span
+                << " ground_minor_span: "
+                << full_ground_z_only.support_minor_span
+                << " independent_regions: "
+                << full_ground_z_only.independent_regions
+                << " region_separation: "
+                << full_ground_z_only.independent_region_separation
+                << " region_z_difference: "
+                << full_ground_z_only.independent_region_z_difference
+                << " tight_overlap: "
+                << best_narrow_z_proposal->tight_overlap
+                << " tight_rmse: "
+                << best_narrow_z_proposal->tight_rmse
+                << " consistency_weight: "
+                << full_ground_z_consistency.weight
+                << " planar_companion_translation: "
+                << best_narrow_z_proposal
+                       ->planar_companion_translation
+                << " planar_companion_yaw_deg: "
+                << best_narrow_z_proposal
+                       ->planar_companion_yaw_deg
+                << " planar_companion_valid: "
+                << best_narrow_z_proposal->planar_companion_valid
+                << " same_height_hypothesis: "
+                << same_height_hypothesis
+                << " scene_valid: " << narrow_scene_valid
+                << " accepted: " << full_ground_proposal_valid
+                << RESET;
+      if (full_ground_proposal_valid) {
+        InternalGroundZOnlyProposal proposal;
+        proposal.edge = full_ground_z_edge;
+        proposal.center = Eigen::Vector3f(
+            full_ground_z_only.support_center_x,
+            full_ground_z_only.support_center_y,
+            0.5f * (raw_poses[revisit.earlier].t_.z() +
+                    raw_poses[revisit.later].t_.z()));
+        proposal.evidence = full_ground_z_only;
+        proposal.consistency = full_ground_z_consistency;
+        proposal.evidence_group_id = revisit.evidence_group_id;
+        proposal.original_earlier = revisit.earlier;
+        proposal.original_later = revisit.later;
+        proposal.seed_translation_mode =
+            best_narrow_z_proposal->seed_translation_mode;
+        proposal.reciprocal_matches =
+            best_narrow_z_proposal->reciprocal_matches;
+        proposal.support_voxels =
+            best_narrow_z_proposal->support_voxels;
+        proposal.support_span =
+            best_narrow_z_proposal->support_span;
+        proposal.support_minor_span =
+            best_narrow_z_proposal->support_minor_span;
+        proposal.tight_overlap =
+            best_narrow_z_proposal->tight_overlap;
+        proposal.tight_rmse = best_narrow_z_proposal->tight_rmse;
+        proposal.planar_companion_edge =
+            best_narrow_z_proposal->planar_companion_edge;
+        proposal.planar_companion_translation =
+            best_narrow_z_proposal->planar_companion_translation;
+        proposal.planar_companion_yaw_deg =
+            best_narrow_z_proposal->planar_companion_yaw_deg;
+        proposal.planar_companion_valid =
+            best_narrow_z_proposal->planar_companion_valid;
+        proposal.full_ground_footprint = true;
+        const float pair_quality = std::min(
+            1.0f, static_cast<float>(full_ground_z_only.inlier_count) /
+                      320.0f);
+        const float block_quality = std::min(
+            1.0f,
+            static_cast<float>(full_ground_z_only.supported_blocks) /
+                24.0f);
+        proposal.raw_weight = 0.75f *
+            full_ground_z_consistency.weight *
+            std::max(0.35f, pair_quality * block_quality);
+        // The planar component shares the same physical observation and is
+        // therefore capped to one quarter of the independently validated Z
+        // information.  It lives in a separate graph group only so graph
+        // safety can remove yaw/XY without weakening the height edge.
+        proposal.planar_companion_edge.weight =
+            0.25f * proposal.raw_weight;
+        ground_z_only_proposals.push_back(std::move(proposal));
+      }
+    }
     if (best_group_results.empty() && best_soft_fallback.has_value()) {
       best_group_results.push_back(*best_soft_fallback);
       best_group_cost = best_soft_fallback_cost;
@@ -9191,6 +9532,9 @@ void SuperLIO::saveLoopClosedMap()
   }
   constexpr float kZOnlyDuplicateCenterDistance = 2.0f;
   constexpr float kZOnlyMinimumAnchorSeparation = 8.0f;
+  const float minimum_single_wide_ground_span = std::max(
+      g_loop_min_verification_span,
+      5.0f * g_loop_verification_block_size);
   constexpr float kZOnlyMaximumVerticalPathRatio = 0.01f;
   // Height drift may change gradually along a long revisit.  A fixed
   // all-anchor Z spread rejects exactly the distributed evidence we need,
@@ -9456,7 +9800,7 @@ void SuperLIO::saveLoopClosedMap()
         consensus.front().evidence.supported_blocks >=
             2 * g_loop_min_verification_blocks &&
         consensus.front().evidence.support_span >=
-            kZOnlyMinimumAnchorSeparation &&
+            minimum_single_wide_ground_span &&
         consensus.front().evidence.support_minor_span >=
             2.0f * g_loop_verification_block_size &&
         consensus.front().tight_overlap >= 0.80f &&
@@ -9490,6 +9834,7 @@ void SuperLIO::saveLoopClosedMap()
         (consensus.size() >= 2 &&
          full_footprint_anchors == static_cast<int>(consensus.size()));
     const bool anchor_span_valid =
+        single_wide_ground_valid ||
         effective_anchor_span >= kZOnlyMinimumAnchorSeparation;
     const int evidence_multiplier = std::max(
         2, std::min(3, static_cast<int>(consensus.size())));
@@ -9536,6 +9881,8 @@ void SuperLIO::saveLoopClosedMap()
               << effective_anchor_span
               << " minimum_anchor_span: "
               << kZOnlyMinimumAnchorSeparation
+              << " minimum_single_wide_ground_span: "
+              << minimum_single_wide_ground_span
               << " single_wide_ground_valid: "
               << single_wide_ground_valid
               << " independent_regions: "
@@ -9653,6 +10000,44 @@ void SuperLIO::saveLoopClosedMap()
                   << " constrained_axes: yaw_xy"
                   << " endpoint_support_eligible: false" << RESET;
       }
+    }
+
+    if (!has_soft_full_edge && single_wide_ground_valid &&
+        !consensus.empty() &&
+        consensus.front().planar_companion_valid) {
+      constexpr int kPlanarCompanionGroupOffset = 1000000;
+      PoseGraphEdge companion =
+          consensus.front().planar_companion_edge;
+      companion.safety_downweight_level = 2;
+      companion.ground_z_valid = false;
+      companion.ground_z_planar_hold = false;
+      companion.proactive_ground_z_only = false;
+      companion.proactive_planar_companion = true;
+      companion.prediction_consistent = false;
+      planar_companion_group_id =
+          kPlanarCompanionGroupOffset + group_id;
+      companion.loop_group_id = planar_companion_group_id;
+      companion.anchor_id = 0;
+      planar_companion = companion;
+      internal_evidence_group_weight_budget[
+          planar_companion_group_id] = companion.weight;
+      accepted_internal_edges.push_back(companion);
+      ++accepted_internal_loops;
+      LOG(INFO) << GREEN
+                << " ---> 宽地面确认后提交受限平面伴随边。source_group_id: "
+                << group_id
+                << " companion_group_id: "
+                << planar_companion_group_id
+                << " from: " << companion.from
+                << " to: " << companion.to
+                << " planar_translation: "
+                << consensus.front().planar_companion_translation
+                << " yaw_deg: "
+                << consensus.front().planar_companion_yaw_deg
+                << " retained_weight: " << companion.weight
+                << " constrained_axes: yaw_xy"
+                << " roll_pitch_z_constrained: false"
+                << " endpoint_support_eligible: false" << RESET;
     }
 
     float raw_weight_square_sum = 0.0f;
@@ -13723,6 +14108,19 @@ void SuperLIO::Observe(){
               << level_slope_recovery_active_
               << " slope_recovery_count=" << level_slope_recovery_count_
               << "/" << g_level_slope_recovery_min_frames
+              << " slope_bounded_lease_path="
+              << level_slope_bounded_lease_path_m_
+              << "/" << g_level_slope_bounded_lease_max_path_m
+              << "m slope_bounded_reentry_blocked="
+              << level_slope_bounded_lease_reentry_blocked_
+              << " slope_bounded_reentry_path="
+              << level_slope_bounded_lease_reentry_path_m_
+              << "/" << g_level_slope_bounded_lease_reentry_path_m
+              << "m slope_bounded_reentry_flat_count="
+              << level_slope_bounded_lease_reentry_flat_count_
+              << "/" << g_level_slope_exit_min_frames
+              << " slope_bounded_expired="
+              << level_slope_bounded_lease_expired_count_
               << " slope_spatial_path="
               << level_slope_spatial_path_m_
               << "/" << g_level_slope_spatial_window_m
@@ -13923,6 +14321,16 @@ void SuperLIO::Observe(){
     const bool recovery_was_active =
         level_slope_recovery_active_;
     const char* slope_transition_reason = "angle_hysteresis";
+    double committed_horizontal_step = 0.0;
+    if (has_last_accepted_pose_) {
+      const V3 committed_frame_delta = current_pose.t_ - last_pose_.t_;
+      committed_horizontal_step =
+          static_cast<double>(committed_frame_delta.head<2>().norm());
+      if (!std::isfinite(committed_horizontal_step) ||
+          committed_horizontal_step < 1.0e-4) {
+        committed_horizontal_step = 0.0;
+      }
+    }
     if (level_observation.plane_valid) {
       level_slope_pending_invalid_count_ = 0;
       if (level_slope_protection_active_) {
@@ -13955,6 +14363,7 @@ void SuperLIO::Observe(){
           }
         }
         if (level_observation.slope_enter_evidence &&
+            !level_slope_bounded_lease_reentry_blocked_ &&
             !level_slope_spatial_reentry_blocked_) {
           level_slope_enter_count_ = std::min(
               level_slope_enter_count_ + 1,
@@ -13989,6 +14398,78 @@ void SuperLIO::Observe(){
       }
     }
 
+    // The angular latch is only a short bridge over intermittent missing or
+    // noisy ground planes.  It must never become a long-lived explanation for
+    // drift.  This lease uses horizontal travel only: estimated Z, pose grade
+    // and plane-predicted height are deliberately absent, so a drifting state
+    // cannot validate itself.  Once the lease expires, the instantaneous
+    // dual-angle gate still protects every independently observed ramp frame.
+    bool bounded_lease_expired_this_frame = false;
+    if (g_level_slope_bounded_lease_enable) {
+      if (!protection_was_active && level_slope_protection_active_) {
+        level_slope_bounded_lease_path_m_ = 0.0;
+      } else if (protection_was_active &&
+                 level_slope_protection_active_) {
+        level_slope_bounded_lease_path_m_ += committed_horizontal_step;
+      }
+
+      if (level_slope_protection_active_ &&
+          level_slope_bounded_lease_path_m_ >=
+              g_level_slope_bounded_lease_max_path_m) {
+        level_slope_protection_active_ = false;
+        level_slope_enter_count_ = 0;
+        level_slope_exit_count_ = 0;
+        level_slope_pending_invalid_count_ = 0;
+        level_slope_recovery_active_ = true;
+        level_slope_recovery_count_ = 0;
+        level_slope_bounded_lease_reentry_blocked_ = true;
+        level_slope_bounded_lease_reentry_path_m_ = 0.0;
+        level_slope_bounded_lease_reentry_flat_count_ = 0;
+        ++level_slope_bounded_lease_expired_count_;
+        bounded_lease_expired_this_frame = true;
+        slope_transition_reason = "bounded_horizontal_lease_expired";
+      }
+
+      if (level_slope_bounded_lease_reentry_blocked_ &&
+          !level_slope_protection_active_ &&
+          !bounded_lease_expired_this_frame) {
+        level_slope_bounded_lease_reentry_path_m_ +=
+            committed_horizontal_step;
+        if (level_observation.plane_valid &&
+            level_observation.slope_exit_evidence) {
+          level_slope_bounded_lease_reentry_flat_count_ = std::min(
+              level_slope_bounded_lease_reentry_flat_count_ + 1,
+              g_level_slope_exit_min_frames);
+        } else {
+          // Re-arming a long-lived latch needs a genuinely continuous flat
+          // segment. Missing or contradictory planes pause all constraints
+          // safely, but they are not independent proof that the slope ended.
+          level_slope_bounded_lease_reentry_flat_count_ = 0;
+        }
+        if (level_slope_bounded_lease_reentry_path_m_ >=
+                g_level_slope_bounded_lease_reentry_path_m &&
+            level_slope_bounded_lease_reentry_flat_count_ >=
+                g_level_slope_exit_min_frames) {
+          level_slope_bounded_lease_reentry_blocked_ = false;
+          level_slope_bounded_lease_reentry_path_m_ = 0.0;
+          level_slope_bounded_lease_reentry_flat_count_ = 0;
+          LOG(INFO) << GREEN
+                    << " ---> [SuperLIO]: bounded level slope lease re-entry "
+                    << "enabled after at least "
+                    << g_level_slope_bounded_lease_reentry_path_m
+                    << "m horizontal cooldown and "
+                    << g_level_slope_exit_min_frames
+                    << " consecutive confirmed flat planes. committed_scan="
+                    << processed_scan_index_ << RESET;
+        }
+      }
+
+      if (!level_slope_protection_active_ &&
+          !level_slope_bounded_lease_reentry_blocked_) {
+        level_slope_bounded_lease_path_m_ = 0.0;
+      }
+    }
+
     const auto clear_spatial_window = [&] (const bool clear_mismatch) {
       level_slope_spatial_path_m_ = 0.0;
       level_slope_spatial_supported_path_m_ = 0.0;
@@ -13999,16 +14480,18 @@ void SuperLIO::Observe(){
       }
     };
 
-    if (!protection_was_active && level_slope_protection_active_) {
+    if (g_level_slope_spatial_enable &&
+        !protection_was_active && level_slope_protection_active_) {
       // Do not charge the displacement preceding the latch to its first lease.
       clear_spatial_window(true);
-    } else if (((protection_was_active &&
+    } else if (g_level_slope_spatial_enable &&
+               ((protection_was_active &&
                  level_slope_protection_active_) ||
                 (!level_slope_protection_active_ &&
                  level_slope_spatial_reentry_blocked_)) &&
                has_last_accepted_pose_) {
       const V3 frame_delta = current_pose.t_ - last_pose_.t_;
-      const double horizontal_step = frame_delta.head<2>().norm();
+      const double horizontal_step = committed_horizontal_step;
       if (std::isfinite(horizontal_step) && horizontal_step > 1.0e-4) {
         level_slope_spatial_path_m_ += horizontal_step;
         if (level_observation.plane_valid) {
@@ -14138,7 +14621,8 @@ void SuperLIO::Observe(){
       }
     }
 
-    if (protection_was_active && !level_slope_protection_active_) {
+    if (g_level_slope_spatial_enable && protection_was_active &&
+        !level_slope_protection_active_) {
       clear_spatial_window(true);
     }
     if (level_slope_protection_active_ != protection_was_active) {
@@ -14154,7 +14638,18 @@ void SuperLIO::Observe(){
                    << g_level_max_plane_gravity_angle_deg
                    << "deg exit_threshold="
                    << g_level_slope_exit_angle_deg
-                   << "deg spatial_window="
+                   << "deg bounded_lease_path="
+                   << level_slope_bounded_lease_path_m_
+                   << "/" << g_level_slope_bounded_lease_max_path_m
+                   << "m bounded_reentry_blocked="
+                   << level_slope_bounded_lease_reentry_blocked_
+                   << " bounded_reentry_path="
+                   << level_slope_bounded_lease_reentry_path_m_
+                   << "/" << g_level_slope_bounded_lease_reentry_path_m
+                   << "m bounded_reentry_flat_count="
+                   << level_slope_bounded_lease_reentry_flat_count_
+                   << "/" << g_level_slope_exit_min_frames
+                   << " spatial_window="
                    << g_level_slope_spatial_window_m
                    << "m spatial_reentry_blocked="
                    << level_slope_spatial_reentry_blocked_

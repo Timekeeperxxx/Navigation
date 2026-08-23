@@ -171,6 +171,10 @@ namespace LI2Sup{
   extern int g_level_slope_exit_min_frames;
   extern int g_level_slope_pending_max_invalid_frames;
   extern int g_level_slope_recovery_min_frames;
+  extern bool g_level_slope_bounded_lease_enable;
+  extern double g_level_slope_bounded_lease_max_path_m;
+  extern double g_level_slope_bounded_lease_reentry_path_m;
+  extern bool g_level_slope_spatial_enable;
   extern double g_level_slope_spatial_window_m;
   extern double g_level_slope_spatial_min_support_ratio;
   extern double g_level_slope_spatial_max_grade_error_deg;

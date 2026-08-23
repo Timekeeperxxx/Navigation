@@ -414,6 +414,10 @@ footprint_src="$(
 [ -n "$footprint_src" ] && [ -s "$footprint_src" ]
 cp -f "$ground_src" "$SCENE_DIR/ground.pcd"
 cp -f "$footprint_src" "$SCENE_DIR/footprint.pcd"
+# BotDog 场景扫描按文件名后缀 `footprint_fill.pcd` 识别足迹填充层。
+# `footprint.pcd` 保留给现有 ROS/调试工具；两者内容相同，但规范名称
+# 不能省略，否则前端会把场景显示为“缺少足迹填充”。
+cp -f "$footprint_src" "$SCENE_DIR/footprint_fill.pcd"
 
 if [ "$INPUT_QUALITY_WARNING" -ne 0 ]; then
   cat >"$SCENE_DIR/offline_validation_warning.txt" <<EOF
@@ -435,4 +439,5 @@ echo "离线建图完成: validation_warning=$INPUT_QUALITY_WARNING received_lid
 stat -c '%n %s bytes' \
   "$SCENE_DIR/map.pcd" \
   "$SCENE_DIR/ground.pcd" \
-  "$SCENE_DIR/footprint.pcd"
+  "$SCENE_DIR/footprint.pcd" \
+  "$SCENE_DIR/footprint_fill.pcd"

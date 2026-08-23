@@ -225,6 +225,17 @@
     # After leaving a ramp, restore the strong flat-ground prior over three
     # committed valid planes (1/3, 2/3, 1) instead of in one attitude step.
     lio.kf.level_constraint.slope_recovery_min_frames: 3
+    # The slope latch is only a short bridge across intermittent missing plane
+    # observations. It is never allowed to disable flat-ground stabilization
+    # for an unlimited route: after 5 m of committed horizontal travel it is
+    # released, then cannot latch again until both 15 m have elapsed and ten
+    # consecutive high-quality planes confirm flat ground. The per-frame
+    # dual-angle gate remains active while re-entry is blocked, so a measured
+    # real ramp is still protected without using estimated dz as circular
+    # evidence.
+    lio.kf.level_constraint.slope_bounded_lease_enable: true
+    lio.kf.level_constraint.slope_bounded_lease_max_path_m: 5.0
+    lio.kf.level_constraint.slope_bounded_lease_reentry_path_m: 15.0
     # A latched ramp is a spatial lease, not an unlimited time latch. Over
     # every 5 m of committed horizontal travel, compare the measured height
     # change with the height change predicted by the observed ground plane.
@@ -232,6 +243,10 @@
     # two consistent spatial windows are required before the long-lived latch
     # may be armed again, preventing a bad plane from immediately re-latching.
     # The per-frame dual-angle gate still protects a real ramp in the meantime.
+    # Experimental: this compares estimated trajectory dz with the plane
+    # prediction, so it is not an independent drift detector. Keep it disabled
+    # until the circular evidence is replaced by a ground-segment constraint.
+    lio.kf.level_constraint.slope_spatial_enable: false
     lio.kf.level_constraint.slope_spatial_window_m: 5.0
     lio.kf.level_constraint.slope_spatial_min_support_ratio: 0.40
     lio.kf.level_constraint.slope_spatial_max_grade_error_deg: 0.75

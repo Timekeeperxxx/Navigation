@@ -142,6 +142,10 @@ namespace LI2Sup{
   int g_level_slope_exit_min_frames = 10;
   int g_level_slope_pending_max_invalid_frames = 2;
   int g_level_slope_recovery_min_frames = 3;
+  bool g_level_slope_bounded_lease_enable = true;
+  double g_level_slope_bounded_lease_max_path_m = 5.0;
+  double g_level_slope_bounded_lease_reentry_path_m = 15.0;
+  bool g_level_slope_spatial_enable = false;
   double g_level_slope_spatial_window_m = 5.0;
   double g_level_slope_spatial_min_support_ratio = 0.40;
   double g_level_slope_spatial_max_grade_error_deg = 0.75;
